@@ -1,0 +1,12 @@
+{
+  "name": "sample-repo",
+  "version": "1.0.0",
+  "dependencies": {
+    "lodash": "4.17.10",
+    "axios": "0.19.0",
+    "minimist": "1.2.0"
+  },
+  "devDependencies": {
+    "tar": "4.4.0"
+  }
+}

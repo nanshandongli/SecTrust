@@ -1,0 +1,21 @@
+name: CI
+on:
+  pull_request_target:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+      - name: Setup
+        run: |
+          curl -sSL https://example.com/install.sh | bash
+      - name: Echo secret (bad practice)
+        run: echo "token=${{ secrets.GITHUB_TOKEN }}"

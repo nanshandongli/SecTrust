@@ -1,0 +1,48 @@
+# sdist 打包清单（wheel 由 [tool.setuptools.package-data] 负责）
+# —— 原则：能装上就能跑的进包；仅开发/仓库用的（测试、示例、本地数据）不进包。
+
+# ---- 根级元数据 ----
+include README.md
+include CHANGELOG.md
+include LICENSE
+include DESIGN.md
+include SECURITY.md
+include PRODUCT_SUMMARY.md
+include OAuth_ROADMAP.md
+include mcpserver.json
+include .env.example
+include pyproject.toml
+
+# ---- 必需的数据文件（装包后必须可用）----
+# MCP 服务器元数据（工具清单 / 协议版本 / 能力声明）——MCP Registry 收录必需
+# 包内副本（packaging/）随 wheel 分发；仓库根副本供开发态与 Registry 直接引用
+include mcpserver.json
+recursive-include release_meta *.json
+# 公开基准语料（gitleaks 官方向量，供 scan_bench --corpus 离线校验）
+recursive-include data/bench_corpus *.json *.go *.env *.txt
+# 扫描模板（内置模板 + 落地脚本）
+recursive-include templates *.json *.py
+# Agent Skills 内置技能库（SKILL.md 等，渐进式加载用）
+recursive-include agentskills/library *.md *.yaml *.json
+# 内置技能（本地技能源）
+recursive-include skills/builtin *.md
+
+# ---- 排除：开发期与运行时产物 ----
+# 测试不进包（体积大、且依赖仓库根路径）
+prune tests
+prune examples
+prune .workbuddy
+prune .git
+# 本地数据库与缓存（运行时生成，不应随包分发）
+global-exclude *.db
+global-exclude *.db-shm
+global-exclude *.db-wal
+global-exclude *.pyc
+global-exclude *.pyo
+global-exclude __pycache__/*
+prune **/__pycache__
+# 技能缓存与构建产物
+prune .skill_cache
+prune build
+prune dist
+prune *.egg-info

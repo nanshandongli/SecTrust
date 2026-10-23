@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "sectrust": {
+      "command": "python",
+      "args": ["mcp_server.py"],
+      "env": {
+        "DB_PATH": "data/task_registry.db",
+        "MEMORY_DB_PATH": "data/memory.db"
+      },
+      "description": "任务登记处 / 审批中心 / 合规扫描 / 长期记忆（16 个 MCP 工具，HITL + 沙箱双闸门）"
+    }
+  }
+}

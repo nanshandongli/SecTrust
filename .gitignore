@@ -1,0 +1,33 @@
+# 密钥与本地配置（绝不提交）
+.env
+.env.local
+
+# 运行时生成的数据与沙箱
+data/
+.sandbox/
+.scan_jail/
+.skill_cache/
+# 模板脚本落盘（由 templates/builtin.py 自动生成）
+templates/_scripts/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# 编辑器/系统
+.vscode/
+.idea/
+.DS_Store
+
+# Agent 工作记忆（内部数据，绝不公开）
+.workbuddy/
+
+# 构建产物与本地环境
+dist_build/
+.venv*/
+build/
+
+# 自检生成的报告（可用 tools/self_audit.py 复现）
+SELF_AUDIT_REPORT.json

@@ -1,0 +1,8 @@
+service:
+  name: sample-service
+  port: 8080
+  # TODO: 接入配置中心，避免本地文件
+  debug: true
+database:
+  # FIXME: 密码不应写在仓库里
+  password: "localdev_only"

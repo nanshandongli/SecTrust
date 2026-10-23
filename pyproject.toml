@@ -1,0 +1,113 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sectrust"
+version = "0.8.0"
+description = "SecTrust - auditable, always-on, multi-model AI colleague platform: cross-process task registry + DAG orchestration + HITL approvals + sandbox + compliance scanning + long-term memory, exposed as a zero-dependency MCP server."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "AGPL-3.0-only" }
+authors = [{ name = "AI Colleague Contributors" }]
+keywords = [
+    "agent", "mcp", "security", "sandbox", "approval", "secret-scan", "memory",
+    "sqlite", "orchestration", "dag", "hitl", "multi-agent",
+]
+classifiers = [
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries",
+]
+
+# 核心依赖：零。所有重依赖均为可选 extras。
+dependencies = []
+
+[project.optional-dependencies]
+# 分布式消息队列（跨机任务分发）
+mq = ["redis>=5.0"]
+# 深度 SAST（AST 级扫描，规则量远超正则）
+scan = ["semgrep"]
+# 记忆增强（真 embedding / Mem0 托管；默认走内置哈希索引，不装也能用）
+memory = ["mem0ai", "sentence-transformers"]
+# 可观测性（OTel 分布式追踪 + OTLP 导出）
+observability = ["opentelemetry-sdk", "opentelemetry-exporter-otlp"]
+# 加解密加速（可选；不装则用内置纯 Python AES，行为一致）
+crypto = ["pycryptodome"]
+# 飞书/企业微信 SDK（可选；本项目已用标准库 urllib 直连官方 API，无需此依赖）
+channels = []
+# 全部可选能力
+all = [
+    "redis>=5.0", "semgrep", "mem0ai", "sentence-transformers",
+    "opentelemetry-sdk", "opentelemetry-exporter-otlp", "pycryptodome",
+]
+
+[project.scripts]
+sectrust-api = "api.app:main"
+sectrust-runner = "runner:main"
+sectrust-mcp = "mcp_server:main"
+ai-colleague-web = "task_center_web:main"
+ai-colleague-daemon = "runner_daemon:main"
+
+[project.urls]
+Homepage = "https://github.com/your-org/ai-colleague-registry"
+Documentation = "https://github.com/your-org/ai-colleague-registry#readme"
+Repository = "https://github.com/your-org/ai-colleague-registry"
+Issues = "https://github.com/your-org/ai-colleague-registry/issues"
+Changelog = "https://github.com/your-org/ai-colleague-registry/blob/main/CHANGELOG.md"
+
+# ---------------------------------------------------------------- 打包内容
+[tool.setuptools]
+# 根级单文件模块（全部是公开入口或被包内 import）
+py-modules = [
+    "approval",
+    "arbiter",
+    "assets",
+    "ballot",
+    "config",
+    "demo",
+    "mcp_server",
+    "mem0_adapter",
+    "memory",
+    "memory_hybrid",
+    "memory_semantic",
+    "orchestration",
+    "planner",
+    "runner",
+    "runner_daemon",
+    "task_center_web",
+    "task_registry",
+]
+# 子包（含 __init__.py 的全部目录）
+packages = [
+    "agentskills",
+    "api",
+    "channels",
+    "games",
+    "models",
+    "release_meta",
+    "sandbox",
+    "scanner",
+    "skills",
+    "templates",
+    "tools",
+    "transport",
+]
+
+[tool.setuptools.package-data]
+# 扫描模板的落地脚本（模板执行时按名读取）
+templates = ["_scripts/*.py", "builtin/*.json", "*.json"]
+# Agent Skills 渐进式加载的内置技能库（SKILL.md 等）
+agentskills = ["library/*/*.md", "library/*/*.yaml", "library/*/*.json"]
+# MCP 服务器元数据（MCP Registry 收录必需：工具清单 / 协议版本 / 能力声明）
+release_meta = ["mcpserver.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
