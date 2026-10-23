@@ -57,11 +57,11 @@ ai-colleague-web = "task_center_web:main"
 ai-colleague-daemon = "runner_daemon:main"
 
 [project.urls]
-Homepage = "https://github.com/your-org/ai-colleague-registry"
-Documentation = "https://github.com/your-org/ai-colleague-registry#readme"
-Repository = "https://github.com/your-org/ai-colleague-registry"
-Issues = "https://github.com/your-org/ai-colleague-registry/issues"
-Changelog = "https://github.com/your-org/ai-colleague-registry/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/nanshandongli/SecTrust"
+Documentation = "https://github.com/nanshandongli/SecTrust#readme"
+Repository = "https://github.com/nanshandongli/SecTrust"
+Issues = "https://github.com/nanshandongli/SecTrust/issues"
+Changelog = "https://github.com/nanshandongli/SecTrust/blob/main/CHANGELOG.md"
 
 # ---------------------------------------------------------------- 打包内容
 [tool.setuptools]

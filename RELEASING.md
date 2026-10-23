@@ -39,7 +39,7 @@ python -m venv .venv_check && .venv_check/Scripts/pip install dist_build/*.whl
 |----|------|--------|
 | PyPI 账号 | 注册 https://pypi.org/ | 你 |
 | API Token | 项目级 scoped token，**不要用账号密码** | PyPI → Account → API tokens |
-| 仓库 URL | `pyproject.toml` 里现在是 `your-org/your-org` 占位，**发布前必须改成真实仓库** | 你 |
+| 仓库 URL | ✅ 已填真实仓库 `nanshandongli/SecTrust` | 已完成 |
 | 打包工具 | `pip install build twine` | PyPI |
 
 ### 2.2 发布前必改项
@@ -47,9 +47,7 @@ python -m venv .venv_check && .venv_check/Scripts/pip install dist_build/*.whl
 ```toml
 # pyproject.toml
 [project.urls]
-Homepage = "https://github.com/<你的组织>/SecTrust"   # ← 改
-Repository = "https://github.com/<你的组织>/SecTrust" # ← 改
-Issues = "https://github.com/<你的组织>/SecTrust/issues" # ← 改
+# ✅ 已填真实仓库地址（nanshandongli/SecTrust），无需再改
 ```
 
 同时 `mcpserver.json` 里的 `homepage` / `repository` / `publisher` 也要一并对齐
@@ -130,8 +128,8 @@ GitHub Actions YAML 生成能力，可参考其风格。
   原因：需要你的 PyPI API Token 与仓库/Registry 权限，不在本机环境中。
 - ❌ **未验证**：发布后的真实下载安装、Registry 收录后的客户端拉取。
   本地已验证 wheel 安装与运行，但"从 PyPI 下载"这条链路只有真正发布后才能测。
-- ⚠️ **占位待改**：`pyproject.toml` 与 `mcpserver.json` 里的 `your-org` 仓库地址
-  是占位符，发布前必须替换。
+- ✅ **已替换**：`pyproject.toml` 与 `mcpserver.json` 里的仓库地址已改为
+  `nanshandongli/SecTrust`。
 
 ---
 

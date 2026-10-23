@@ -15,7 +15,7 @@
 零依赖（纯 Python 标准库），Python ≥ 3.10 即可，无需 `pip install`：
 
 ```bash
-git clone https://github.com/your-org/SecTrust.git
+git clone https://github.com/nanshandongli/SecTrust.git
 cd SecTrust
 
 python demo.py                                   # ① 核心契约自测（含真·跨进程并发）

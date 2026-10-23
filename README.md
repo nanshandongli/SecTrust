@@ -36,7 +36,7 @@ Most multi-agent frameworks give you *coordination* and hope for the best. SecTr
 Zero dependencies (pure Python stdlib). Python ≥ 3.10, no `pip install` needed:
 
 ```bash
-git clone https://github.com/your-org/SecTrust.git
+git clone https://github.com/nanshandongli/SecTrust.git
 cd SecTrust
 
 python demo.py                                        # ① core contract self-test (real cross-process concurrency)

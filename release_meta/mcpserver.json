@@ -4,8 +4,8 @@
   "description": "可审计、可常驻、多模型、多渠道的 AI 同事执行平台 MCP Server：暴露任务登记处、审批中心、深度合规扫描（78 条检测器 + 熵引擎 + SARIF）、混合检索长期记忆、SKILL.md 技能库与证据门禁为标准工具，天然可审计（HITL 默认拒绝 + 沙箱隔离）。",
   "publisher": "sectrust-contributors",
   "license": "AGPL-3.0-only",
-  "homepage": "https://github.com/your-org/SecTrust",
-  "repository": "https://github.com/your-org/SecTrust",
+  "homepage": "https://github.com/nanshandongli/SecTrust",
+  "repository": "https://github.com/nanshandongli/SecTrust",
   "keywords": [
     "agent",
     "security",
