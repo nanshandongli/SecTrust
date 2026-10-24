@@ -26,6 +26,7 @@ __pycache__/
 
 # 构建产物与本地环境
 dist_build/
+dist/
 .venv*/
 build/
 

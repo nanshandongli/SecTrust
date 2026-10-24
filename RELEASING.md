@@ -124,10 +124,12 @@ GitHub Actions YAML 生成能力，可参考其风格。
 - ✅ **已完成**：全部发布物料（pyproject / MANIFEST.in / LICENSE / CHANGELOG /
   mcpserver.json + 包内副本）、构建产物实测可装可用、16 项自动校验、
   版本一致性有测试兜底。
-- ❌ **未完成**：**实际发布动作**（`twine upload` 与 Registry 提交）。
-  原因：需要你的 PyPI API Token 与仓库/Registry 权限，不在本机环境中。
-- ❌ **未验证**：发布后的真实下载安装、Registry 收录后的客户端拉取。
-  本地已验证 wheel 安装与运行，但"从 PyPI 下载"这条链路只有真正发布后才能测。
+- ✅ **已发布**：`twine upload` 已成功（2026-10-24），`sectrust` 0.8.0 上线
+  PyPI：https://pypi.org/project/sectrust/0.8.0/。用户现已可 `pip install sectrust`。
+  - 发布用隔离 venv：`C:\Users\Administrator\.workbuddy\binaries\python\envs\default`
+    （装了 build + twine，重发只需 `python -m build && TWINE_USERNAME=__token__ TWINE_PASSWORD=<token> twine upload dist/*`）。
+  - ⚠️ 安全：API Token 仅在发布命令里以环境变量传入，未落盘任何文件；
+    如怀疑泄漏，到 PyPI 账户设置撤销该 token 即可。
 - ✅ **已替换**：`pyproject.toml` 与 `mcpserver.json` 里的仓库地址已改为
   `nanshandongli/SecTrust`。
 

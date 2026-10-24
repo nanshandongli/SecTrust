@@ -33,7 +33,16 @@ Most multi-agent frameworks give you *coordination* and hope for the best. SecTr
 
 ## Quickstart
 
-Zero dependencies (pure Python stdlib). Python ≥ 3.10, no `pip install` needed:
+Zero dependencies (pure Python stdlib). Python ≥ 3.10.
+
+**Install from PyPI:**
+
+```bash
+pip install sectrust
+sectrust-mcp --help                                   # 36 MCP tools over stdio
+```
+
+**Or run straight from source (no install needed):**
 
 ```bash
 git clone https://github.com/nanshandongli/SecTrust.git
