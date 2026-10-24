@@ -27,6 +27,8 @@ import json
 import os
 import sqlite3
 import sys
+import threading
+import weakref
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -45,6 +47,14 @@ AUTO_STRATEGIES = ("recency", "source_priority", "evidence")
 DEFAULT_SOURCE_PRIORITY = ("official_api", "research", "analytics", "estimate")
 
 
+def _safe_close(conn) -> None:
+    """finalize 回调：关连接；已关过或句柄失效都静默通过。"""
+    try:
+        conn.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class ArbiterError(ValueError):
     pass
 
@@ -57,6 +67,7 @@ class Arbiter:
         self.db_path = db_path
         self.source_priority = tuple(source_priority or DEFAULT_SOURCE_PRIORITY)
         self.broker = broker if broker is not None else self._default_broker()
+        self._local = threading.local()
         d = os.path.dirname(db_path)
         if d:
             os.makedirs(d, exist_ok=True)
@@ -70,9 +81,27 @@ class Arbiter:
         except Exception:
             return None
 
+    def close(self):
+        """关闭本线程的连接（`with self._conn()` 是事务上下文，不关连接）。"""
+        c = getattr(self._local, "conn", None)
+        if c is not None:
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._local.conn = None
+
     def _conn(self):
-        c = sqlite3.connect(self.db_path, timeout=30)
-        c.execute("PRAGMA journal_mode=WAL")
+        # thread-local 缓存：`with conn` 只提供事务语义（commit/rollback），
+        # 不关闭连接——不缓存的话每次调用泄漏一个 sqlite3.Connection。
+        c = getattr(self._local, "conn", None)
+        if c is None:
+            c = sqlite3.connect(self.db_path, timeout=30)
+            c.execute("PRAGMA journal_mode=WAL")
+            self._local.conn = c
+            # 实例被回收时显式关连接：否则连接靠 GC 释放，
+            # 解释器退出时会刷一屏 ResourceWarning（unclosed database）。
+            weakref.finalize(self, _safe_close, c)
         return c
 
     def _ensure_schema(self):

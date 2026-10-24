@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
+import weakref
 import time
 
 try:
@@ -34,27 +36,55 @@ except ImportError:  # 直接 `python games/xiangqi_table.py` 运行时
     import xiangqi_core as X
 
 
+def _safe_close(conn) -> None:
+    """finalize 回调：关连接；已关过或句柄失效都静默通过。"""
+    try:
+        conn.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class GameTable:
     def __init__(self, db_path: str = "data/xiangqi.db", broker: Broker | None = None):
         # 规范化为绝对/真实路径：避免不同进程拿到 "ADMINI~1" 这类 8.3 短名或相对路径，
         # 导致"同一文件"被当成两个文件（跨进程读不到对方写入）。
         self.db_path = os.path.realpath(db_path)
         self.broker = broker
+        self._local = threading.local()
         d = os.path.dirname(self.db_path)
         if d:
             os.makedirs(d, exist_ok=True)
-        self._connect().close()
+        self.close()   # 预检建连能力；close() 会清掉 thread-local 缓存
         self._ensure_schema()
 
+    def close(self):
+        """关闭本线程的连接（`with self._connect()` 是事务上下文，不关连接）。"""
+        c = getattr(self._local, "conn", None)
+        if c is not None:
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._local.conn = None
+
     def _connect(self):
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        # 注：本原型要支持两个独立进程高频读写同一文件，Windows 下 WAL 的跨进程
-        # 读偶有可见性问题；改用默认 DELETE 日志 + 较高 busy_timeout，SQLite 靠锁
-        # 串行化写（恰与"同一时刻只有轮到的一方在写"一致），跨进程读稳定。
-        conn.execute("PRAGMA journal_mode=DELETE")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=30000")
-        return conn
+        # thread-local 缓存：`with conn` 只提供事务语义（commit/rollback），
+        # 不关闭连接——不缓存的话每次调用泄漏一个 sqlite3.Connection。
+        c = getattr(self._local, "conn", None)
+        if c is None:
+            conn = sqlite3.connect(self.db_path, timeout=30)
+            # 注：本原型要支持两个独立进程高频读写同一文件，Windows 下 WAL 的跨进程
+            # 读偶有可见性问题；改用默认 DELETE 日志 + 较高 busy_timeout，SQLite 靠锁
+            # 串行化写（恰与"同一时刻只有轮到的一方在写"一致），跨进程读稳定。
+            conn.execute("PRAGMA journal_mode=DELETE")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=30000")
+            c = conn
+            self._local.conn = c
+            # 实例被回收时显式关连接：否则连接靠 GC 释放，
+            # 解释器退出时会刷一屏 ResourceWarning（unclosed database）。
+            weakref.finalize(self, _safe_close, c)
+        return c
 
     def _ensure_schema(self):
         with self._connect() as conn:

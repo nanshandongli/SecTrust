@@ -219,25 +219,29 @@ class EvidenceGate:
         c = self._conn()
         if not c:
             return
-        with c:
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS evidence (
-                    evidence_id   TEXT PRIMARY KEY,
-                    task_id       TEXT NOT NULL DEFAULT '',
-                    claim         TEXT NOT NULL DEFAULT '',
-                    command       TEXT NOT NULL,
-                    exit_code     INTEGER,
-                    stdout_sha256 TEXT,
-                    stdout_head   TEXT,
-                    ran_at        REAL,
-                    accepted      INTEGER NOT NULL,
-                    reasons       TEXT,
-                    created_at    REAL
+        try:
+            with c:
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS evidence (
+                        evidence_id   TEXT PRIMARY KEY,
+                        task_id       TEXT NOT NULL DEFAULT '',
+                        claim         TEXT NOT NULL DEFAULT '',
+                        command       TEXT NOT NULL,
+                        exit_code     INTEGER,
+                        stdout_sha256 TEXT,
+                        stdout_head   TEXT,
+                        ran_at        REAL,
+                        accepted      INTEGER NOT NULL,
+                        reasons       TEXT,
+                        created_at    REAL
                 )
             """)
-            c.execute("CREATE INDEX IF NOT EXISTS idx_evidence_task "
-                      "ON evidence(task_id)")
-        c.close()
+                c.execute("CREATE INDEX IF NOT EXISTS idx_evidence_task "
+                          "ON evidence(task_id)")
+        finally:
+            # `with c` 是事务上下文，不关连接——显式 close，否则每次
+            # 实例化泄漏一个 sqlite3.Connection。
+            c.close()
 
     def record(self, ev: Evidence, v: Verdict) -> str:
         c = self._conn()

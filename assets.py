@@ -30,6 +30,8 @@ import json
 import os
 import sqlite3
 import sys
+import threading
+import weakref
 import time
 from typing import Optional
 
@@ -42,6 +44,14 @@ DEFAULT_MAX_FILE_BYTES = 64 * 1024 * 1024    # 单文件上限 64 MiB
 
 # 常见素材类型（不强制校验，仅作筛选维度）
 KINDS = ("image", "video", "audio", "document", "archive", "file")
+
+
+def _safe_close(conn) -> None:
+    """finalize 回调：关连接；已关过或句柄失效都静默通过。"""
+    try:
+        conn.close()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 class AssetError(ValueError):
@@ -66,15 +76,34 @@ class AssetStore:
         self.db_path = db_path
         self.max_bytes = max_bytes            # 总额度（活素材字节总和上限）
         self.max_file_bytes = max_file_bytes  # 单文件上限
+        self._local = threading.local()
         os.makedirs(root, exist_ok=True)
         d = os.path.dirname(db_path)
         if d:
             os.makedirs(d, exist_ok=True)
         self._ensure_schema()
 
+    def close(self):
+        """关闭本线程的连接（`with self._conn()` 是事务上下文，不关连接）。"""
+        c = getattr(self._local, "conn", None)
+        if c is not None:
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._local.conn = None
+
     def _conn(self):
-        c = sqlite3.connect(self.db_path, timeout=30)
-        c.execute("PRAGMA journal_mode=WAL")
+        # thread-local 缓存：`with conn` 只提供事务语义（commit/rollback），
+        # 不关闭连接——不缓存的话每次调用泄漏一个 sqlite3.Connection。
+        c = getattr(self._local, "conn", None)
+        if c is None:
+            c = sqlite3.connect(self.db_path, timeout=30)
+            c.execute("PRAGMA journal_mode=WAL")
+            self._local.conn = c
+            # 实例被回收时显式关连接：否则连接靠 GC 释放，
+            # 解释器退出时会刷一屏 ResourceWarning（unclosed database）。
+            weakref.finalize(self, _safe_close, c)
         return c
 
     def _ensure_schema(self):

@@ -210,9 +210,14 @@ class TestGameTable(unittest.TestCase):
         self.t.accept("g1")
 
     def _set_board(self, board):
-        with sqlite3.connect(self.db) as conn:
+        # 注意：`with sqlite3.connect()` 是事务上下文，不关连接——显式 close。
+        conn = sqlite3.connect(self.db)
+        try:
             conn.execute("UPDATE games SET board=? WHERE id='g1'",
                          (json.dumps(X.board_to_json(board)),))
+            conn.commit()
+        finally:
+            conn.close()
 
     def test_propose_cas(self):
         self.assertFalse(self.t.propose("g1"))       # 同 id 不可重复约局
@@ -284,10 +289,14 @@ class TestGameTable(unittest.TestCase):
 
     def test_max_plies_draw(self):
         # 把 history 伪造成 299 步，再走一步即触顶步数上限
-        with sqlite3.connect(self.db) as conn:
+        conn = sqlite3.connect(self.db)
+        try:
             fake = [{"by": "r", "move": [0, 0, 1, 0], "uci": "x"}] * (X.MAX_PLIES - 1)
             conn.execute("UPDATE games SET history=? WHERE id='g1'",
                          (json.dumps(fake),))
+            conn.commit()
+        finally:
+            conn.close()
         mv = X.choose_move(self.t.get_state("g1")["board"], "r",
                            depth=1, time_budget=1.0)
         res = self.t.apply_move_by_color("g1", "r", mv)
@@ -347,8 +356,12 @@ class TestGameTable(unittest.TestCase):
             "NULL,NULL,0,0)")
         conn.commit(); conn.close()
         t = GameTable(old)  # 打开时应自动补 keys 列
-        cols = {r[1] for r in sqlite3.connect(old).execute(
-            "PRAGMA table_info(games)").fetchall()}
+        conn2 = sqlite3.connect(old)
+        try:
+            cols = {r[1] for r in conn2.execute(
+                "PRAGMA table_info(games)").fetchall()}
+        finally:
+            conn2.close()
         self.assertIn("keys", cols)
 
 

@@ -32,3 +32,6 @@ build/
 
 # 自检生成的报告（可用 tools/self_audit.py 复现）
 SELF_AUDIT_REPORT.json
+
+# 自审报告（生成物，含假样本文本，勿提交）
+SELF_AUDIT_REPORT.md

@@ -122,23 +122,27 @@ class QualityGate:
         c = self._conn()
         if not c:
             return
-        with c:
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS quality_reviews (
-                    review_id    TEXT PRIMARY KEY,
-                    task_id      TEXT NOT NULL,
-                    accepted     INTEGER NOT NULL,
-                    violations   TEXT,
-                    feedback     TEXT,
-                    rework_count INTEGER NOT NULL DEFAULT 0,
-                    output_sha256 TEXT,
-                    output_head  TEXT,
-                    created_at   REAL
+        try:
+            with c:
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS quality_reviews (
+                        review_id    TEXT PRIMARY KEY,
+                        task_id      TEXT NOT NULL,
+                        accepted     INTEGER NOT NULL,
+                        violations   TEXT,
+                        feedback     TEXT,
+                        rework_count INTEGER NOT NULL DEFAULT 0,
+                        output_sha256 TEXT,
+                        output_head  TEXT,
+                        created_at   REAL
                 )
             """)
-            c.execute("CREATE INDEX IF NOT EXISTS idx_qr_task "
-                      "ON quality_reviews(task_id)")
-        c.close()
+                c.execute("CREATE INDEX IF NOT EXISTS idx_qr_task "
+                          "ON quality_reviews(task_id)")
+        finally:
+            # `with c` 是事务上下文，不关连接——显式 close，否则每次
+            # 实例化泄漏一个 sqlite3.Connection。
+            c.close()
 
     def _record(self, task_id: str, v: QualityVerdict, output: str) -> str:
         c = self._conn()
