@@ -68,6 +68,7 @@ from templates import (
     request_scan,
     run_scan,
 )
+from trace import TraceError, TraceStore
 
 # ---------------------------------------------------------------------------
 # 协议版本（MCP 2026-07-28 对齐）
@@ -639,6 +640,67 @@ _TOOLS = [
             "required": ["group", "task_id"],
         },
     },
+    {
+        "name": "trace_start",
+        "description": ("开一条任务轨迹（Trace）。返回 trace_id——把它写进各任务 payload 的 "
+                        "trace_id 键，拆解/派单/执行/审批/质检/完成的全链路事件即可回放。"
+                        "痕迹只存结构化事件+摘要+内容指纹，敏感字段（密钥/Cookie）不落原文。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "轨迹标题（如需求名）"},
+                "kind": {"type": "string", "description": "pipeline/batch/custom，缺省 pipeline"},
+                "started_by": {"type": "string", "description": "发起人标识"},
+                "trace_id": {"type": "string", "description": "可选：指定 trace_id（缺省自动生成）"},
+                "meta": {"type": "object", "description": "可选：附加元信息"},
+            },
+        },
+    },
+    {
+        "name": "trace_record",
+        "description": ("往轨迹里记一条事件（派单/工具调用/审批/质检/成本快照等）。"
+                        "content 参数只算 blake2b 指纹、绝不落原文；detail 里敏感键自动脱敏。"
+                        "trace_id 未见过时自动补建轨迹行。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "trace_id": {"type": "string", "description": "轨迹 id"},
+                "kind": {"type": "string", "description": "事件类型（见 trace.py EVENT_KINDS）"},
+                "task_id": {"type": "string", "description": "可选：关联任务"},
+                "actor": {"type": "string", "description": "可选：行为方（runner/agent/human）"},
+                "summary": {"type": "string", "description": "一句话摘要"},
+                "detail": {"type": "object", "description": "可选：结构化详情（脱敏+有界）"},
+                "content": {"type": "string", "description": "可选：原文（只留指纹，不入库）"},
+            },
+            "required": ["trace_id", "kind"],
+        },
+    },
+    {
+        "name": "trace_show",
+        "description": ("回放一条轨迹：元信息 + 按发生顺序的全链路事件。"
+                        "带 task_id 时按任务反查其所在轨迹并回放。"
+                        "after_seq 游标支持增量拉取。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "trace_id": {"type": "string", "description": "轨迹 id（与 task_id 二选一）"},
+                "task_id": {"type": "string", "description": "按任务反查轨迹"},
+                "after_seq": {"type": "integer", "description": "只回放该序号之后的事件"},
+                "limit": {"type": "integer", "description": "事件条数上限"},
+            },
+        },
+    },
+    {
+        "name": "trace_list",
+        "description": "列最近的轨迹（倒序），可按状态过滤。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "条数上限，缺省 50"},
+                "status": {"type": "string", "description": "open/completed/failed/needs_human"},
+            },
+        },
+    },
 ]
 
 
@@ -744,6 +806,19 @@ _TOOL_ANNOTATIONS: "dict[str, dict]" = {
     "ballot_confirm":       {"readOnlyHint": False, "destructiveHint": False,
                              "idempotentHint": True, "openWorldHint": False,
                              "title": "人工确认方案生效（唯一生效路径）"},
+    # ---- 观测层 Trace（轨迹回放；见 trace.py）----
+    "trace_start":          {"readOnlyHint": False, "destructiveHint": False,
+                             "idempotentHint": False, "openWorldHint": False,
+                             "title": "开一条任务轨迹（生成 trace_id）"},
+    "trace_record":         {"readOnlyHint": False, "destructiveHint": False,
+                             "idempotentHint": False, "openWorldHint": False,
+                             "title": "记录轨迹事件（追加；原文只留指纹）"},
+    "trace_show":           {"readOnlyHint": True, "destructiveHint": False,
+                             "idempotentHint": True, "openWorldHint": False,
+                             "title": "回放轨迹（只读）"},
+    "trace_list":           {"readOnlyHint": True, "destructiveHint": False,
+                             "idempotentHint": True, "openWorldHint": False,
+                             "title": "列最近轨迹（只读）"},
 }
 
 
@@ -797,6 +872,12 @@ def _ballot_db_path() -> str:
     """投票库独立成文件：方案全文与推荐记录是审计材料，与任务表分开留存。"""
     return os.getenv("BALLOT_DB_PATH") or os.path.join(
         os.path.dirname(DEFAULT_DB_PATH) or "data", "ballot.db")
+
+
+def _trace_db_path() -> str:
+    """轨迹库独立成文件：事件流是审计材料，与任务表分开留存。"""
+    return os.getenv("TRACE_DB_PATH") or os.path.join(
+        os.path.dirname(DEFAULT_DB_PATH) or "data", "trace.db")
 
 
 def _build_queue():
@@ -1253,6 +1334,52 @@ def _dispatch(name: str, args: dict) -> str:
                               indent=2, default=str)
         finally:
             b.close()
+
+    if name in ("trace_start", "trace_record", "trace_show", "trace_list"):
+        store = TraceStore(db_path=_trace_db_path())
+        try:
+            if name == "trace_start":
+                tid = store.start_trace(
+                    title=args.get("title", ""),
+                    kind=args.get("kind", "pipeline"),
+                    started_by=args.get("started_by", ""),
+                    trace_id=args.get("trace_id"),
+                    meta=args.get("meta"))
+                return json.dumps({"trace_id": tid}, ensure_ascii=False)
+
+            if name == "trace_record":
+                try:
+                    seq = store.record(
+                        args["trace_id"], args["kind"],
+                        task_id=args.get("task_id"), actor=args.get("actor", ""),
+                        summary=args.get("summary", ""),
+                        detail=args.get("detail"), content=args.get("content"))
+                except TraceError as e:
+                    return json.dumps({"error": "trace_rejected",
+                                       "reason": str(e)}, ensure_ascii=False)
+                return json.dumps({"trace_id": args["trace_id"], "seq": seq},
+                                  ensure_ascii=False)
+
+            if name == "trace_show":
+                if args.get("task_id") and not args.get("trace_id"):
+                    return json.dumps(store.by_task(args["task_id"]),
+                                      ensure_ascii=False, indent=2, default=str)
+                meta = store.get(args.get("trace_id", ""))
+                if meta is None:
+                    return json.dumps({"error": "trace_rejected",
+                                       "reason": "轨迹不存在"}, ensure_ascii=False)
+                evs = store.events(args["trace_id"],
+                                   after_seq=args.get("after_seq") or 0,
+                                   limit=args.get("limit"))
+                return json.dumps({"trace": meta, "events": evs},
+                                  ensure_ascii=False, indent=2, default=str)
+
+            # trace_list
+            return json.dumps(store.list(limit=args.get("limit") or 50,
+                                         status=args.get("status")),
+                              ensure_ascii=False, indent=2, default=str)
+        finally:
+            store.close()
 
     raise ValueError(f"未知工具: {name}")
 

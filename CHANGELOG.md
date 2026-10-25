@@ -8,6 +8,26 @@
 ## [0.9.0] — 未发布
 
 ### 新增
+- **观测层：Trace 轨迹回放（`trace.py`）**——多 AI 协同出事时的"黑匣子"：
+  - 每条任务/流水线一条 `trace_id`，贯穿拆解→派单→执行→审批→质检→
+    收尾；`seq` 按 trace 单调分配，回放顺序即发生顺序，`after_seq` 游标
+    支持增量拉取。
+  - **哈希指针不存原文**：`content=` 只算 blake2b 指纹；敏感键
+    （密钥/Cookie/Token 等，按名匹配）脱敏成 `{"redacted": true,
+    "sha256": …}`；detail 超限截断并留全文指纹。回放时可重新投喂原文
+    验真（`verify()`）——审计材料不囤敏感原文。
+  - **留痕是旁路不是主链路**：四个挂点——`planner.build(trace_id=…)`
+    传播 + `plan_built` 事件；`DagScheduler(tracer=…)` 自动记
+    登记/认领/完成/失败（含级联阻塞名单）；`BrowserSkill(tracer=…,
+    trace_id=…)` 记浏览器动作（成功/失败都留痕、type 的明文只留指纹）；
+    手工 `trace_record` 覆盖审批/质检/成本快照等任何事件。tracer 缺失或
+    故障绝不挡调度与浏览器动作。
+  - 入口三件套：MCP `trace_start/record/show/list`（36 → 40 工具）、
+    REST `GET /traces` 与 `GET /traces/{id}`（只读，仍走鉴权）、
+    CLI（`--new/--record/--show/--task/--list/--stats/--verify/--finish`）。
+  - 测试：`tests/test_trace.py` 19 项（含"直接读库文件断言敏感串不在"
+    的最强证据、多线程 seq 不重号、跨实例）+ `tests/test_trace_wiring.py`
+    14 项（四挂点 + 两入口 + tracer 故障不挡主链路 + 无 tracer 向后兼容）。
 - **执行层（对照 Grok Bot 差距分析后开建，全部纯标准库零新依赖）**：
   - `execution/workspace.py`：每 bot_id 一个独立工作区（`work/` `outbox/`
     `state.json`），bot_id 白名单正则 + 相对路径越界拒绝（绝对路径/`..`），
@@ -42,6 +62,9 @@
     附文件路径，不谎称已发语音。
 
 ### 修复
+- **planner fanout 自建 Ballot 连接泄漏（真缺陷，新测试暴露）**：
+  `Plan.build()` 开票时自建的 `Ballot()` 从不关闭（`-W error::ResourceWarning`
+  下可复现）。修为自建实例用完即关、调用方传入的所有权归调用方。
 - **看板 JS 数月不可渲染（真缺陷）**：HTML 模板是普通三引号字符串，
   JS `'\n等待: '` 的 `\n` 被 Python 解释成真换行 → 整个 `<script>` 块
   解析失败 → 看板从未在浏览器里渲染过（此前只验过 HTTP 200 + 骨架）。

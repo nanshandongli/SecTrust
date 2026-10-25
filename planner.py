@@ -492,13 +492,17 @@ class Plan:
 
     # ---- 落库：在 DagScheduler 上建图 ----
     def build(self, scheduler, plan_id: str = None,
-              ballot=None) -> list[str]:
+              ballot=None, trace_id: str = None) -> list[str]:
         """按拓扑序把子任务 add_task 进 scheduler。返回创建的 task_id 列表。
 
         task_id 规则：`{plan_id}/{key}`（plan_id 缺省自动生成）。
         同一计划重复 build 会因 task_id 已存在被 DagScheduler 拒绝（幂等保护）。
         payload 里带 name/instruction/skill/model/quality/plan 元信息，
         供 worker 认领后知道"干什么、怎么干、干成什么样算合格"。
+
+        **trace_id**（可选）：传入时写进每个任务 payload 的 `trace_id` 键，
+        全链路事件经 DagScheduler 的 tracer 旁路汇成一条可回放轨迹；
+        scheduler 注入了 tracer 才会记 `plan_built`（拆解结果）事件。
 
         **fanout（投票/辩论模式）**：stage 带 `fanout: N`（N>=2）时展开为——
         N 个并行分支 `{pid}/{key}#0..N-1`（payload 带 `ballot` 元信息）
@@ -525,8 +529,10 @@ class Plan:
             n = int(s.get("fanout") or 0)
             if n < 2:
                 tid = f"{pid}/{key}"
-                scheduler.add_task(tid, payload=self._payload(pid, s, key),
-                                   depends_on=deps_of(s))
+                p = self._payload(pid, s, key)
+                if trace_id:
+                    p["trace_id"] = trace_id
+                scheduler.add_task(tid, payload=p, depends_on=deps_of(s))
                 created.append(tid)
                 continue
 
@@ -537,35 +543,40 @@ class Plan:
                 tid = f"{pid}/{key}#{i}"
                 p = self._payload(pid, s, key)
                 p["ballot"] = {"group": group, "index": i, "total": n}
+                if trace_id:
+                    p["trace_id"] = trace_id
                 scheduler.add_task(tid, payload=p, depends_on=deps_of(s))
                 branch_ids.append(tid)
                 created.append(tid)
             gid = f"{pid}/{key}__ballot"
-            scheduler.add_task(
-                gid,
-                payload={
-                    "name": f"{s['name']}（投票汇总）",
-                    "instruction": (f"汇合 {n} 个并行方案并择优后交付："
-                                    f"{s['instruction']}"),
-                    "skill": s.get("skill", ""),
-                    "model": s.get("model", ""),
-                    "quality": s.get("quality", {}),
-                    "plan": {"id": pid, "template": self.template,
-                             "title": self.title,
-                             "requirement": self.requirement,
-                             "tier": self.tier, "cost": self.cost},
-                    "needs_input": sorted(set(re.findall(r"<待补:(\w+)>",
-                                                         s["instruction"]))),
-                    "ballot_gather": {"group": group, "n": n,
-                                      "branch_ids": branch_ids},
-                },
-                depends_on=branch_ids,
-            )
+            gather_payload = {
+                "name": f"{s['name']}（投票汇总）",
+                "instruction": (f"汇合 {n} 个并行方案并择优后交付："
+                                f"{s['instruction']}"),
+                "skill": s.get("skill", ""),
+                "model": s.get("model", ""),
+                "quality": s.get("quality", {}),
+                "plan": {"id": pid, "template": self.template,
+                         "title": self.title,
+                         "requirement": self.requirement,
+                         "tier": self.tier, "cost": self.cost},
+                "needs_input": sorted(set(re.findall(r"<待补:(\w+)>",
+                                                     s["instruction"]))),
+                "ballot_gather": {"group": group, "n": n,
+                                  "branch_ids": branch_ids},
+            }
+            if trace_id:
+                gather_payload["trace_id"] = trace_id
+            scheduler.add_task(gid, payload=gather_payload,
+                               depends_on=branch_ids)
             gather_of[key] = gid
             created.append(gid)
 
             # 开票：建图即登记，N 个分支与判据一次性绑定
-            if ballot is None:
+            # 自建的 Ballot 用完即关（连接纪律：不泄漏）；调用方传入的
+            # 实例所有权归调用方，本方法不关。
+            own_ballot = ballot is None
+            if own_ballot:
                 from ballot import Ballot
                 ballot = Ballot()
             try:
@@ -577,6 +588,23 @@ class Plan:
                 from ballot import BallotError
                 if not isinstance(e, BallotError):
                     raise
+            finally:
+                if own_ballot:
+                    ballot.close()
+                    ballot = None
+        # 轨迹旁路：拆解结果入 Trace（scheduler 注入了 tracer 才记）
+        if trace_id:
+            hook = getattr(scheduler, "trace_event", None)
+            if callable(hook):
+                hook("plan_built", trace_id=trace_id,
+                     summary=f"拆解 {len(created)} 个任务",
+                     detail={"plan_id": pid, "template": self.template,
+                             "tier": self.tier, "title": self.title,
+                             "tasks": created,
+                             "needs_input": sorted({
+                                 m for s in self.subtasks
+                                 for m in re.findall(r"<待补:(\w+)>",
+                                                     s["instruction"])})})
         return created
 
     def _payload(self, pid: str, s: dict, key: str) -> dict:

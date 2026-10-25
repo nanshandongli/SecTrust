@@ -43,6 +43,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+from contextlib import contextmanager
 
 # ---------------- 错误类型 ----------------
 
@@ -370,7 +371,8 @@ class BrowserSkill:
 
     def __init__(self, edge_path: str = None, timeout: float = 15.0,
                  headless: bool = True, launcher=None, ws_factory=None,
-                 http_get=None):
+                 http_get=None, tracer=None, task_id: str = None,
+                 trace_id: str = None):
         self.edge_path = edge_path or find_edge()
         self.timeout = timeout
         self.headless = headless
@@ -385,6 +387,11 @@ class BrowserSkill:
         self._ws_factory = ws_factory or (lambda u: MinimalWebSocket.connect(
             u, timeout=self.timeout))
         self._http_get = http_get or _http_get_json
+        # 轨迹旁路：tracer 是鸭子类型（有 .record(trace_id, kind, ...) 即可）。
+        # 未注入或记录失败都绝不影响浏览器动作本身。
+        self._tracer = tracer
+        self._task_id = task_id
+        self._trace_id = trace_id
 
     # ---- 启动 ----
     def start(self) -> str:
@@ -487,16 +494,53 @@ class BrowserSkill:
                 "当前为批处理模式（CDP 不可用：%s），不支持 %s。"
                 "批处理只读导航/截图/取文本。" % (self._cdp_error or "未知", action))
 
+    # ---- 轨迹旁路（best-effort，绝不挡动作本身）----
+    def _trace_event(self, kind: str, summary: str, detail: dict = None,
+                     content: str = None, duration: float = None):
+        if self._tracer is None or not self._trace_id:
+            return
+        try:
+            d = dict(detail) if detail else {}
+            if duration is not None:
+                d["duration_s"] = round(duration, 3)
+            self._tracer.record(self._trace_id, kind, task_id=self._task_id,
+                                actor="browser", summary=summary, detail=d,
+                                content=content)
+        except Exception:  # noqa: BLE001 —— 留痕失败不影响浏览器动作
+            pass
+
+    @contextmanager
+    def _traced_action(self, summary: str, detail: dict = None,
+                       content: str = None):
+        """包住一个浏览器动作：成功/失败都留痕（失败带 error），带耗时。"""
+        t0 = time.time()
+        try:
+            yield
+        except Exception as e:  # noqa: BLE001
+            d = dict(detail) if detail else {}
+            d["error"] = str(e)
+            self._trace_event("tool_call", summary + "（失败）", detail=d,
+                              duration=time.time() - t0)
+            raise
+        self._trace_event("tool_call", summary, detail=detail, content=content,
+                          duration=time.time() - t0)
+
     def goto(self, url: str):
         self._last_url = url
-        if self.mode != "cdp":
+        detail = {"url": url}
+        with self._traced_action(f"goto {url}", detail):
+            if self.mode != "cdp":
+                detail["mode"] = "batch"
+                return
+            self.cdp.call("Page.navigate", {"url": url}, timeout=self.timeout)
+            try:
+                self.cdp.wait_event("Page.loadEventFired", timeout=self.timeout)
+            except CdpError:
+                pass                                # 页面可能已提前 load 或不触发
+            detail["mode"] = "cdp"
+        if detail.get("mode") == "batch":
             return {"ok": True, "mode": "batch", "url": url,
                     "note": "批处理模式：URL 已记录，导航发生在后续取数时"}
-        self.cdp.call("Page.navigate", {"url": url}, timeout=self.timeout)
-        try:
-            self.cdp.wait_event("Page.loadEventFired", timeout=self.timeout)
-        except CdpError:
-            pass                                    # 页面可能已提前 load 或不触发
         return {"ok": True, "mode": "cdp", "url": url}
 
     def get_text(self) -> dict:
@@ -522,57 +566,79 @@ class BrowserSkill:
 
     def click(self, selector: str) -> dict:
         self._require_cdp("click")
-        center = self._element_center(selector)
-        if not center:
-            raise BrowserError("找不到元素: %s" % selector)
-        for event_type in ("mousePressed", "mouseReleased"):
-            self.cdp.call("Input.dispatchMouseEvent", {
-                "type": event_type, "x": center["x"], "y": center["y"],
-                "button": "left", "clickCount": 1}, timeout=self.timeout)
-        return {"ok": True, "mode": "cdp", "selector": selector,
-                "at": {"x": round(center["x"], 1), "y": round(center["y"], 1)}}
+        detail = {"selector": selector}
+        with self._traced_action(f"click {selector}", detail):
+            center = self._element_center(selector)
+            if not center:
+                raise BrowserError("找不到元素: %s" % selector)
+            for event_type in ("mousePressed", "mouseReleased"):
+                self.cdp.call("Input.dispatchMouseEvent", {
+                    "type": event_type, "x": center["x"], "y": center["y"],
+                    "button": "left", "clickCount": 1}, timeout=self.timeout)
+            result = {"ok": True, "mode": "cdp", "selector": selector,
+                      "at": {"x": round(center["x"], 1),
+                             "y": round(center["y"], 1)}}
+            detail["at"] = result["at"]
+        return result
 
     def type_text(self, selector: str, text: str) -> dict:
         self._require_cdp("type")
-        focus_expr = (
-            "(() => { const el = document.querySelector(%s);"
-            " if (!el) return false; el.focus(); return true; })()"
-        ) % json.dumps(selector)
-        res = self.cdp.call("Runtime.evaluate",
-                            {"expression": focus_expr, "returnByValue": True},
-                            timeout=self.timeout)
-        if not res.get("result", {}).get("value"):
-            raise BrowserError("找不到元素: %s" % selector)
-        self.cdp.call("Input.insertText", {"text": text}, timeout=self.timeout)
-        return {"ok": True, "mode": "cdp", "selector": selector,
-                "chars": len(text)}
+        detail = {"selector": selector}
+        with self._traced_action(f"type {selector}", detail, content=text):
+            focus_expr = (
+                "(() => { const el = document.querySelector(%s);"
+                " if (!el) return false; el.focus(); return true; })()"
+            ) % json.dumps(selector)
+            res = self.cdp.call("Runtime.evaluate",
+                                {"expression": focus_expr, "returnByValue": True},
+                                timeout=self.timeout)
+            if not res.get("result", {}).get("value"):
+                raise BrowserError("找不到元素: %s" % selector)
+            self.cdp.call("Input.insertText", {"text": text}, timeout=self.timeout)
+            result = {"ok": True, "mode": "cdp", "selector": selector,
+                      "chars": len(text)}
+            detail["chars"] = len(text)
+        return result
 
     def screenshot(self, out_path: str, width: int = 1440,
                    height: int = 900) -> dict:
-        if self.mode != "cdp":
-            edge_screenshot(self.edge_path, self._last_url, out_path,
-                            width=width, height=height)
-            return {"ok": True, "mode": "batch", "path": out_path}
-        res = self.cdp.call("Page.captureScreenshot",
-                            {"format": "png"}, timeout=max(self.timeout, 30.0))
-        data = res.get("data", "")
-        with open(out_path, "wb") as f:
-            f.write(base64.b64decode(data))
-        return {"ok": True, "mode": "cdp", "path": out_path,
-                "bytes": os.path.getsize(out_path)}
+        detail = {"path": out_path, "width": width, "height": height}
+        with self._traced_action(f"screenshot {out_path}", detail):
+            if self.mode != "cdp":
+                edge_screenshot(self.edge_path, self._last_url, out_path,
+                                width=width, height=height)
+                detail["mode"] = "batch"
+                result = {"ok": True, "mode": "batch", "path": out_path}
+            else:
+                res = self.cdp.call("Page.captureScreenshot",
+                                    {"format": "png"}, timeout=max(self.timeout, 30.0))
+                data = res.get("data", "")
+                with open(out_path, "wb") as f:
+                    f.write(base64.b64decode(data))
+                result = {"ok": True, "mode": "cdp", "path": out_path,
+                          "bytes": os.path.getsize(out_path)}
+                detail["mode"] = "cdp"
+                detail["bytes"] = result["bytes"]
+        return result
 
     def wait_for(self, selector: str, timeout: float = None) -> bool:
         self._require_cdp("wait_for")
-        deadline = time.time() + (timeout if timeout is not None else self.timeout)
-        expr = "!!document.querySelector(%s)" % json.dumps(selector)
-        while time.time() < deadline:
-            res = self.cdp.call("Runtime.evaluate",
-                                {"expression": expr, "returnByValue": True},
-                                timeout=self.timeout)
-            if res.get("result", {}).get("value"):
-                return True
-            time.sleep(0.25)
-        return False
+        detail = {"selector": selector,
+                  "timeout": timeout if timeout is not None else self.timeout}
+        with self._traced_action(f"wait_for {selector}", detail):
+            deadline = time.time() + detail["timeout"]
+            expr = "!!document.querySelector(%s)" % json.dumps(selector)
+            found = False
+            while time.time() < deadline:
+                res = self.cdp.call("Runtime.evaluate",
+                                    {"expression": expr, "returnByValue": True},
+                                    timeout=self.timeout)
+                if res.get("result", {}).get("value"):
+                    found = True
+                    break
+                time.sleep(0.25)
+            detail["found"] = found
+        return found
 
     @staticmethod
     def _default_launcher(edge_path: str, port: int, headless: bool,

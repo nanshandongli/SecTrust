@@ -85,6 +85,10 @@
     "skill_list",
     "skill_load",
     "task_complete_verified",
+    "trace_list",
+    "trace_record",
+    "trace_show",
+    "trace_start",
     "validate_secret"
   ],
   "capabilities": {

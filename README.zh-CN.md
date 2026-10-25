@@ -36,8 +36,8 @@ python task_center_web.py                        # ③ 浏览器打开 http://12
 }
 ```
 
-36 个工具即刻可用：任务登记/认领、DAG 编排（`dag_*`）、质量回流、投票择优（`ballot_*`）、
-合规扫描、长期记忆、审批查询。详见下文与 [DESIGN.md](DESIGN.md)。
+40 个工具即刻可用：任务登记/认领、DAG 编排（`dag_*`）、质量回流、投票择优（`ballot_*`）、
+合规扫描、长期记忆、审批查询、轨迹回放（`trace_*`）。详见下文与 [DESIGN.md](DESIGN.md)。
 
 ---
 
@@ -74,11 +74,12 @@ runner 用 `--api-base` 即可把登记处/心跳写到远程中心，从而放�
 | `connectors/` | **连接器框架**：`base.py` 契约（未知 action 拒绝 / 未配置明确报错不返假数据）+ `github.py`（urllib REST）+ `imap.py`（邮件触发建任务，登记成功才标已读） |
 | `proposal.py` | **主动提议循环（chief of staff）**：规则扫描停滞/未认领/审批积压/失败/挂起任务 → 提案进审批中心等人裁，**绝不自动执行**；冷却 + 未决双重去重；可选 LLM 摘要（缺 key 降级规则文本） |
 | `threads.py` | **会话线程持久化**：thread + messages 落 SQLite，多端接续；`history` 取最近 N 条 + before 游标翻页 |
+| `trace.py` | **轨迹回放层（Trace）**：每任务一条 trace_id 贯穿拆解/派单/执行/审批/质检/完成；结构化事件 + 摘要 + blake2b 内容指纹（原文与敏感字段不落库）；MCP 4 工具 + REST 回放端点 + CLI |
 | `voice.py` | **语音输出**：复用 multimodal MediaRouter 合成 TTS（缺 key 明示 Mock 假音频）；渠道无语音能力时文本兜底附文件路径，不谎称已发语音 |
 | `demo.py` | 5 条最小验收的自测脚本（含真·跨进程并发） |
 | `DESIGN.md` | **多渠道/多技能/多模型 运行时扩展设计**（架构、信任边界、密钥管理） |
 | `.env.example` | 全部环境变量清单（密钥只从环境变量读） |
-| `tests/` | 单元测试（unittest；验收 + WAL 健壮性 + 运行时回归 + 象棋原型 + DAG 调度 + 编排层应用 + 执行层 + 消息框架），共 **612** 例（全过） |
+| `tests/` | 单元测试（unittest；验收 + WAL 健壮性 + 运行时回归 + 象棋原型 + DAG 调度 + 编排层应用 + 执行层 + 消息框架 + 轨迹回放），共 **645** 例（全过） |
 | `tools/self_audit.py` | **自检评测脚本**：从代码与运行时取证（功能清点/性能实测/扫描检出率/记忆/技能/证据门禁/安全穿透），输出 JSON |
 | `SELF_AUDIT_REPORT.md` | **自检评测报告**：实测数据 + 竞品对比 + 评分卡（含发现并修复的 9 个真实缺陷：v1 的 3 个 + 深度轮 6 个） |
 | `approval.py` | **审批中心（Human-in-the-loop）**：高权限动作先挂起等真人批准，超时默认拒绝 |
@@ -91,7 +92,7 @@ runner 用 `--api-base` 即可把登记处/心跳写到远程中心，从而放�
 | `memory.py` | **轻量长期记忆（P2）**：`MemoryStore` 类，SQLite 存用户偏好 / 常用指令模板 / 常用 repo 路径，跨会话持久化 |
 | `memory_semantic.py` | **记忆增强（路线 3）**：在 SQLite 记忆之上可选叠向量层（离线 n-gram 余弦默认；可选 OpenAI/Mem0），语义检索 |
 | `mem0_adapter.py` | Mem0 / OpenMemory MCP 集成存根（可用时把记忆委托给专业记忆层） |
-| `mcp_server.py` | **零依赖 MCP Server（P0）**：JSON-RPC over stdio，暴露 22 个工具（登记处/审批/扫描/记忆/语义检索/活体验证/推送保护/分布式队列） |
+| `mcp_server.py` | **零依赖 MCP Server（P0）**：JSON-RPC over stdio，暴露 40 个工具（登记处/审批/扫描/记忆/语义检索/活体验证/推送保护/分布式队列/DAG 编排/投票择优/轨迹回放） |
 | `templates/` | **合规扫描模板库（P0）**：5 模板（密钥泄露/硬编码凭证/依赖漏洞/CI-CD/SAST）+ 执行编排（审批+沙箱双闸门） |
 | `scanner/` | **扫描深度（路线 2）**：Semgrep 适配器（AST 级，可回退正则）/ 活体验证 / 推送前保护（git hook + CI yaml） |
 | `api/` | **分布式入口（路线 1）**：`app.py` REST 服务（Bearer 鉴权 + 可观测性）+ `client.py` 远程客户端 |
@@ -1183,3 +1184,66 @@ VoiceSpeaker().deliver(channel, user_id, "周报写好了")   # 合成→落盘�
 需用户参与；浏览器自动化目前是单页批处理 + CDP 单 target（多标签/
 iframe/文件上传对话框未覆盖）；语音框架级可用，**音质取决于外部 TTS API**；
 云端 VM / 移动 App 不在本地版范围。
+
+---
+
+## 23. 观测层：Trace 轨迹回放（trace.py）
+
+多 AI 协同真正落地时，第一个问题不是"能不能跑"，而是"**出事了我怎么知道
+发生了什么**"。Trace 层把每条任务/流水线变成一条可回放、可审计的轨迹：
+从触发输入、拆解、派单、执行、审批、质检到最终状态，全程结构化事件留痕。
+
+```
+trace_start ──→ trace_id 写进各任务 payload
+                  │
+                  ├─ planner.build(trace_id=…)       → plan_built（工序/依赖/<待补>）
+                  ├─ DagScheduler(tracer=…)          → 登记/认领/完成/失败(级联阻塞)
+                  ├─ BrowserSkill(tracer=…, trace_id…)→ 浏览器动作（成功/失败都记）
+                  └─ trace_record（手工）             → 审批/质检/成本快照/任何事件
+                                                          ↓
+                              trace_show 回放 / REST GET /traces/{id} / CLI
+```
+
+### 23.1 四条设计纪律（改动不可破坏）
+
+1. **哈希指针，不存原文**：`content=` 只算 blake2b 指纹落 `content_hash`，
+   原文永不进库；敏感键（密钥/Cookie/Token……按名匹配）脱敏成
+   `{"redacted": true, "sha256": …}`——能比对、不可阅读。回放时可重新
+   投喂原文验真（`verify()`）。
+2. **留痕是旁路，不是主链路**：DagScheduler / BrowserSkill 的 tracer
+   缺失或故障都静默跳过，绝不挡干活；trace 模块自身的错误（参数非法/
+   库损坏）对直接调用者如实抛出。
+3. **seq 按 trace 单调分配**：`BEGIN IMMEDIATE` 内 `MAX(seq)+1`，
+   回放顺序即发生顺序；`after_seq` 游标支持增量拉取。
+4. **连接纪律**：线程本地连接 + 登记表，`close()` 一并收掉所有线程的
+   连接——`-W error::ResourceWarning` 下零泄漏（回归测试锁定）。
+
+### 23.2 一条 Trace 记什么
+
+| 阶段 | 事件 kind | 关键字段 |
+|------|-----------|----------|
+| 拆解 | `plan_built` | 工序列表、依赖、tier、`<待补>` 标记 |
+| 派单 | `task_claimed` | 哪个 runner 认领、是否原子锁成功 |
+| 执行 | `tool_call` | 浏览器/语音/文件/外部 API，带耗时；失败带 error |
+| 审批 | `approval_requested` / `approval_resolved` | 谁批准、拒绝原因、超时状态 |
+| 质检 | `quality_rejected` / `quality_passed` | 打回理由、重试轮次 |
+| 收尾 | `task_completed` / `task_failed` / `task_needs_human` | 结果只留键名+指纹；失败带级联阻塞名单 |
+
+自定义 kind 允许（不强制登记），但推荐沿用 `EVENT_KINDS`，保证回放可读。
+
+### 23.3 入口
+
+- **MCP**：`trace_start` / `trace_record` / `trace_show` / `trace_list`
+  （外部 AI 作为 worker 直接往轨迹里写事件）
+- **REST**：`GET /traces`（列表+状态过滤）、`GET /traces/{id}`（元信息+
+  全量回放，`after_seq` 游标）
+- **CLI**：`python trace.py --new / --record / --show / --task <id> /
+  --list / --stats / --verify <trace_id> <seq> --content 原文`
+
+### 23.4 诚实边界
+
+- 回放看到的是**结构化事件 + 摘要 + 指纹**；要看原文需重新投喂验真
+  （这是特性不是缺陷——审计材料不囤敏感原文）；
+- 成本打点（Token/工具/重试/基础设施四层）与通用汇总阶段是按路线图的
+  下一步，将作为新事件 kind 与聚合视图叠在这条 Trace 上，不新起炉灶；
+- 轨迹库独立成文件（`data/trace.db`），与任务表分开留存。

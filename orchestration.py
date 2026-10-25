@@ -41,6 +41,11 @@ try:
 except Exception:  # 单独运行 / Broker 不可用时降级为无事件
     Broker = None
 
+try:
+    from trace import trace_id_of  # 轨迹层：trace_id 只走 payload 约定
+except Exception:  # 单独运行时降级：无 trace 模块就不记轨迹
+    trace_id_of = None
+
 # 调度器使用的状态常量（与 task_registry 默认值对齐）
 REGISTERED = "registered"
 RUNNING = "running"
@@ -65,14 +70,45 @@ class DagScheduler:
     """
 
     def __init__(self, db_path=DEFAULT_DB_PATH, registry: TaskRegistry | None = None,
-                 broker: Broker | None = None, events: bool = True):
+                 broker: Broker | None = None, events: bool = True,
+                 tracer=None):
         self.registry = registry if registry is not None else TaskRegistry(db_path=db_path)
         self.db_path = self.registry.db_path
+        # tracer：可选的 TraceStore。记轨迹是**旁路**——缺失或异常都不挡调度主链路
+        self.tracer = tracer
         # events=False：只读视图（如 Web 看板）不建事件总线，避免每请求开队列句柄
         if broker is not None:
             self.broker = broker
         else:
             self.broker = self._default_broker() if events else None
+
+    # ------------------------------------------------------------------
+    # 轨迹旁路：trace_event（best-effort，绝不挡主链路）
+    # ------------------------------------------------------------------
+    def _trace_id_of(self, task_id: str):
+        """从任务 payload 取 trace_id（读失败/未标记 → None，跳过留痕）。"""
+        if trace_id_of is None:
+            return None
+        try:
+            t = self.registry.get_task(task_id)
+            return trace_id_of(t.get("payload") if t else None)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def trace_event(self, kind: str, task_id: str = None, trace_id: str = None,
+                    **kw):
+        """记一条轨迹事件。tracer 未注入或留痕失败都静默跳过——
+        留痕是观测，不是调度前置条件。"""
+        if self.tracer is None:
+            return
+        try:
+            tid = trace_id
+            if tid is None and task_id:
+                tid = self._trace_id_of(task_id)
+            if tid:
+                self.tracer.record(tid, kind, task_id=task_id, **kw)
+        except Exception:  # noqa: BLE001 —— 旁路故障不上抛
+            pass
 
     def _default_broker(self):
         """有 MQ_DB_PATH 才启用事件总线（与 player.py 同约定）；否则 None。"""
@@ -112,6 +148,9 @@ class DagScheduler:
                 seen.add(cur)
                 stack.extend(graph.get(cur, []))
         self.registry.register_task(task_id, payload=payload, depends_on=deps)
+        self.trace_event("task_registered", task_id=task_id,
+                         summary=f"登记 {task_id}",
+                         detail={"depends_on": list(deps)})
         return task_id
 
     # ------------------------------------------------------------------
@@ -233,7 +272,11 @@ class DagScheduler:
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
-        return self.registry.get_task(picked)
+        task = self.registry.get_task(picked)
+        tid = trace_id_of(task.get("payload")) if (task and trace_id_of) else None
+        self.trace_event("task_claimed", task_id=picked, actor=rid,
+                         trace_id=tid, summary=f"{rid} 认领 {picked}")
+        return task
 
     # ------------------------------------------------------------------
     # 完成 / 失败：complete / fail（含级联）
@@ -263,6 +306,13 @@ class DagScheduler:
         if ok:
             self._emit("task", "completed",
                        {"task_id": task_id, "result": result})
+            self.trace_event("task_completed", task_id=task_id,
+                             summary=f"完成 {task_id}",
+                             detail={"result_keys": sorted(result)
+                                     if isinstance(result, dict) else None},
+                             content=json.dumps(result, ensure_ascii=False,
+                                                default=str)
+                             if result is not None else None)
         return ok
 
     def fail(self, task_id, error=None):
@@ -321,6 +371,10 @@ class DagScheduler:
         self._emit("task", "failed",
                    {"task_id": task_id, "error": str(error) if error else None,
                     "blocked": blocked_now})
+        self.trace_event("task_failed", task_id=task_id,
+                         summary=f"失败 {task_id}",
+                         detail={"error": str(error) if error is not None else "failed",
+                                 "blocked_downstream": blocked_now})
         return blocked_now
 
     # ------------------------------------------------------------------

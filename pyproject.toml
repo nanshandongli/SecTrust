@@ -87,6 +87,7 @@ py-modules = [
     "task_center_web",
     "task_registry",
     "threads",
+    "trace",
     "voice",
 ]
 # 子包（含 __init__.py 的全部目录）

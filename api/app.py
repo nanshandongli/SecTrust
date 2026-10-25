@@ -25,6 +25,7 @@ from approval import ApprovalCenter
 from memory import MemoryStore, _memory_db_path
 from task_registry import TaskRegistry, DEFAULT_DB_PATH
 from templates import execute_scan, list_templates, request_scan
+from trace import TraceStore
 
 from security.oauth import (TokenValidator, ResourceServerValidator, extract_bearer,
                             protected_resource_metadata, www_authenticate)
@@ -87,6 +88,8 @@ class RegistryAPI:
         ("DELETE", r"^/memory/([^/]+)/([^/]+)$", "_memory_forget"),
         ("POST", r"^/scan/request$", "_scan_request"),
         ("POST", r"^/scan/execute$", "_scan_execute"),
+        ("GET", r"^/traces$", "_trace_list"),
+        ("GET", r"^/traces/([^/]+)$", "_trace_show"),
     ]
 
     def _dispatch(self, method: str, path: str) -> Optional[Tuple[str, Tuple]]:
@@ -272,6 +275,31 @@ class RegistryAPI:
             template_id=body.get("template_id"),
         )
         return 200, res
+
+    def _trace_db_path(self) -> str:
+        return os.getenv("TRACE_DB_PATH") or os.path.join(
+            os.path.dirname(self.db_path or DEFAULT_DB_PATH) or "data", "trace.db")
+
+    def _trace_list(self, args, body, q):
+        store = TraceStore(db_path=self._trace_db_path())
+        try:
+            rows = store.list(limit=int(q.get("limit", ["50"])[0]),
+                              status=q.get("status", [None])[0])
+        finally:
+            store.close()
+        return 200, rows
+
+    def _trace_show(self, args, body, q):
+        store = TraceStore(db_path=self._trace_db_path())
+        try:
+            meta = store.get(args[0])
+            if meta is None:
+                return 404, {"error": "not found"}
+            events = store.events(args[0], after_seq=int(q.get("after_seq", ["0"])[0]),
+                                  limit=int(q["limit"][0]) if "limit" in q else None)
+        finally:
+            store.close()
+        return 200, {"trace": meta, "events": events}
 
     # ---------- HTTP 处理器 ----------
     def make_handler(self):
