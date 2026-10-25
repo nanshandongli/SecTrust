@@ -276,6 +276,32 @@ class ResultSummarizer:
         - trace    : 需有 by_task(task_id)→{trace_id,events}、events(trace_id)、get(trace_id)
         - cost     : 需有 task_cost(task_id)、dashboard(days, top)
         - approval : 需有 approvals_for_task(task_id)、audit(approval_id)
+
+        ── 两级 Trace 视图（结案报告可复用的核心）─────────────────────────
+        结案报告对同一条 trace 给出**两层**视角，配比规则固定如下：
+
+        ① 逐任务切片（第二节「逐任务明细 · Trace 回放」）：
+           只取 `e.task_id == 本任务` 的事件，按 seq 局部有序。
+           · 普通叶子任务通常 **2 条**：plan_built + task_completed。
+           · 高危任务经 ApprovalCenter 后 **+2 条**：approval_requested +
+             approval_decided → 共 **2~4 条**。
+           （本仓库 5 任务流水线实证：research/lint/fetch/analyze 各 2 条、
+            publish 4 条。）
+
+        ② 全局回放（第三节「全局轨迹回放」）：
+           整条 trace 按 seq **全量一次**（流水线事件总数，本例 12 条），
+           用于跨任务因果排序；它**不**重复进入每个任务的切片。
+
+        ★ 配比本质 = 对整条 trace 按 task_id 做**分区（partition）而非复制**：
+          每条事件恰好归属一个任务，故「各任务切片事件数之和 == 全局回放事件数」。
+          这带来两个好处：单任务聚焦 + 全局俯瞰，且零冗余、零信息丢失。
+
+        ✗ 历史坑：早期实现把整条 12 事件 trace 直接塞进每个任务的 Trace 回放，
+          既重复 N 倍又淹没单任务焦点。现一律改为「分区 + 全局一次」。
+
+        扩展指引：per-task 切片条数 = 该任务自身产生的事件数（审批 +2、
+        未来新增事件类型同理）；全局回放条数始终 = trace 事件总数，
+        与任务数无关。改此配比前先读 docs/closure_report_trace_model.md。
         """
         base = self.collect(registry, task_ids=task_ids)
         tasks_out = []
@@ -285,6 +311,9 @@ class ResultSummarizer:
                 try:
                     bt = trace.by_task(t["task_id"])
                     if bt.get("trace_id"):
+                        # 两级 Trace 视图 ①：只取「本任务」的事件做切片（partition，
+                        # 非整条复制）——普通任务 2 条、高危任务 +2（审批）。
+                        # 整条 trace 的一次性全量回放在第三节单独呈现，互不重复。
                         evs = [e for e in bt.get("events", [])
                                if e.get("task_id") == t["task_id"]]
                         trace_sec = {"available": True, "trace_id": bt["trace_id"],
