@@ -1,5 +1,5 @@
 > [!WARNING]
-> **实验性项目（v0.9.0-alpha）**：可运行、690 项测试全过的**原型**，未经过生产流量检验。
+> **实验性项目（v0.9.0-alpha）**：可运行、720 项测试全过的**原型**，未经过生产流量检验。
 > 已在单机多进程场景验证；跨机分布式（Redis 后端）已实现但未实测。欢迎试用与提 issue，API 可能变动。
 
 <div align="right">
@@ -19,7 +19,7 @@ git clone https://github.com/nanshandongli/SecTrust.git
 cd SecTrust
 
 python demo.py                                   # ① 核心契约自测（含真·跨进程并发）
-python -m unittest discover -s tests -p "test_*.py"   # ② 全量 690 项测试
+python -m unittest discover -s tests -p "test_*.py"   # ② 全量 720 项测试
 python task_center_web.py                        # ③ 浏览器打开 http://127.0.0.1:8090 看任务看板
 ```
 
@@ -80,7 +80,7 @@ runner 用 `--api-base` 即可把登记处/心跳写到远程中心，从而放�
 | `demo.py` | 5 条最小验收的自测脚本（含真·跨进程并发） |
 | `DESIGN.md` | **多渠道/多技能/多模型 运行时扩展设计**（架构、信任边界、密钥管理） |
 | `.env.example` | 全部环境变量清单（密钥只从环境变量读） |
-| `tests/` | 单元测试（unittest；验收 + WAL 健壮性 + 运行时回归 + 象棋原型 + DAG 调度 + 编排层应用 + 执行层 + 消息框架 + 轨迹回放 + 成本打点），共 **690** 例（全过） |
+| `tests/` | 单元测试（unittest；验收 + WAL 健壮性 + 运行时回归 + 象棋原型 + DAG 调度 + 编排层应用 + 执行层 + 消息框架 + 轨迹回放 + 成本打点 + Docker 沙箱八条规格），共 **720** 例（全过） |
 | `tools/self_audit.py` | **自检评测脚本**：从代码与运行时取证（功能清点/性能实测/扫描检出率/记忆/技能/证据门禁/安全穿透），输出 JSON |
 | `SELF_AUDIT_REPORT.md` | **自检评测报告**：实测数据 + 竞品对比 + 评分卡（含发现并修复的 9 个真实缺陷：v1 的 3 个 + 深度轮 6 个） |
 | `approval.py` | **审批中心（Human-in-the-loop）**：高权限动作先挂起等真人批准，超时默认拒绝 |
@@ -334,7 +334,7 @@ python task_center_web.py --db-path data/task_registry.db --port 8090
 | 支柱 | 一句话 | 实现 |
 |------|--------|------|
 | Human-in-the-loop 审批 | 高权限动作先等人确认，超时默认拒绝 | `approval.py` |
-| 沙箱隔离执行 | 危险动作只在容器/远程/受限环境跑 | `sandbox/` |
+| 沙箱隔离执行 | 危险动作只在容器/远程/受限环境跑（Docker 按八条规格硬化） | `sandbox/` |
 | 跨进程任务审计 | 所有动作经登记处留痕可回溯 | `task_registry.py` |
 | 文件越权拦截 | 本地降级模式拦截跳出 jail 的访问 | `sandbox.LocalSandbox` |
 | 多模型降级 | 缺 key/厂商不可用自动回落 Mock | `models.ModelRouter` |
@@ -342,6 +342,22 @@ python task_center_web.py --db-path data/task_registry.db --port 8090
 
 **重要诚实声明**：`SandboxManager.auto()` 在无 Docker / E2B 时回退**本地受限降级**，它是弱隔离，
 **仅用于可信低强度任务，切勿用来跑不可信代码**。生产务必上 Docker 或 E2B 强隔离。
+
+**Docker 后端八条规格**（`DockerSandbox`，runc 优先、gVisor/Kata 预留）：
+
+| # | 规格 | 落地 |
+|---|------|------|
+| 1 | 每任务独立容器，结束即销毁 | `--rm` + 超时/异常显式 `docker kill` + `cleanup_stale()` 跨进程兜底 |
+| 2 | 非 root 用户运行 | `--user` 默认 nobody（POSIX 非 root 调用者用自身 uid:gid） |
+| 3 | 根文件系统只读 | `--read-only`，仅 `/tmp`（tmpfs）与输出目录可写 |
+| 4 | 默认断网，审批后才外发 | `--network none`；`network=` 非 none 必须持已批准 `approval_id`（`ApprovalCenter.is_approved` 鸭子类型，管理层与后端双重校验） |
+| 5 | 限制 CPU/内存/进程数 | `--cpus` / `--memory`+`--memory-swap`（禁 swap）/ `--pids-limit` |
+| 6 | 输入只读、输出单独挂载 | `-v input:/input:ro`、`-v output:/output` |
+| 7 | 不暴露任意 shell | `allowed_commands` 白名单只放行受控 Tool，拒 shell 字符串 |
+| 8 | 更强隔离可升级 | `--runtime` 透传（runsc/kata），当前只验证 runc 调用链 |
+
+不改代码套用规格：`SECTRUST_SANDBOX_IMAGE/MEMORY_MB/CPUS/PIDS/ALLOWED/PULL/RUNTIME/NETWORK/ROOTFS`
+环境变量（见 `SandboxManager.docker_from_env()` 文档串）。
 
 ---
 
@@ -406,7 +422,9 @@ A. 当前 SQLite 方案要求 runner 与 task_center 同机。跨机器需改为
 A. WAL 模式下未 checkpoint 的数据在 `-wal`/`-shm` 里。务必用 `backup()`（sqlite3.backup 自动合并）或先 `wal_checkpoint(TRUNCATE)` 再整目录复制。见第 8.1 节。
 
 **Q3. 沙箱本地降级安全吗？**
-A. **不安全（弱隔离）**，只用于可信低强度任务。生产请配 Docker（`docker run --network none`）或 E2B 远程沙箱。见 SECURITY.md。
+A. **不安全（弱隔离）**，只用于可信低强度任务。生产请配 Docker 强隔离——本仓库 Docker 后端已按
+八条规格硬化（非 root、只读根文件系统、默认断网、资源上限、输入只读/输出隔离、命令白名单），
+外发网络须持已批准审批。见 SECURITY.md 与第 10 节。
 
 **Q4. 没填 API key 会崩吗？**
 A. 不会。模型层缺 key 自动降级到 Mock（`models.ModelRouter`），运行时照常跑；渠道/技能缺配置会回退 mock 或跳过 GitHub 源并打印提示。

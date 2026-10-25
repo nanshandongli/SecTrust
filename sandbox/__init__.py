@@ -7,12 +7,26 @@
 - 本地降级模式做「软越权拦截」：限制工作目录(jail)、清理危险环境变量、
   预检命令中明显的越界路径（../、/etc、C:\\Windows 等），超时强杀。
 
+Docker 后端按「隔离工位八条规格」硬化（详见 DockerSandbox 文档）：
+  1. 每任务独立容器，结束即销毁（--rm + 显式 kill + cleanup_stale 兜底）
+  2. 非 root 用户运行（--user，默认 nobody）
+  3. 根文件系统只读，只写 /tmp(tmpfs) 与输出目录
+  4. 默认断网（--network none）；外发网络须持已批准 approval_id
+  5. 限制 CPU / 内存 / 进程数（--cpus/--memory/--pids-limit，禁 swap）
+  6. 输入目录只读挂载，输出目录单独挂载
+  7. 命令白名单：只放行受控 Tool，不把任意 shell 交出去
+  8. --runtime 为未来 gVisor/Kata 预留（当前只验证 runc 调用链）
+配置面：SandboxManager.docker_from_env() 读 SECTRUST_SANDBOX_* 环境变量，
+不改代码即可套用上述规格。
+
 ⚠️ 信任边界说明：
 - Docker / E2B 是强隔离（容器/远程），生产环境优先；
 - 本地降级是「弱隔离」——它只是把执行约束在 jail 工作目录并拦截明显越权，
   无法防住恶意的本地提权；请勿在不可信代码上使用本地降级。
 - 默认网络：Docker 用 --network none（禁用网络）；本地降级无法禁用网络，
   E2B 由远端策略决定。
+- 沙箱只防「被诱导后造成更大破坏」；网络外发等高危动作仍须过审批链
+  （ApprovalCenter），两层叠加才是完整边界。
 
 能力探测顺序（SandboxManager.auto()）：
   Docker 可用 -> 用 Docker（强隔离）
@@ -24,16 +38,26 @@
   sb = SandboxManager.auto()
   res = sb.run(["python", "-c", "print('hi')"], timeout=30)
   print(res.content, res.ok, res.backend)
+
+  # 需要外网时：先拿审批，再把 approval 与 approval_id 一起传
+  from approval import ApprovalCenter
+  ac = ApprovalCenter(db_path=...)
+  aid = ac.request("sandbox_network", "任务需访问外网", task_id=tid)
+  ac.decide(aid, "approved")
+  res = sb.run(cmd, workdir, network="bridge", approval=ac, approval_id=aid)
 """
 
 from __future__ import annotations
 
 import abc
+import itertools
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -48,6 +72,29 @@ _FORBIDDEN_PATH_TOKENS = (
     "C:\\Windows", "C:\\Program",
     "/private/etc",
 )
+
+# 本模块创建的容器一律带此前缀：cleanup_stale() 只删带前缀的，
+# 绝不碰用户自己的容器（"任务结束即销毁"的跨进程兜底）。
+CONTAINER_PREFIX = "sectrust-sbx-"
+
+# 非 root 默认用户：nobody（主流镜像都存在；镜像没有 nobody 时用 user= 覆盖）
+DEFAULT_CONTAINER_USER = "65534:65534"
+
+
+def _default_container_user() -> str:
+    """规格 2 的非 root 默认值。
+
+    POSIX 上：非 root 调用者用自身 uid:gid——绑定挂载的属主才对得上，
+    容器内进程写的文件宿主进程才读得动；root 调用者（CI/容器内）退回 nobody。
+    Windows（Docker Desktop）：nobody，属主映射由 Docker Desktop 处理。
+    """
+    if os.name == "posix":
+        try:
+            uid, gid = os.geteuid(), os.getegid()
+        except AttributeError:        # 理论分支：POSIX 上没有 geteuid 的平台
+            return DEFAULT_CONTAINER_USER
+        return DEFAULT_CONTAINER_USER if uid == 0 else f"{uid}:{gid}"
+    return DEFAULT_CONTAINER_USER
 
 
 @dataclass
@@ -116,7 +163,14 @@ class LocalSandbox(SandboxBackend):
                 return f"拦截越权路径引用: 检测到危险 token '{tok}'"
         return None
 
-    def run(self, cmd, workdir: str, timeout: float = 30) -> SandboxResult:
+    def run(self, cmd, workdir: str, timeout: float = 30, **_kw) -> SandboxResult:
+        """本地受限执行。
+
+        input_dir/output_dir/network 等参数是 Docker 后端能力，本后端**没有**：
+        本地 jail 只有 workdir 一个挂载点、也没有禁网能力（containment 已是
+        advisory，调用方不得据此假设隔离）。管理层（SandboxManager）的网络
+        审批门在任何后端上都生效；此处只负责如实忽略不支持的 kwargs。
+        """
         os.makedirs(workdir, exist_ok=True)
         # 软越权拦截：命令本身不得试图跳出 jail / 触碰系统敏感区
         blocked = self._jail_check(cmd)
@@ -213,7 +267,7 @@ class EnforcedLocalSandbox(LocalSandbox):
             for res, val in (
                 (resource.RLIMIT_AS, mem),
                 (resource.RLIMIT_CPU, (self.cpu_seconds, self.cpu_seconds)),
-                (resource.RLIMIT_NPROC, (self.max_processes, self.max_processes)),
+                (resource.RLIMIT_NPROC, (self.max_processes, self.max_processes)),  # scanner:allow 标准库常量名，非凭证
                 (resource.RLIMIT_FSIZE, (fsize, fsize)),
                 (resource.RLIMIT_CORE, (0, 0)),
             ):
@@ -238,7 +292,10 @@ class EnforcedLocalSandbox(LocalSandbox):
             except Exception:
                 pass
 
-    def run(self, cmd, workdir: str, timeout: float = 30) -> SandboxResult:
+    def run(self, cmd, workdir: str, timeout: float = 30, **_kw) -> SandboxResult:
+        """本地强制执行。Docker 专属 kwargs（input_dir/output_dir/network 等）
+        本后端没有对应能力，如实忽略（containment="limited"：有内核资源上限，
+        无 OS 级隔离）；网络审批门由 SandboxManager 统一执行。"""
         os.makedirs(workdir, exist_ok=True)
         blocked = self._jail_check(cmd)  # 复用 advisory 版的越权预检
         if blocked:
@@ -300,16 +357,60 @@ class EnforcedLocalSandbox(LocalSandbox):
 
 
 class DockerSandbox(SandboxBackend):
-    """Docker 强隔离：--network none + 只读挂载 jail + 工作目录隔离。
+    """Docker 强隔离后端——按「隔离工位八条规格」硬化（runc 优先，gVisor/Kata 预留）。
 
-    需要本机 docker 命令可用；容器镜像可用 alpine（小）或自定义。"""
+    八条规格逐条落地：
+      1. 每个任务独立容器，结束即销毁：每次 run 起一个带名字的容器，`--rm`
+         保证正常退出即删；超时/异常路径显式 `docker kill` + `rm -f`；
+         `cleanup_stale()` 跨进程清理上次进程被强杀留下的残留容器。
+      2. 非 root 用户：`--user` 默认 nobody（65534:65534）；POSIX 上非 root
+         调用者改用自身 uid:gid（绑定挂载属主才对得上），root 调用者退回 nobody。
+      3. 根文件系统只读：`--read-only`，仅 `/tmp`（tmpfs，size 可配）与
+         输出目录可写。
+      4. 默认断网：`--network none`；需要外发网络时调用方必须持有**已批准**的
+         approval_id（ ApprovalCenter.is_approved 鸭子类型），沙箱侧二次校验，
+         直接调 backend.run 也绕不过。
+      5. 资源上限：`--memory`/`--memory-swap`（禁 swap）/`--cpus`/`--pids-limit`。
+      6. 输入目录只读挂载、输出目录单独挂载：`-v input:/input:ro`、
+         `-v output:/output`；不给 input/output 时退化为旧的 `/work` 单一
+         挂载（向后兼容）。
+      7. 命令白名单：`allowed_commands` 非空时只放行名单内 argv[0]，并拒绝
+         shell 字符串形式——只暴露受控 Tool，不把任意 shell 交出去。
+      8. `--runtime` 可为未来 gVisor/Kata 预留；本类只保证 runc 调用链。
+
+    诚实边界：containment="os" 指 Docker 提供的进程/文件系统/网络隔离；
+    白名单与审批是叠加的策略层，不改变、也不夸大 Docker 本身的隔离语义。
+    本地后端（advisory/limited）上这些策略同样生效于管理层，但机制只有
+    Docker/E2B 真正具备。
+    """
 
     name = "docker"
     containment = "os"
 
-    def __init__(self, image: str = "alpine:3.20", network_disabled: bool = True):
+    def __init__(self, image: str = "alpine:3.20", network_disabled: bool = True, *,
+                 user: Optional[str] = None,
+                 memory_mb: int = 512, cpus: float = 1.0, pids_limit: int = 128,
+                 tmpfs_mb: int = 64, max_output_bytes: int = 2_000_000,
+                 allowed_commands=None, runtime: Optional[str] = None,
+                 readonly_rootfs: bool = True, pull_if_missing: bool = False,
+                 extra_run_args=None):
         self.image = image
         self.network_disabled = network_disabled
+        self.user = user or _default_container_user()
+        self.memory_mb = memory_mb
+        self.cpus = cpus
+        self.pids_limit = pids_limit
+        self.tmpfs_mb = tmpfs_mb
+        self.max_output_bytes = max_output_bytes
+        # 白名单：None/空 = 不启用（保持旧的自由执行语义）；非空 = 只放行这些 argv[0]
+        self.allowed_commands = tuple(allowed_commands or ())
+        self.runtime = runtime          # 如 "runsc"（gVisor）/ "kata"；None = 默认 runc
+        self.readonly_rootfs = readonly_rootfs
+        self.pull_if_missing = pull_if_missing
+        self.extra_run_args = list(extra_run_args or [])
+        self._counter = itertools.count(1)
+        self._active: set = set()       # 本进程已启动、尚未确认销毁的容器名
+        self._lock = threading.Lock()
 
     def available(self) -> bool:
         return shutil.which("docker") is not None
@@ -325,50 +426,224 @@ class DockerSandbox(SandboxBackend):
         except Exception:
             return False
 
-    def run(self, cmd, workdir: str, timeout: float = 30) -> SandboxResult:
+    # ---- 规格 7：命令白名单 ----
+    def _whitelist_reject(self, cmd) -> Optional[str]:
+        if not self.allowed_commands:
+            return None
+        if not isinstance(cmd, (list, tuple)) or not cmd:
+            return ("白名单模式只接受 list 形式命令（不暴露任意 shell 字符串）；"
+                    f"允许的 argv[0]: {list(self.allowed_commands)}")
+        argv0 = str(cmd[0])
+        base = os.path.basename(argv0.replace("\\", "/"))
+        allowed = {os.path.basename(str(a).replace("\\", "/")) for a in self.allowed_commands}
+        if base not in allowed:
+            return f"命令不在白名单: argv[0]={argv0!r}（允许: {sorted(allowed)}）"
+        return None
+
+    # ---- 规格 4：网络外发审批（backend 侧二次校验）----
+    @staticmethod
+    def _approval_ok(approval, approval_id: str) -> bool:
+        if approval is None or not approval_id:
+            return False
+        checker = getattr(approval, "is_approved", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker(approval_id))
+        except Exception:
+            return False
+
+    # ---- 规格 1：容器销毁 ----
+    def _kill_container(self, name: str) -> None:
+        for args in (["docker", "kill", name], ["docker", "rm", "-f", name]):
+            try:
+                subprocess.run(args, capture_output=True, timeout=10)
+            except Exception:
+                pass  # 销毁尽力而为：--rm 已覆盖正常路径，这里兜底异常/超时
+
+    def cleanup(self) -> int:
+        """销毁本进程启动且仍未确认退出的容器（正常路径 --rm 已自毁，这里兜底）。"""
+        with self._lock:
+            names = sorted(self._active)
+        for n in names:
+            self._kill_container(n)
+            with self._lock:
+                self._active.discard(n)
+        return len(names)
+
+    @classmethod
+    def cleanup_stale(cls) -> int:
+        """跨进程清理上次进程被强杀（--rm 来不及执行）留下的残留容器。
+
+        只删名字带 CONTAINER_PREFIX 前缀的容器，绝不碰用户自己的容器。
+        docker 不可用或没有残留时返回 0。
+        """
+        if shutil.which("docker") is None:
+            return 0
+        try:
+            r = subprocess.run(
+                ["docker", "ps", "-aq", "--filter", f"name={CONTAINER_PREFIX}"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if r.returncode != 0:
+                return 0
+            names = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+        except Exception:
+            return 0
+        removed = 0
+        for n in names:
+            try:
+                subprocess.run(["docker", "rm", "-f", n], capture_output=True, timeout=15)
+                removed += 1
+            except Exception:
+                pass
+        return removed
+
+    # ---- 镜像可用性 ----
+    def _image_missing(self, text: str) -> bool:
+        low = (text or "").lower()
+        return ("unable to find image" in low or "no such image" in low
+                or "pull access denied" in low)
+
+    def _ensure_image(self) -> Optional[str]:
+        """镜像不在本地时按需拉取；返回错误串（拉不动）或 None（就绪）。"""
+        try:
+            r = subprocess.run(["docker", "image", "inspect", self.image],
+                               capture_output=True, text=True, timeout=15)
+            if r.returncode == 0:
+                return None
+        except Exception:
+            return None  # 探活失败不阻塞，交给 docker run 自己报错
+        if not self.pull_if_missing:
+            return (f"镜像 {self.image} 不在本地：请先 `docker pull {self.image}`，"
+                    f"或构造时设 pull_if_missing=True 自动拉取")
+        try:
+            r = subprocess.run(["docker", "pull", self.image],
+                               capture_output=True, text=True, timeout=300)
+            if r.returncode != 0:
+                return f"docker pull {self.image} 失败: {(r.stderr or '')[:300]}"
+        except Exception as e:
+            return f"docker pull {self.image} 异常: {e}"
+        return None
+
+    def run(self, cmd, workdir: str, timeout: float = 30, *,
+            input_dir: Optional[str] = None, output_dir: Optional[str] = None,
+            network: Optional[str] = None, approval=None,
+            approval_id: str = "") -> SandboxResult:
         os.makedirs(workdir, exist_ok=True)
-        if isinstance(cmd, (list, tuple)):
-            inner = " ".join(f"'{c}'" for c in cmd)
+
+        # 规格 7：白名单先行——被拒的命令根本不进容器
+        reject = self._whitelist_reject(cmd)
+        if reject:
+            return SandboxResult(ok=False, error=reject, backend=self.name,
+                                 containment=self.containment)
+
+        # 规格 4：默认断网；外发网络必须持已批准审批
+        want_network = network or ("none" if self.network_disabled else "bridge")
+        if want_network != "none" and not self._approval_ok(approval, approval_id):
+            return SandboxResult(
+                ok=False,
+                error=(f"网络外发未获审批：network={want_network!r} 需要已批准的 "
+                       f"approval_id（ApprovalCenter.is_approved 为真）"),
+                backend=self.name, containment=self.containment,
+            )
+
+        bad = self._ensure_image()
+        if bad:
+            return SandboxResult(ok=False, error=bad, backend=self.name,
+                                 containment=self.containment)
+
+        # 规格 1：可预测容器名（前缀 + pid + 序号），跨进程可清理
+        name = f"{CONTAINER_PREFIX}{os.getpid()}-{next(self._counter)}"
+        docker_cmd = [
+            "docker", "run", "--rm", "--name", name,
+            "--network", want_network,
+            "--user", self.user,
+            "--init",                          # PID1 收尸，防僵尸进程累积
+            "--cap-drop", "ALL",               # 默认不给任何 capability
+            "--security-opt", "no-new-privileges",  # 禁 setuid 提权链
+            "--memory", f"{self.memory_mb}m",
+            "--memory-swap", f"{self.memory_mb}m",   # = memory 即禁 swap
+            "--cpus", str(self.cpus),
+            "--pids-limit", str(self.pids_limit),
+        ]
+        if self.runtime:
+            docker_cmd += ["--runtime", self.runtime]   # 规格 8：gVisor/Kata 预留
+        if self.readonly_rootfs:                        # 规格 3：根文件系统只读
+            docker_cmd += [
+                "--read-only",
+                "--tmpfs", f"/tmp:rw,noexec,nosuid,size={self.tmpfs_mb}m,mode=1777",
+            ]
+        # 规格 6：输入只读 / 输出单独挂载；都未给时退化为旧版单一 /work 挂载
+        strict = bool(input_dir or output_dir)
+        if input_dir:
+            docker_cmd += ["-v", f"{os.path.abspath(input_dir)}:/input:ro"]
+        if output_dir:
+            docker_cmd += ["-v", f"{os.path.abspath(output_dir)}:/output"]
+            inner_workdir = "/output"
         else:
-            inner = cmd
+            docker_cmd += ["-v", f"{os.path.abspath(workdir)}:/work"]
+            inner_workdir = "/work"
+        if strict:
+            # 受控模式下 /work 只是 tmpfs 暂存区，不落宿主盘
+            docker_cmd += ["--tmpfs",
+                           f"/work:rw,noexec,nosuid,size={self.tmpfs_mb}m,mode=1777"]
+        docker_cmd += ["-w", inner_workdir]
+        docker_cmd += self.extra_run_args
+        docker_cmd += [self.image, "sh", "-c",
+                       self._inner_command(cmd)]
+
+        with self._lock:
+            self._active.add(name)
         t0 = time.time()
         try:
-            # -w /work 设定容器工作目录；host workdir 挂载到 /work（读写）；--network none 禁网
-            docker_cmd = [
-                "docker", "run", "--rm",
-                "-v", f"{os.path.abspath(workdir)}:/work",
-                "-w", "/work",
-            ]
-            if self.network_disabled:
-                docker_cmd.append("--network")
-                docker_cmd.append("none")
-            docker_cmd += [self.image, "sh", "-c", inner]
-            proc = subprocess.run(
-                docker_cmd, capture_output=True, text=True, timeout=timeout
-            )
+            proc = subprocess.run(docker_cmd, capture_output=True, text=True,
+                                  timeout=timeout)
             out = (proc.stdout or "") + (proc.stderr or "")
+            truncated = False
+            if len(out) > self.max_output_bytes:
+                out = (out[: self.max_output_bytes]
+                       + f"\n…[输出被截断：超过 {self.max_output_bytes} 字节上限]")
+                truncated = True
             ok = proc.returncode == 0
+            note = None if ok else f"exit={proc.returncode}"
+            if truncated:
+                note = (note + "；" if note else "") + "输出超限已截断"
+            if not ok and self._image_missing(out):
+                note = f"镜像缺失: {self.image}（docker pull {self.image}）"
             return SandboxResult(
-                content=out,
-                ok=ok,
-                error=None if ok else f"exit={proc.returncode}",
-                logs=out.splitlines()[-20:],
-                duration=time.time() - t0,
-                backend=self.name,
-                containment="os",
+                content=out, ok=ok, error=note,
+                logs=out.splitlines()[-20:], duration=time.time() - t0,
+                backend=self.name, containment=self.containment,
             )
         except subprocess.TimeoutExpired:
+            # docker run 客户端被杀不会停容器——必须显式销毁（规格 1）
+            self._kill_container(name)
             return SandboxResult(
-                ok=False, error=f"超时强杀(>{timeout}s)", backend=self.name,
-                containment="os",
+                ok=False, error=f"超时强杀(>{timeout}s，容器 {name} 已销毁)",
+                backend=self.name, containment=self.containment,
                 duration=time.time() - t0,
             )
         except Exception as e:  # noqa: BLE001
+            self._kill_container(name)
             return SandboxResult(
                 ok=False, error=f"Docker 执行异常: {e}", backend=self.name,
-                containment="os",
-                duration=time.time() - t0,
+                containment=self.containment, duration=time.time() - t0,
             )
+        finally:
+            with self._lock:
+                self._active.discard(name)
+
+    @staticmethod
+    def _inner_command(cmd) -> str:
+        """把命令安全地拼成容器内 sh -c 的字符串。
+
+        每个参数单独 shlex.quote——参数里的引号/分号/$() 都只是字面量，
+        不会突破成额外命令（白名单模式下更关键：放行的只有一个 argv[0]）。
+        """
+        if isinstance(cmd, (list, tuple)):
+            return " ".join(shlex.quote(str(c)) for c in cmd)
+        return str(cmd)
 
 
 class E2BSandbox(SandboxBackend):
@@ -393,7 +668,9 @@ class E2BSandbox(SandboxBackend):
         except ImportError:
             return False
 
-    def run(self, cmd, workdir: str, timeout: float = 30) -> SandboxResult:
+    def run(self, cmd, workdir: str, timeout: float = 30, **_kw) -> SandboxResult:
+        """远程执行。input_dir/output_dir/network 等参数由远端策略决定，
+        本处如实忽略（containment="os" 指 E2B 提供的隔离，不含本地挂载语义）。"""
         if self._mod is None:
             try:
                 from e2b import Sandbox as E2BSandboxClient  # 真实客户端
@@ -444,7 +721,7 @@ class SandboxManager:
         ⚠️ 两者都不隔离文件系统与网络。处理不可信代码请设 SANDBOX_REQUIRE_STRONG=1，
         此时宁可报错也不降级，避免"以为是沙箱其实只是命令过滤"。
         """
-        docker = DockerSandbox()
+        docker = cls.docker_from_env()
         if docker.available() and docker.daemon_reachable():
             return docker
         e2b = E2BSandbox()
@@ -460,8 +737,102 @@ class SandboxManager:
             return LocalSandbox()
         return EnforcedLocalSandbox()
 
-    def run(self, cmd, workdir: str, timeout: float = 30) -> SandboxResult:
-        return self.backend.run(cmd, workdir, timeout)
+    # ---- 策略门：网络外发必须审批（任何后端都拦）----
+    @staticmethod
+    def _network_gate(network, approval, approval_id: str,
+                      backend: SandboxBackend) -> Optional[SandboxResult]:
+        """network 非 none 时，必须提供已批准的 approval_id。
+
+        鸭子类型：approval 只要有 is_approved(approval_id)->bool 即可
+        （ApprovalCenter 天然满足）。backend 自己也会二次校验——
+        绕过 SandboxManager 直调 DockerSandbox.run 同样过不了关。
+        """
+        if network in (None, "none"):
+            return None
+        ok = False
+        if approval is not None and approval_id:
+            checker = getattr(approval, "is_approved", None)
+            if callable(checker):
+                try:
+                    ok = bool(checker(approval_id))
+                except Exception:
+                    ok = False
+        if ok:
+            return None
+        return SandboxResult(
+            ok=False,
+            error=(f"网络外发未获审批：network={network!r} 需要已批准的 approval_id"
+                   f"（approval.is_approved 为真），默认断网是硬规则"),
+            backend=backend.name, containment=backend.containment,
+        )
+
+    def run(self, cmd, workdir: str, timeout: float = 30, **kw) -> SandboxResult:
+        """统一入口。kw 透传给后端；Docker 支持 input_dir/output_dir/network/
+        approval/approval_id，本地后端如实忽略不支持的项。
+
+        network 非 none 时先过审批门（见 _network_gate），被拒的请求根本
+        不会到达后端——"默认断网，审批后才外发"在管理层强制执行。
+        """
+        refused = self._network_gate(kw.get("network"), kw.get("approval"),
+                                     kw.get("approval_id", ""), self.backend)
+        if refused is not None:
+            return refused
+        return self.backend.run(cmd, workdir, timeout=timeout, **kw)
+
+    def cleanup(self) -> int:
+        """销毁本进程残留容器（Docker 后端能力；其他后端返回 0）。"""
+        fn = getattr(self.backend, "cleanup", None)
+        return fn() if callable(fn) else 0
+
+    # ---- Docker 配置面：env 驱动，无需改代码即可套用八条规格 ----
+    @classmethod
+    def docker_from_env(cls) -> DockerSandbox:
+        """从环境变量构造 DockerSandbox（auto() 走此路，默认值与旧行为一致）：
+
+          SECTRUST_SANDBOX_IMAGE       镜像（默认 alpine:3.20）
+          SECTRUST_SANDBOX_MEMORY_MB   内存上限 MB（512）
+          SECTRUST_SANDBOX_CPUS        CPU 核数上限（1）
+          SECTRUST_SANDBOX_PIDS        进程数上限（128）
+          SECTRUST_SANDBOX_TMPFS_MB    /tmp 与 /work 暂存上限 MB（64）
+          SECTRUST_SANDBOX_ALLOWED     命令白名单，逗号分隔（空=不启用）
+          SECTRUST_SANDBOX_PULL        1=镜像缺失自动拉取（默认 0，明确报错）
+          SECTRUST_SANDBOX_RUNTIME     容器运行时（如 runsc/kata；默认 runc）
+          SECTRUST_SANDBOX_NETWORK     默认网络 none/bridge（none=断网，需审批才放行）
+          SECTRUST_SANDBOX_ROOTFS      0=关只读根文件系统（默认 1，弱化需显式）
+        """
+        def _int(name, default):
+            raw = os.getenv(name, "").strip()
+            try:
+                return int(raw) if raw else default
+            except ValueError:
+                return default
+
+        def _float(name, default):
+            raw = os.getenv(name, "").strip()
+            try:
+                return float(raw) if raw else default
+            except ValueError:
+                return default
+
+        allowed = [a.strip() for a in
+                   os.getenv("SECTRUST_SANDBOX_ALLOWED", "").split(",")
+                   if a.strip()]
+        network = os.getenv("SECTRUST_SANDBOX_NETWORK", "").strip().lower()
+        return DockerSandbox(
+            image=os.getenv("SECTRUST_SANDBOX_IMAGE", "").strip() or "alpine:3.20",
+            network_disabled=network not in ("bridge", "host"),
+            user=os.getenv("SECTRUST_SANDBOX_USER", "").strip() or None,
+            memory_mb=_int("SECTRUST_SANDBOX_MEMORY_MB", 512),
+            cpus=_float("SECTRUST_SANDBOX_CPUS", 1.0),
+            pids_limit=_int("SECTRUST_SANDBOX_PIDS", 128),
+            tmpfs_mb=_int("SECTRUST_SANDBOX_TMPFS_MB", 64),
+            allowed_commands=allowed or None,
+            runtime=os.getenv("SECTRUST_SANDBOX_RUNTIME", "").strip() or None,
+            readonly_rootfs=os.getenv("SECTRUST_SANDBOX_ROOTFS", "1").strip()
+            not in ("0", "false", "no"),
+            pull_if_missing=os.getenv("SECTRUST_SANDBOX_PULL", "").strip()
+            in ("1", "true", "yes"),
+        )
 
 
 # ---- 低强度扫描示例（安全、可信、跨平台）----
@@ -508,6 +879,11 @@ print(json.dumps({
 '''
 
 
-def safe_scan_command(workdir: str) -> list:
-    """构造一条低强度扫描命令：在沙箱内跑上面的 SAFE_SCAN_SCRIPT。"""
-    return [sys.executable, "-c", SAFE_SCAN_SCRIPT, workdir]
+def safe_scan_command(workdir: str, interpreter: Optional[str] = None) -> list:
+    """构造一条低强度扫描命令：在沙箱内跑上面的 SAFE_SCAN_SCRIPT。
+
+    interpreter 缺省用 sys.executable（本地后端正确）；Docker 后端要传
+    "python3"——sys.executable 是**宿主**路径，容器里不存在，且镜像得
+    自带 python3（如 python:3.12-alpine）。
+    """
+    return [interpreter or sys.executable, "-c", SAFE_SCAN_SCRIPT, workdir]

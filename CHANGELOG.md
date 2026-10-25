@@ -8,6 +8,28 @@
 ## [0.9.0] — 未发布
 
 ### 新增
+- **隔离层：Docker 沙箱八条规格硬化（`sandbox/DockerSandbox`）**——把隔离工位
+  接进 Docker，runc 优先、gVisor/Kata 预留：
+  1. 每任务独立容器、结束即销毁：`--rm` + 超时/异常显式 `docker kill`/`rm -f`，
+     `cleanup_stale()` 按容器名前缀跨进程清理残留（绝不碰非前缀容器）；
+  2. 非 root 运行：`--user` 默认 nobody，POSIX 非 root 调用者用自身 uid:gid
+     （绑定挂载属主才对得上）；
+  3. 根文件系统只读：`--read-only` + tmpfs `/tmp`，只有输出目录可写；
+  4. 默认断网、审批后才外发：`--network none`；`network=` 非 none 必须持已批准
+     `approval_id`（`ApprovalCenter.is_approved` 鸭子类型），SandboxManager 与
+     后端**双重校验**，直调 backend.run 也绕不过；
+  5. 资源上限：`--cpus`/`--memory`+`--memory-swap`（禁 swap）/`--pids-limit`；
+  6. 输入只读挂载（`:/input:ro`）、输出单独挂载（`:/output`），不传时退化旧版
+     单一 `/work` 挂载（向后兼容）；
+  7. 命令白名单：`allowed_commands` 只放行受控 Tool，拒绝 shell 字符串形式，
+     每个参数 `shlex.quote` 防注入；
+  8. `--runtime` 透传（runsc/kata），当前只验证 runc 调用链。
+  另：`--init`/`--cap-drop ALL`/`--security-opt no-new-privileges`/输出截断/
+  镜像缺失明确报错（可选手动/自动拉取）；`SandboxManager.docker_from_env()`
+  读 `SECTRUST_SANDBOX_*` 环境变量不改代码套用规格；`safe_scan_command()`
+  支持容器内解释器名（demo 的 docker 调用链由此真正可跑）。
+  测试：`tests/test_sandbox_docker.py` 30 项（八条规格逐条断言 + 审批门 +
+  真实 ApprovalCenter 集成 + 注入往返 + env 配置面；无需 Docker 守护进程）。
 - **观测层：成本打点（`cost.py`）**——Trace 之上叠一本可归因的成本账：
   - **四层记账**：`model`（输入/输出 Token、调用次数、思考轮次）/
     `tool`（浏览器/语音/文件/外部 API 调用次数）/ `retry`（失败重试、

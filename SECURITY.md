@@ -24,7 +24,7 @@
 
 | 威胁 | 来源 | 缓解措施 | 残余风险 |
 |------|------|----------|----------|
-| 模型/技能产生危险指令（删库、外发数据） | LLM 幻觉、恶意技能 | 审批中心拦截所有副作用动作；沙箱隔离执行 | 审批人误点"批准" |
+| 模型/技能产生危险指令（删库、外发数据） | LLM 幻觉、恶意技能 | 审批中心拦截所有副作用动作；沙箱隔离执行；Docker 默认断网，外发须审批 | 审批人误点"批准" |
 | 不可信远程技能代码执行 | GitHub 拉取技能 | **必须 pin commit/tag + 可信仓库 allowlist + 隔离环境** | 仓库被攻破投毒 |
 | 本地提权 / 文件越权 | 被扫描代码含恶意路径 | 沙箱 jail + 越权路径预检；强隔离用 Docker/E2B | 本地降级为弱隔离 |
 | 单点故障/数据丢失 | 进程崩溃、断电 | WAL + synchronous=FULL；`backup()` 整库合并 | NORMAL 模式丢最近数秒 |
@@ -48,11 +48,19 @@
 未来接入的 Web 按钮决策。所有审批记录落 `approvals` 表，可审计。
 
 ### 3.2 沙箱隔离执行
-- **Docker（强隔离，推荐）**：`docker run --rm --network none -v workdir:/work -w /work`，
-  容器级隔离 + 网络禁用，执行完即销毁。
+- **Docker（强隔离，推荐）**：八条规格硬化——每任务独立容器 `--rm` 结束即毁
+  （超时/异常显式 `docker kill`，`cleanup_stale()` 跨进程兜底）；`--user` 非 root；
+  `--read-only` 根文件系统 + tmpfs `/tmp`，只有输出目录可写；`--network none`
+  默认断网，外发网络须持已批准 `approval_id`（管理层 + 后端双重校验）；
+  `--cpus`/`--memory`（禁 swap）/`--pids-limit` 资源上限；输入目录只读挂载、
+  输出目录单独挂载；`allowed_commands` 白名单只放行受控 Tool（拒 shell 字符串，
+  参数 `shlex.quote` 防注入）；`--init`/`--cap-drop ALL`/`no-new-privileges`。
+  `--runtime` 为 gVisor/Kata 预留（当前只验证 runc 调用链）。
 - **E2B（远程强隔离）**：远程 VM 沙箱，适合无本机 Docker 的场景（需 `pip install e2b` + `E2B_API_KEY`）。
 - **本地降级（弱隔离）**：jail 工作目录 + 清洗环境 + 越权路径预检 + 超时强杀。仅用于可信低强度任务。
 - `SandboxManager.auto()` 按可用性自动选择：docker → e2b → local，并打印当前后端。
+  Docker 配置面走 `SECTRUST_SANDBOX_*` 环境变量（`SandboxManager.docker_from_env()`），
+  不改代码即可套用上述规格。
 
 ### 3.3 跨进程任务审计
 所有入口（各渠道）、执行、结果都经 `TaskRegistry` 登记：`task_id / runner_id / status /

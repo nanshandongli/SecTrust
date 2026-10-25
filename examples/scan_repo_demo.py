@@ -58,9 +58,19 @@ class ScanRepoDemo:
         self.cfg = cfg
         self.reg = TaskRegistry(db_path=cfg.db_path)
         self.ac = ApprovalCenter(db_path=cfg.db_path)
-        # SandboxManager() 默认调用 auto() 探测后端；显式指定时直接包装
-        self.sb = SandboxManager() if backend == "auto" else \
-            SandboxManager(DockerSandbox() if backend == "docker" else LocalSandbox())
+        # SandboxManager() 默认调用 auto() 探测后端；显式指定时直接包装。
+        # docker 后端必须用自带 python3 的镜像：sys.executable 是**宿主**路径，
+        # 容器里不存在（这也是白名单只放行 python3 的原因）。
+        if backend == "docker":
+            self.sb = SandboxManager(DockerSandbox(
+                image="python:3.12-alpine", allowed_commands=["python3"]))
+        elif backend == "auto":
+            self.sb = SandboxManager()
+            if self.sb.backend.name == "docker":
+                self.sb.backend.image = "python:3.12-alpine"
+                self.sb.backend.allowed_commands = ("python3",)
+        else:
+            self.sb = SandboxManager(LocalSandbox())
         self.channel = MockChannel(cfg.channel)  # 仅用于 send 回推
         self.auto_approve = auto_approve
         self.repo_dir = repo_dir
@@ -121,7 +131,10 @@ class ScanRepoDemo:
         self.reg.set_progress(tid, "sandboxing", f"沙箱后端={self.sb.backend.name}，工作目录已 jail")
         print(f"[demo] 进入沙箱[{self.sb.backend.name}]，扫描 {workdir}")
 
-        res = self.sb.run(safe_scan_command(workdir), workdir, timeout=30)
+        # docker 后端用容器内解释器名 python3；本地后端用 sys.executable
+        # （Windows 本地没有 python3 这个名字，别把两件事混成一条命令）
+        interp = "python3" if self.sb.backend.name == "docker" else None
+        res = self.sb.run(safe_scan_command(workdir, interp), workdir, timeout=30)
         self.reg.set_progress(tid, "scanning", "沙箱内扫描执行中…")
 
         if not res.ok:
