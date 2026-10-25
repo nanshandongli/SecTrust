@@ -46,7 +46,16 @@
 任何高权限动作（如 `/scan repo`、调用外部 API、写文件）在 `AgentRunner`/Demo 管线里先调用
 `ApprovalCenter.request()`，任务进入 `pending` 并挂起。`wait_for_decision()` 阻塞等待，
 **超时自动 expire，绝不默认放行**。真人通过 CLI（`python approval.py --approve <id>`）或
-未来接入的 Web 按钮决策。所有审批记录落 `approvals` 表，可审计。
+未来接入的 Web 按钮决策。
+
+**审批审计证据链（#91）**：每条审批在 Trace 轨迹里留下 `approval_requested` /
+`approval_decided` / `approval_expired` 事件，构成可回放、可审计的证据链——
+- 原文不进事件体，只留 blake2b 指纹（`content_hash`），能验真"批的到底是什么"又不囤敏感原文；
+- 高危动作（外发/发布/购买/支付/删除/扫描）事件带 `risk=high` 标记；
+- `approvals` 表新增 `trace_id` 列（审批行自描述，任何进程含 CLI 都能直查轨迹）；
+- `audit(approval_id)` 返回一条审批的完整证据链（审批行 + 全部审批轨迹事件 + 决策耗时）；
+- 留痕全程 best-effort：轨迹写入失败**绝不**挡审批主链路（旁路纪律）。
+`python approval.py --audit <id>` 即可调阅。
 
 ### 3.2 沙箱隔离执行
 - **Docker（强隔离，推荐）**：八条规格硬化——每任务独立容器 `--rm` 结束即毁

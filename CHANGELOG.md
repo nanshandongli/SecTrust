@@ -8,6 +8,29 @@
 ## [0.9.0] — 未发布
 
 ### 新增
+- **审批链强化 + 审计证据链（`approval.py`，#91）**——把「高风险 / 扫描 / 外发」
+  动作的审批过程变成可审计、可回放的证据链，而非只在表里留一行状态：
+  1. **审计事件留痕**：每次审批的 `request` / `decide` / 超时 `expire` 都会在
+     Trace 轨迹里写一条事件（`approval_requested` / `approval_decided` /
+     `approval_expired`），detail 只存脱敏结构、原文只留 blake2b 指纹——
+     能验真"批的到底是什么"又不囤敏感原文。高危动作（`HIGH_RISK_ACTIONS`：
+     send/publish/post/buy/pay/delete/scan）事件带 `risk=high` 标记。
+  2. **审计链自描述**：approvals 表新增 `trace_id` 列（旧库自动迁移，吞
+     `duplicate column` 防并发双重 ALTER），任何进程（含 CLI）不必再解析
+     任务 payload 就能定位轨迹。`audit(approval_id)` 返回一条审批的完整
+     证据链（审批行 + 全部审批轨迹事件 + 决策耗时）。
+  3. **旁路纪律**：轨迹写入全程 best-effort，留痕失败绝不挡审批主链路；
+     trace_id 解析顺序 显式传入 > 任务 payload > 无上下文则不记（不造
+     孤儿轨迹）。`ApprovalCenter(tracer=False)` 可纯表模式运行。
+  4. **连接硬化（与 task_registry 同纪律）**：`_open_conn()` 写探针
+     （`BEGIN IMMEDIATE`+`ROLLBACK`）既挡 Windows 多进程首开半残连接，
+     也把并发首开串行化——消除全新库上 `journal_mode=WAL`/CREATE TABLE
+     的 `database is locked` 竞争；`_retry_write` 失败丢连接重开重试一次，
+     fn 幂等（CREATE TABLE IF NOT EXISTS / 吞重复列的 ALTER）。
+  5. **CLI 扩充**：`--audit <id>` 看审计链、`--sweep [--max-age]` 过期清理。
+  - 测试：`tests/test_approval_trace.py` 16 项（请求/决策/过期事件 + 指纹
+    留痕 + 高危标记 + 显式 trace_id / payload 解析 / 无上下文不记 + 旧库
+    迁移 + 并发迁移竞态 barrier 锁死 + 既有语义兼容）。
 - **分布式：跨机协同三件套（`transport/distributed.py`，Redis 后端）**——
   同机多进程早有 SQLite CAS 认领覆盖；跨机需要三样同机没有的东西：
   1. **分布式锁**（`DistributedLock`）：`SET NX EX` 原子抢锁，WATCH/MULTI/

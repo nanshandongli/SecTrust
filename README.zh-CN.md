@@ -1246,7 +1246,7 @@ trace_start ──→ trace_id 写进各任务 payload
 | 拆解 | `plan_built` | 工序列表、依赖、tier、`<待补>` 标记 |
 | 派单 | `task_claimed` | 哪个 runner 认领、是否原子锁成功 |
 | 执行 | `tool_call` | 浏览器/语音/文件/外部 API，带耗时；失败带 error |
-| 审批 | `approval_requested` / `approval_resolved` | 谁批准、拒绝原因、超时状态 |
+| 审批 | `approval_requested` / `approval_decided` / `approval_expired` | 谁批准、拒绝原因、超时状态、决策耗时（高危动作带 `risk=high`） |
 | 质检 | `quality_rejected` / `quality_passed` | 打回理由、重试轮次 |
 | 收尾 | `task_completed` / `task_failed` / `task_needs_human` | 结果只留键名+指纹；失败带级联阻塞名单 |
 

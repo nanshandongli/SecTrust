@@ -58,7 +58,8 @@ EVENT_KINDS = (
     "task_needs_human",     # 升级人工（不级联，与 failed 语义不同）
     "tool_call",            # 工具调用（浏览器/语音/文件/外部 API）
     "approval_requested",   # 审批发起
-    "approval_resolved",    # 审批结果（批准/拒绝/超时）
+    "approval_decided",     # 审批结果（批准/拒绝）
+    "approval_expired",     # 审批超时（默认拒绝）
     "quality_rejected",     # 质检打回（理由+轮次）
     "quality_passed",       # 质检通过
     "cost_snapshot",        # 成本快照
