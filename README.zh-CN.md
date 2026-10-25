@@ -149,6 +149,10 @@ python task_center_web.py --db-path data/task_registry.db --port 8090
 # 默认 http://127.0.0.1:8090/ ，支持按状态筛选、runner 模糊过滤、3s 自动刷新
 ```
 
+看板实跑截图（Edge 无头模式拍摄，真实数据）：
+
+![task_center 看板（中文）](docs/dashboard_screenshot_zh.png)
+
 ## 5. 部署注意事项（接手必读）
 
 1. **WAL 模式与网络共享**：代码默认开启 WAL 日志 + `busy_timeout=30s`，在**本地磁盘**上并发读多写少表现最好。
