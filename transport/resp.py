@@ -3,7 +3,9 @@ transport/resp.py —— 最小 RESP（Redis Serialization Protocol）客户端�
 
 为什么不用 `pip install redis`：本产品的硬承诺是**零硬依赖**（纯标准库）。
 跨机分布式队列（路线 1）需要一个 Redis 客户端，于是手写一个够用的：
-只覆盖本项目用到的命令面（LPUSH/RPOP/LLEN/HSET/HDEL/HGET/PING/AUTH/SELECT），
+覆盖队列（LPUSH/RPOP/LLEN/HSET/HDEL/HGET/HKEYS/PING/AUTH/SELECT）与
+跨机协同三件套（SET NX EX/GET/EXPIRE/TTL/EXISTS/SADD/SMEMBERS/SREM/
+HINCRBY/RPOPLPUSH/LRANGE/LREM/WATCH/MULTI/EXEC），
 用标准库 socket 实现 RESP 2 的编解码。
 
 支持五种回复类型（RESP2）：
@@ -39,7 +41,7 @@ class RESPClient:
         self._sock: socket.socket | None = None
         self._buf = b""
 
-    # ---- URL 解析：redis://[:password@]host:port/db ----
+    # ---- URL 解析：redis://[:password@]host:port/db ----  # scanner:allow —— 协议说明里的占位符，非真实凭证
     def _parse(self):
         u = urlparse(self.url)
         if u.scheme not in ("redis", ""):
@@ -186,3 +188,64 @@ class RESPClient:
 
     def delete(self, *keys: str) -> int:
         return self.execute("DEL", *keys)
+
+    # ---- 分布式锁 / 心跳 / 死信所需命令面（transport/distributed.py）----
+    def set_nx(self, key: str, value: str, ex: int):
+        """SET key value NX EX ex。抢到返回 "OK"，已被持有返回 None。
+
+        这是分布式锁的原子获取原语：判存在与置值一条命令做完，
+        两个机器同时抢只有一个拿到。
+        """
+        return self._s(self.execute("SET", key, value, "NX", "EX", int(ex)))
+
+    def get(self, key: str):
+        return self._s(self.execute("GET", key))
+
+    def expire(self, key: str, seconds: int) -> int:
+        return self.execute("EXPIRE", key, int(seconds))
+
+    def exists(self, key: str) -> int:
+        return self.execute("EXISTS", key)
+
+    def ttl(self, key: str) -> int:
+        """-2=不存在，-1=存在但无过期，其余=剩余秒数。"""
+        return self.execute("TTL", key)
+
+    def sadd(self, key: str, *members: str) -> int:
+        return self.execute("SADD", key, *members)
+
+    def srem(self, key: str, *members: str) -> int:
+        return self.execute("SREM", key, *members)
+
+    def smembers(self, key: str) -> list:
+        return [self._s(m) for m in (self.execute("SMEMBERS", key) or [])]
+
+    def hincrby(self, key: str, field: str, by: int = 1) -> int:
+        return self.execute("HINCRBY", key, field, int(by))
+
+    def rpoplpush(self, src: str, dst: str):
+        return self._s(self.execute("RPOPLPUSH", src, dst))
+
+    def lrange(self, key: str, start: int, stop: int) -> list:
+        return [self._s(v) for v in (self.execute("LRANGE", key,
+                                                  int(start), int(stop)) or [])]
+
+    def lrem(self, key: str, value: str, count: int = 1) -> int:
+        return self.execute("LREM", key, int(count), value)
+
+    # ---- WATCH/MULTI/EXEC：无 Lua 的乐观锁，供"比对 token 后才改键"用 ----
+    # 为什么不用 EVAL Lua：真 Redis 当然支持，但本仓库的测试假服务器
+    # （tests/test_redis_queue.py）不需要内置 Lua 解释器也能全覆盖验证，
+    # 且语义等价——WATCH 后键被任何写改动，EXEC 整体作废（返回 nil）。
+    def watch(self, *keys: str):
+        return self.execute("WATCH", *keys)
+
+    def unwatch(self):
+        return self.execute("UNWATCH")
+
+    def multi(self):
+        return self.execute("MULTI")
+
+    def exec(self):
+        """执行 MULTI 之后排队的命令；被 WATCH 的键被动过时返回 None（作废）。"""
+        return self.execute("EXEC")

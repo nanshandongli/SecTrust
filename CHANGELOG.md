@@ -8,6 +8,37 @@
 ## [0.9.0] — 未发布
 
 ### 新增
+- **分布式：跨机协同三件套（`transport/distributed.py`，Redis 后端）**——
+  同机多进程早有 SQLite CAS 认领覆盖；跨机需要三样同机没有的东西：
+  1. **分布式锁**（`DistributedLock`）：`SET NX EX` 原子抢锁，WATCH/MULTI/
+     EXEC 乐观事务做"比对 token 后才续期/释放"——防住"锁过期后别人的锁
+     被自己续期/删掉"的经典竞态。选 WATCH 而非 EVAL Lua：测试假服务器
+     无需内置 Lua 解释器也能全覆盖验证，语义等价。
+  2. **runner 心跳**（`HeartbeatRegistry`）：`SET EX` 心跳键 + 注册集合，
+     掉线判定完全由 TTL 决定（Redis 自己过期），`alive_runners()` 顺手
+     清理集合里已过期的成员；`drop()` 供优雅退出。
+  3. **死信队列**（`DeadLetterQueue`）：失败计数（HINCRBY 原子）达阈值
+     才入队——防一次抖动就进 DLQ；读侧按 task_id 去重，`recover()` 一次
+     清干净同一任务的所有原始记录（人工恢复），`drop()` 丢弃，`contains()`
+     O(1) 查询。
+  - `ClusterCoordinator` 总装三件套，`from_env()` 读开关：
+    `SECTRUST_REDIS=1` + `REDIS_URL` 可达 → 启用；未配置 → `enabled=False`，
+    所有操作返回"未启用"语义（False/None/[]）；**强开但不可达 → 构造即抛
+    RuntimeError**——跨机场景静默降级回单机语义是最危险的 bug。
+  - 连接纪律与 CostStore 一致：thread-local 客户端 + `_all_clients` +
+    `close()` 全关；`RESPClient` 命令面补全（SET NX EX/GET/EXPIRE/EXISTS/
+    TTL/SADD/SREM/SMEMBERS/HINCRBY/RPOPLPUSH/LRANGE/LREM/WATCH/UNWATCH/
+    MULTI/EXEC）。
+  - **daemon 接线**（`execution/daemon.py`）：认领守卫（claim_ready 后抢
+    任务锁，抢不到 → 任务放回 registered，批次状态 `requeued`）；跨机
+    心跳 + 处理中任务锁随心跳续期（长任务防过期被重抢；续期失败只告警，
+    本次跑完，幂等由编排层保证）；执行失败记死信；`close()` 先摘心跳
+    再关连接。未配置时行为与从前完全一致（不开任何连接）。
+  - 测试：`tests/test_distributed.py` 29 项（锁语义/过期被抢竞态/乐观
+    事务作废/心跳过期自清理/死信阈值与恢复/开关纪律/双 coordinator 抢
+    同一任务/线程隔离 close）+ `tests/test_daemon_cluster.py` 9 项
+    （守卫放回/放锁 finally/死信记账/续期与易主告警/优雅下线/双机
+    不同库拓扑/未启用零连接），全程假 Redis，无需真实服务。
 - **隔离层：Docker 沙箱八条规格硬化（`sandbox/DockerSandbox`）**——把隔离工位
   接进 Docker，runc 优先、gVisor/Kata 预留：
   1. 每任务独立容器、结束即销毁：`--rm` + 超时/异常显式 `docker kill`/`rm -f`，

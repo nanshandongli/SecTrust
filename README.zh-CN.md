@@ -1,5 +1,5 @@
 > [!WARNING]
-> **实验性项目（v0.9.0-alpha）**：可运行、720 项测试全过的**原型**，未经过生产流量检验。
+> **实验性项目（v0.9.0-alpha）**：可运行、758 项测试全过的**原型**，未经过生产流量检验。
 > 已在单机多进程场景验证；跨机分布式（Redis 后端）已实现但未实测。欢迎试用与提 issue，API 可能变动。
 
 <div align="right">
@@ -19,7 +19,7 @@ git clone https://github.com/nanshandongli/SecTrust.git
 cd SecTrust
 
 python demo.py                                   # ① 核心契约自测（含真·跨进程并发）
-python -m unittest discover -s tests -p "test_*.py"   # ② 全量 720 项测试
+python -m unittest discover -s tests -p "test_*.py"   # ② 全量 758 项测试
 python task_center_web.py                        # ③ 浏览器打开 http://127.0.0.1:8090 看任务看板
 ```
 
@@ -80,7 +80,7 @@ runner 用 `--api-base` 即可把登记处/心跳写到远程中心，从而放�
 | `demo.py` | 5 条最小验收的自测脚本（含真·跨进程并发） |
 | `DESIGN.md` | **多渠道/多技能/多模型 运行时扩展设计**（架构、信任边界、密钥管理） |
 | `.env.example` | 全部环境变量清单（密钥只从环境变量读） |
-| `tests/` | 单元测试（unittest；验收 + WAL 健壮性 + 运行时回归 + 象棋原型 + DAG 调度 + 编排层应用 + 执行层 + 消息框架 + 轨迹回放 + 成本打点 + Docker 沙箱八条规格），共 **720** 例（全过） |
+| `tests/` | 单元测试（unittest；验收 + WAL 健壮性 + 运行时回归 + 象棋原型 + DAG 调度 + 编排层应用 + 执行层 + 消息框架 + 轨迹回放 + 成本打点 + Docker 沙箱八条规格 + 跨机协同三件套），共 **758** 例（全过） |
 | `tools/self_audit.py` | **自检评测脚本**：从代码与运行时取证（功能清点/性能实测/扫描检出率/记忆/技能/证据门禁/安全穿透），输出 JSON |
 | `SELF_AUDIT_REPORT.md` | **自检评测报告**：实测数据 + 竞品对比 + 评分卡（含发现并修复的 9 个真实缺陷：v1 的 3 个 + 深度轮 6 个） |
 | `approval.py` | **审批中心（Human-in-the-loop）**：高权限动作先挂起等真人批准，超时默认拒绝 |
@@ -97,7 +97,7 @@ runner 用 `--api-base` 即可把登记处/心跳写到远程中心，从而放�
 | `templates/` | **合规扫描模板库（P0）**：5 模板（密钥泄露/硬编码凭证/依赖漏洞/CI-CD/SAST）+ 执行编排（审批+沙箱双闸门） |
 | `scanner/` | **扫描深度（路线 2）**：Semgrep 适配器（AST 级，可回退正则）/ 活体验证 / 推送前保护（git hook + CI yaml） |
 | `api/` | **分布式入口（路线 1）**：`app.py` REST 服务（Bearer 鉴权 + 可观测性）+ `client.py` 远程客户端 |
-| `transport/` | **消息队列（路线 1）**：`queue.py` 持久化 SQLite 队列（默认）/ Redis 适配 + `broker.py` 事件总线 |
+| `transport/` | **消息队列（路线 1）**：`queue.py` 持久化 SQLite 队列（默认）/ Redis 适配 + `broker.py` 事件总线 + `distributed.py` 跨机协同三件套（分布式锁/心跳/死信） |
 | `security/` | **安全加固（路线 5）**：`crypto.py` 纯 Python AES-256-CBC（NIST 验证）/ `oauth.py` OAuth 2.1 / `observability.py` OTel + 指标告警 |
 | `examples/memory_demo.py` | 长期记忆演示（写入→模拟下次会话召回→search/top_used） |
 | `pyproject.toml` | **打包（路线 6）**：PyPI 元数据、可选 extras、控制台入口（api/runner/mcp） |
@@ -416,7 +416,7 @@ python approval.py --approve <approval_id>
 ## 14. 常见问题（FAQ）
 
 **Q1. 一定要同机吗？跨机器怎么办？**
-A. 当前 SQLite 方案要求 runner 与 task_center 同机。跨机器需改为 HTTP API 或消息队列（不在本仓库，需另做）。
+A. 默认 SQLite 方案要求 runner 与 task_center 同机（零依赖开箱即跑）。跨机器有三条已实现的路线：HTTP API（`api/` + `RemoteRegistry`）、Redis 消息队列（`REDIS_URL` 一切即换）、以及跨机协同三件套（`SECTRUST_REDIS=1`：任务锁/心跳/死信，daemon 已接线）。尚未做的是真实多机压测。
 
 **Q2. 只复制 `.db` 文件做备份为什么丢数据？**
 A. WAL 模式下未 checkpoint 的数据在 `-wal`/`-shm` 里。务必用 `backup()`（sqlite3.backup 自动合并）或先 `wal_checkpoint(TRUNCATE)` 再整目录复制。见第 8.1 节。
@@ -680,6 +680,7 @@ python -m unittest discover -s tests -v        # 含 tests/test_memory.py（16 �
 - `api/app.py`：把任务登记处 / 审批中心 / 记忆 / 扫描统一暴露为 **REST**（标准库 `http.server`，零依赖）。
 - `api/client.py` + `RemoteRegistry`：runner 用 `--api-base <url>` 即可把登记处/心跳写到远程中心，跨机运行。
 - `transport/`：`MessageQueue` 抽象 + `LocalQueue`（SQLite 持久化，默认，崩溃可恢复）+ `RedisQueue`（设 `REDIS_URL` 后自动切到 Redis，跨机）。
+- `transport/distributed.py`：**跨机协同三件套**（`SECTRUST_REDIS=1` 启用）——分布式锁（SET NX 原子抢锁 + WATCH 乐观事务续期/释放，任务认领跨机互斥）/ runner 心跳（TTL 过期判死，掉线机器可发现）/ 死信队列（失败计数达阈值才入队，可人工恢复）。`ExecutionDaemon` 已接线：认领守卫（锁被别的机器持有 → 放回重排）、跨机心跳与长任务锁续期、失败进死信。**强开不可达即报错，绝不静默降级回单机语义**。
 - `transport/broker.py`：事件总线，中心发布事件、runner/web 订阅驱动，无需轮询。
 
 ### 路线 2 · 扫描深度
@@ -1072,7 +1073,8 @@ store.list(task_id="p1/design_brief")   # 按任务取素材
               → AssetStore（二进制产出统一存、可版本化）
                 → ApprovalCenter（人类终审）→ 最终交付
 
-仍缺的（如实记录）：LLM 版拆解器、跨机分布式执行（Redis 路线未走）、
+仍缺的（如实记录）：LLM 版拆解器、跨机**压测**（Redis 三件套已通，
+2–3 台机器的互斥/心跳/死信链路已具备但未做真实多机实测）、
 素材库 GC 与配额、仲裁的自动策略目前只认登记的来源类型。
 
 ---

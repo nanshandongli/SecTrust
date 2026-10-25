@@ -10,15 +10,26 @@ execution/daemon.py —— 常驻执行 daemon（"AI 同事真正干活"的本�
 3. 执行：按 payload 的 op 派发——
      {"op":"shell",  "cmd":[...], "timeout":30}   → 工作区沙箱执行
      {"op":"skill",  "name":"x"}                  → 激活技能（元数据+正文），
-                                                   模型驱动的执行归 AgentRunner
+                                                  模型驱动的执行归 AgentRunner
      {"op":"noop"}                                → 空转（测试/演练用）
 4. 审批门：payload 带 approval_action（send/publish/buy/delete 语义）时，
    **先请求人工批准再执行**；被拒 → 任务转 needs_human 带 feedback，不执行；
 5. 收尾：complete(result=...) / fail(error=...)，DAG 级联由 scheduler 负责。
 
+跨机协同（cluster，可选）：传入/自动装配 ClusterCoordinator 后——
+- 认领守卫：claim_ready 之后再抢一把 Redis 任务锁；抢不到说明别的机器正在
+  干，把任务放回 registered 不占用本机（共享库拓扑下这是双保险，每机本地
+  库拓扑下这是主要互斥手段）；
+- 跨机心跳：本地 beat 之外向 Redis 报心跳，掉线机器可被 alive_runners 发现；
+- 长任务续期：处理中的任务锁随心跳循环 renew，防锁过期后被别的机器重抢；
+- 失败记账：执行失败记入死信队列，反复失败（阈值）才真正入队，可人工恢复。
+未配置（SECTRUST_REDIS 未开）时全部跳过，行为与从前完全一致。
+
 诚实边界：
 - 执行强度 = 沙箱后端的 containment（本地默认 advisory，Docker/E2B 才 os 级）；
 - 不自动重试失败任务（重试策略属编排层决策，不在此暗做）；
+- 跨机锁是"认领防护"不是硬租约：续期失败（过期被抢）只告警，本次仍跑完，
+  任务级幂等由编排层保证；
 - Windows spawn 兼容：入口 run_daemon() 是模块级函数（闭包无法 pickle）。
 
 运行：
@@ -34,9 +45,10 @@ import signal
 import threading
 import time
 
-from orchestration import DagScheduler
+from orchestration import REGISTERED, DagScheduler
 from sandbox import SandboxManager
 from task_registry import TaskRegistry
+from transport.distributed import ClusterCoordinator
 
 from .workspace import BotWorkspace, default_root
 
@@ -59,6 +71,7 @@ class ExecutionDaemon:
         poll_interval: float = 2.0,
         approval_wait: float = None,
         sandbox=None,
+        cluster=None,
     ):
         self.reg = TaskRegistry(db_path=db_path)
         self.sched = DagScheduler(db_path=db_path, registry=self.reg)
@@ -68,6 +81,14 @@ class ExecutionDaemon:
         self.heartbeat_interval = heartbeat_interval
         self.poll_interval = poll_interval
         self.approval_wait = approval_wait if approval_wait is not None else _APPROVAL_WAIT
+        # 跨机协同：未显式传入则按环境变量自动装配。TTL 取心跳间隔 3 倍
+        # （下限 60s）——漏一拍心跳不该被判死/锁过期。强开不可达时这里就抛错，
+        # 绝不静默降级回单机语义（transport.distributed 的开关纪律）。
+        if cluster is None:
+            ttl = max(60, int(heartbeat_interval * 3))
+            cluster = ClusterCoordinator.from_env(lock_ttl=ttl, heartbeat_ttl=ttl)
+        self.cluster = cluster
+        self._current_claim = None    # (task_id, token)：处理中的跨机任务锁
         self._stop = threading.Event()
         self._processed = []          # 本 daemon 处理过的 (task_id, status)
 
@@ -98,6 +119,47 @@ class ExecutionDaemon:
             return False, "审批未通过（%s）" % decision
         finally:
             center.close()
+
+    # ---------------- 跨机认领守卫（cluster 未启用时全部放行） ----------------
+    def _claim_guard(self, task_id: str):
+        """claim_ready 之后抢 Redis 任务锁。
+
+        返回 token（str，可能为空串=未启用无锁可放）放行；
+        返回 None = 别的机器正在干这个任务——已把任务放回 registered，
+        调用方应跳过。放行时调用方负责在 finally 里 _release_guard。
+        """
+        if not (self.cluster and self.cluster.enabled):
+            return ""
+        token = self.cluster.claim_task(task_id, self.reg.runner_id)
+        if token is None:
+            holder = self.cluster.holder("claim:" + task_id) or "其他机器"
+            self.reg.update_task_status(task_id, REGISTERED)
+            self.reg.set_progress(
+                task_id, log=["跨机锁被 %s 持有，放回重排" % holder.split(":")[0]])
+            return None
+        return token
+
+    def _release_guard(self, task_id: str, token: str):
+        """放锁。失败只记录：锁带 TTL，最坏过期自动放，不挡主链路。"""
+        if not token:
+            return
+        try:
+            self.cluster.release_task(task_id, token)
+        except Exception as e:      # noqa: BLE001 —— 旁路纪律：记账类操作不挡执行
+            print("[exec:%s] 放跨机锁失败（将靠 TTL 过期）: %s"
+                  % (self.reg.runner_id, e))
+
+    def _note_cluster_failure(self, task_id: str, reason: str):
+        """执行失败记入死信队列（阈值内只计数，反复失败才真正入队）。"""
+        if not (self.cluster and self.cluster.enabled):
+            return
+        try:
+            if self.cluster.note_failure(task_id, reason,
+                                         payload={"bot_id": self.bot_id}):
+                print("[exec:%s] 任务 %s 反复失败，已进死信队列（可人工恢复）"
+                      % (self.reg.runner_id, task_id))
+        except Exception as e:      # noqa: BLE001 —— 同上，旁路不挡主链路
+            print("[exec:%s] 死信记账失败: %s" % (self.reg.runner_id, e))
 
     # ---------------- 执行派发 ----------------
     def _execute(self, task_id: str, payload: dict):
@@ -152,6 +214,7 @@ class ExecutionDaemon:
             self.sched.complete(task_id, result=result)
             return "done"
         self.sched.fail(task_id, error=error or "执行失败")
+        self._note_cluster_failure(task_id, error or "执行失败")
         return "failed"
 
     # ---------------- 主循环 ----------------
@@ -160,6 +223,8 @@ class ExecutionDaemon:
 
         注意：claim_ready 返回的是**完整任务 dict**（无就绪任务返回 None），
         不是 task_id；payload 在个别路径下可能是 JSON 字符串，统一解析成 dict。
+        status 除 done/failed/needs_human 外还可能是 "requeued"——跨机锁被
+        别的机器持有，任务已放回 registered 重排（计入批次上限，防打转）。
         """
         out = []
         for _ in range(max_tasks):
@@ -173,7 +238,17 @@ class ExecutionDaemon:
                     payload = json.loads(payload)
                 except json.JSONDecodeError:
                     payload = {}
-            status = self.process_task(task_id, payload)
+            token = self._claim_guard(task_id)
+            if token is None:
+                out.append((task_id, "requeued"))
+                self._processed.append((task_id, "requeued"))
+                continue
+            self._current_claim = (task_id, token) if token else None
+            try:
+                status = self.process_task(task_id, payload)
+            finally:
+                self._current_claim = None
+                self._release_guard(task_id, token)
             out.append((task_id, status))
             self._processed.append((task_id, status))
         return out
@@ -200,11 +275,39 @@ class ExecutionDaemon:
 
     def _heartbeat_loop(self):
         self.reg.beat()
+        self._cluster_beat()
         while not self._stop.wait(self.heartbeat_interval):
             try:
                 self.reg.beat()
             except Exception as e:          # 心跳失败只记录，不退出
                 print("[exec:%s] 心跳失败: %s" % (self.reg.runner_id, e))
+            self._cluster_beat()
+
+    def _cluster_beat(self):
+        """跨机心跳 + 处理中任务锁的续期（长任务防锁过期被重抢）。"""
+        if not (self.cluster and self.cluster.enabled):
+            return
+        try:
+            self.cluster.beat(self.reg.runner_id,
+                              meta={"bot_id": self.bot_id})
+        except Exception as e:      # noqa: BLE001 —— 旁路纪律
+            print("[exec:%s] 跨机心跳失败: %s" % (self.reg.runner_id, e))
+        cur = self._current_claim
+        if not cur:
+            return
+        task_id, token = cur
+        name = "claim:" + task_id
+        try:
+            if self.cluster.renew(name, token):
+                return
+            # 续期失败：锁消失是正常竞态（刚放掉），易主才值得喊
+            holder = self.cluster.holder(name)
+            if holder and holder != token:
+                print("[exec:%s] 任务 %s 的跨机锁已易主（过期被抢？），"
+                      "本次仍跑完，幂等由编排层保证"
+                      % (self.reg.runner_id, task_id))
+        except Exception as e:      # noqa: BLE001 —— 旁路纪律
+            print("[exec:%s] 跨机锁续期失败: %s" % (self.reg.runner_id, e))
 
     def stop(self):
         self._stop.set()
@@ -216,7 +319,16 @@ class ExecutionDaemon:
         try:
             self.sched.close()
         finally:
-            self.reg.close()
+            try:
+                if self.cluster and self.cluster.enabled:
+                    # 优雅下线：先摘心跳（别让别的机器以为我们还活着），再关连接
+                    try:
+                        self.cluster.heartbeat.drop(self.reg.runner_id)
+                    except Exception:    # noqa: BLE001 —— 下线清理尽力而为
+                        pass
+                    self.cluster.close()
+            finally:
+                self.reg.close()
         print("[exec:%s] 已停止" % self.reg.runner_id)
 
 
