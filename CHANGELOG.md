@@ -8,6 +8,29 @@
 ## [0.9.0] — 未发布
 
 ### 新增
+- **真实多机压测 + 通用结果汇总（#92）**——把路线图最后两块补上：端到端真正闭环
+  的可观测性，以及真实跨机压力数据。
+  1. **真实多机压测（`tools/cluster_stress_test.py`）**：本机无官方 Redis，改用
+     `transport/fake_redis.py` 的**真实 socket 级 TCP RESP 服务器**当协调后端，
+     拉起 N 个**真实 OS 进程**（Windows 上 spawn = 进程隔离）模拟 N 台机器，所有
+     机器通过 TCP 争用跨机锁/心跳/死信。两项基准：A. 跨机原语争用（锁互斥校验 +
+     延迟分位 + 心跳在线检测 + 死信阈值）；B. 真实 daemon 集群（共享 SQLite + TCP
+     协调，校验 total 完成 == seed、跨机 0 重复执行）。结果落 `data/cluster_stress_*.json` + `.md`。
+     ⚠️ 诚实边界：单宿主 + 同机多进程，非分散物理机；后端是项目自带协议兼容 RESP
+     服务器，非官方 Redis；真实跨机房还叠加延迟/分区/WAL 落 NFS 失效等风险。
+  2. **通用结果汇总（`summarizer.py`）**：编排层此前有 Planner/DagScheduler/
+     ExecutionDaemon/QualityGate 但缺"收口"——跑完没人把分散在各任务
+     `payload.result` 的产出聚合成交付物。ResultSummarizer 读 tasks 表（status +
+     payload），生成 markdown：状态汇总 + 逐任务结果 + 产物清单（约定键
+     `result["artifacts"]` 或 shell stdout 路径）+ 未完成项（failed/blocked/
+     needs_human 明确列出，绝不假装完成）。
+  3. **端到端编排闭环（`tools/pipeline_run.py`）**：建 DAG → 真实 ExecutionDaemon
+     执行 → ResultSummarizer 汇总成交付物落盘，演示"拆解→调度→执行→汇总"完整闭环。
+  4. **协议基础设施下沉**：`FakeRedisServer` 从 `tests/test_redis_queue.py` 提取到
+     `transport/fake_redis.py`，测试与压测工具共用一份实现（避免漂移）。
+  - 测试：`tests/test_cluster_stress.py` 1 项（真实多进程断言跨机零双抢 + 零重复执行
+    + 落盘产物）、`tests/test_summarizer.py` 6 项（收集/产物提取/部分失败/端到端闭环）。
+  - 全量回归 **781 项全过**（2 env skip）。
 - **审批链强化 + 审计证据链（`approval.py`，#91）**——把「高风险 / 扫描 / 外发」
   动作的审批过程变成可审计、可回放的证据链，而非只在表里留一行状态：
   1. **审计事件留痕**：每次审批的 `request` / `decide` / 超时 `expire` 都会在

@@ -85,6 +85,7 @@ py-modules = [
     "runner",
     "runner_daemon",
     "scheduler",
+    "summarizer",
     "task_center_web",
     "task_registry",
     "threads",

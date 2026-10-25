@@ -1,5 +1,5 @@
 > [!WARNING]
-> **实验性项目（v0.9.0-alpha）**：可运行、758 项测试全过的**原型**，未经过生产流量检验。
+> **实验性项目（v0.9.0-alpha）**：可运行、781 项测试全过的**原型**，未经过生产流量检验。
 > 已在单机多进程场景验证；跨机分布式（Redis 后端）已实现但未实测。欢迎试用与提 issue，API 可能变动。
 
 <div align="right">
@@ -19,7 +19,7 @@ git clone https://github.com/nanshandongli/SecTrust.git
 cd SecTrust
 
 python demo.py                                   # ① 核心契约自测（含真·跨进程并发）
-python -m unittest discover -s tests -p "test_*.py"   # ② 全量 758 项测试
+python -m unittest discover -s tests -p "test_*.py"   # ② 全量 781 项测试
 python task_center_web.py                        # ③ 浏览器打开 http://127.0.0.1:8090 看任务看板
 ```
 
@@ -80,8 +80,11 @@ runner 用 `--api-base` 即可把登记处/心跳写到远程中心，从而放�
 | `demo.py` | 5 条最小验收的自测脚本（含真·跨进程并发） |
 | `DESIGN.md` | **多渠道/多技能/多模型 运行时扩展设计**（架构、信任边界、密钥管理） |
 | `.env.example` | 全部环境变量清单（密钥只从环境变量读） |
-| `tests/` | 单元测试（unittest；验收 + WAL 健壮性 + 运行时回归 + 象棋原型 + DAG 调度 + 编排层应用 + 执行层 + 消息框架 + 轨迹回放 + 成本打点 + Docker 沙箱八条规格 + 跨机协同三件套），共 **758** 例（全过） |
+| `tests/` | 单元测试（unittest；验收 + WAL 健壮性 + 运行时回归 + 象棋原型 + DAG 调度 + 编排层应用 + 执行层 + 消息框架 + 轨迹回放 + 成本打点 + Docker 沙箱八条规格 + 跨机协同三件套 + 真实多机压测 + 通用结果汇总），共 **781** 例（全过） |
 | `tools/self_audit.py` | **自检评测脚本**：从代码与运行时取证（功能清点/性能实测/扫描检出率/记忆/技能/证据门禁/安全穿透），输出 JSON |
+| `tools/cluster_stress_test.py` | **真实多机压测**：起真实 TCP 协调服务器，拉 N 个真实 OS 进程模拟多机，压跨机锁/心跳/死信互斥与延迟，并跑真实 daemon 集群校验零重复执行；结果落 data/cluster_stress_*.json+.md |
+| `tools/pipeline_run.py` | **端到端编排闭环演示**：建 DAG → 真实 ExecutionDaemon 执行 → ResultSummarizer 汇总成交付物落盘 |
+| `summarizer.py` | **通用结果汇总**：把 DAG 全部任务 payload.result 聚合成 markdown 交付物（状态汇总/逐任务/产物清单/未完成标记），让流水线端到端闭环 |
 | `SELF_AUDIT_REPORT.md` | **自检评测报告**：实测数据 + 竞品对比 + 评分卡（含发现并修复的 9 个真实缺陷：v1 的 3 个 + 深度轮 6 个） |
 | `approval.py` | **审批中心（Human-in-the-loop）**：高权限动作先挂起等真人批准，超时默认拒绝 |
 | `sandbox/` | **沙箱执行层**：Docker 强隔离 / E2B 远程 / 本地受限降级 + 文件越权拦截 |
@@ -97,7 +100,7 @@ runner 用 `--api-base` 即可把登记处/心跳写到远程中心，从而放�
 | `templates/` | **合规扫描模板库（P0）**：5 模板（密钥泄露/硬编码凭证/依赖漏洞/CI-CD/SAST）+ 执行编排（审批+沙箱双闸门） |
 | `scanner/` | **扫描深度（路线 2）**：Semgrep 适配器（AST 级，可回退正则）/ 活体验证 / 推送前保护（git hook + CI yaml） |
 | `api/` | **分布式入口（路线 1）**：`app.py` REST 服务（Bearer 鉴权 + 可观测性）+ `client.py` 远程客户端 |
-| `transport/` | **消息队列（路线 1）**：`queue.py` 持久化 SQLite 队列（默认）/ Redis 适配 + `broker.py` 事件总线 + `distributed.py` 跨机协同三件套（分布式锁/心跳/死信） |
+| `transport/` | **消息队列（路线 1）**：`queue.py` 持久化 SQLite 队列（默认）/ Redis 适配 + `broker.py` 事件总线 + `distributed.py` 跨机协同三件套（分布式锁/心跳/死信）+ `fake_redis.py` 协议兼容 RESP 服务器（测试/同机压测用，非生产） |
 | `security/` | **安全加固（路线 5）**：`crypto.py` 纯 Python AES-256-CBC（NIST 验证）/ `oauth.py` OAuth 2.1 / `observability.py` OTel + 指标告警 |
 | `examples/memory_demo.py` | 长期记忆演示（写入→模拟下次会话召回→search/top_used） |
 | `pyproject.toml` | **打包（路线 6）**：PyPI 元数据、可选 extras、控制台入口（api/runner/mcp） |
@@ -243,7 +246,8 @@ Windows 上多个进程**同时首次打开同一个新库**时，SQLite 可能�
    `UPDATE`、`claim_task` 是 CAS（`status='registered'` 条件保证重试不会二次认领）、
    `beat` 是 `INSERT OR REPLACE`——重试一次不产生重复副作用。
 
-验证：`tools/stress_test.py`（同机多进程基线）+ `tests/test_registry_selfheal.py`
+验证：`tools/stress_test.py`（同机多进程基线）+ `tools/cluster_stress_test.py`
+（真实多机压测：跨机锁互斥零双抢、真实 daemon 集群零重复执行）+ `tests/test_registry_selfheal.py`
 （假连接注入故障，100% 稳定复现，不靠运气）。
 
 ---
