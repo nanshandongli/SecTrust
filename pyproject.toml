@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sectrust"
-version = "0.8.0"
+version = "0.9.0"
 description = "SecTrust - auditable, always-on, multi-model AI colleague platform: cross-process task registry + DAG orchestration + HITL approvals + sandbox + compliance scanning + long-term memory, exposed as a zero-dependency MCP server."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -80,16 +80,22 @@ py-modules = [
     "memory_semantic",
     "orchestration",
     "planner",
+    "proposal",
     "runner",
     "runner_daemon",
+    "scheduler",
     "task_center_web",
     "task_registry",
+    "threads",
+    "voice",
 ]
 # 子包（含 __init__.py 的全部目录）
 packages = [
     "agentskills",
     "api",
     "channels",
+    "connectors",
+    "execution",
     "games",
     "models",
     "release_meta",

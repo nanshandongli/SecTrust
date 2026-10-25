@@ -5,6 +5,66 @@
 
 ---
 
+## [0.9.0] — 未发布
+
+### 新增
+- **执行层（对照 Grok Bot 差距分析后开建，全部纯标准库零新依赖）**：
+  - `execution/workspace.py`：每 bot_id 一个独立工作区（`work/` `outbox/`
+    `state.json`），bot_id 白名单正则 + 相对路径越界拒绝（绝对路径/`..`），
+    state 原子写（mkstemp + os.replace），`run()` 一律委托 `SandboxManager`。
+  - `execution/daemon.py`：常驻执行守护。`claim_ready` 写锁内选+认领 →
+    按 payload.op 派发（shell 走沙箱 / skill 激活 / noop）→ complete/fail；
+    **审批门红线**：payload 带 `approval_action` 时先人工批准，
+    被拒/超时 → `needs_human` 挂起不执行。Windows spawn 兼容（模块级入口）。
+  - `scheduler.py`：纯标准库 cron 五段式（`*` `*/n` `a-b` `a-b/n` 列表；
+    星期 0/7=周日；Vixie 日月或语义；366 天无命中返回 None 明说）+
+    interval；`fire_due()` 到期建任务并推进 next_run，**登记失败不推进**，
+    重启不重复触发。
+  - `connectors/`：`base.py` 契约（未知 action 拒绝 / 未配置明确报错不返
+    假数据 / HTTP ≥400 一律抛错）+ `github.py`（urllib REST，token 只进
+    Header）+ `imap.py`（EmailRule/EmailTrigger：邮件命中 → 建任务 →
+    **登记成功才 mark_seen**，不丢邮件；RFC2047 头正确解码）。
+  - `proposal.py`：主动提议循环（chief of staff）。五条规则（停滞 / 无人认领 /
+    审批积压 / 失败待处理 / needs_human 积压汇总）→ 提案进审批中心等人裁，
+    **绝不自动执行**；冷却表 + 未决提案双重去重；可选 LLM 摘要
+    （路由落 Mock 即缺 key 时返回 None，诚实降级规则文本）。
+  - `execution/browser.py`：可编程浏览器。**手写最小 WebSocket 客户端**
+    （纯标准库：握手/客户端掩码/分片重组/ping-pong/64 位长度）说 CDP：
+    goto / get_text / click（坐标计算）/ type / screenshot / wait_for；
+    CDP 起不来 → 诚实降级 Edge 一次性 headless 批处理（交互动作明确报错）。
+    线上格式由独立实现的环回服务器互操作测试锁定；真 Edge 冒烟通过
+    （点击真改 DOM、截图真 PNG）。
+  - `threads.py`：会话线程持久化（thread + messages 落 SQLite），
+    `history()` 取最近 N 条 + `before` 游标翻页，`search()` 关键词；
+    **往不存在的线程 append 明确报错**（不自动兜）。
+  - `voice.py`：语音输出，复用 multimodal `MediaRouter` 合成 TTS；
+    缺 key 时 Mock 假音频明示 `fake=True`；渠道无语音能力时文本兜底
+    附文件路径，不谎称已发语音。
+
+### 修复
+- **看板 JS 数月不可渲染（真缺陷）**：HTML 模板是普通三引号字符串，
+  JS `'\n等待: '` 的 `\n` 被 Python 解释成真换行 → 整个 `<script>` 块
+  解析失败 → 看板从未在浏览器里渲染过（此前只验过 HTTP 200 + 骨架）。
+  已修为 `'\\n等待: '` 并补 5 项逐字符扫描回归测试
+  （`tests/test_dashboard_js.py`）。
+- **WebSocket 握手丢帧（真缺陷，开发中捕获）**：`connect()` 读握手响应
+  的局部 buffer 把紧随 101 到达的数据帧丢弃。修为多余字节保留进 `_buf`。
+- **打包申报遗漏（回归测试捕获）**：`scheduler` / `connectors` /
+  `proposal` / `execution` / `threads` / `voice` 未在 pyproject 声明，
+  `test_release_packaging` 全数抓出并补齐。
+- **history() 语义错误**：`limit=N` 原返回"最早 N 条"（聊天场景要的是
+  "最近 N 条"）。修为倒序取 N 再翻正序，`before` 游标翻页随之正确。
+
+### 纪律（新增，改动时不可破坏）
+- `execution` 包"命令走 SandboxManager 不自己起 subprocess"对
+  `browser.py` 是**文档化例外**（CDP 需长驻进程 + 调试端口 + 生命周期自管）。
+- 提案只进审批中心等人裁；`rank` 式"推荐≠生效"边界在投票与提议两侧一致。
+- 批处理模式交互动作明确报错；Mock 媒体/模型一律带 `fake` 明示。
+- 连接管理：thread-local + 显式 `close()`；测试在 `-W error::ResourceWarning`
+  下零泄漏。
+
+---
+
 ## [0.8.0] — 未发布
 
 ### 变更

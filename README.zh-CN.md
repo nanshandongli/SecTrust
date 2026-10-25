@@ -1,5 +1,5 @@
 > [!WARNING]
-> **实验性项目（v0.8.0-alpha）**：可运行、482 项测试全过的**原型**，未经过生产流量检验。
+> **实验性项目（v0.9.0-alpha）**：可运行、612 项测试全过的**原型**，未经过生产流量检验。
 > 已在单机多进程场景验证；跨机分布式（Redis 后端）已实现但未实测。欢迎试用与提 issue，API 可能变动。
 
 <div align="right">
@@ -69,10 +69,16 @@ runner 用 `--api-base` 即可把登记处/心跳写到远程中心，从而放�
 | `arbiter.py` | **编排层 · 冲突仲裁**：多 AI 产出版本登记，默认人工裁，可选 recency/source_priority/evidence |
 | `assets.py` | **编排层 · 素材库**：blake2b 内容寻址去重 + 版本链 + 任务关联 + 软删除 |
 | `games/` | **多 AI 协同最小原型**：两人中国象棋（共享棋局表 + CAS 回合锁 + Broker 观战），验证底座可支撑多方博弈 |
+| `execution/` | **执行层**：`workspace.py` 每 Bot 独立工作区（越权路径拒绝 + 状态原子写）+ `daemon.py` 常驻执行守护（认领→沙箱执行→审批门→complete/fail）+ `browser.py` 可编程浏览器（Edge CDP，手写 WebSocket 客户端；失败降级一次性 headless 批处理） |
+| `scheduler.py` | **调度器**：纯标准库 cron 五段式 + interval，到期向登记处建任务（重启不重复触发；登记失败不推进） |
+| `connectors/` | **连接器框架**：`base.py` 契约（未知 action 拒绝 / 未配置明确报错不返假数据）+ `github.py`（urllib REST）+ `imap.py`（邮件触发建任务，登记成功才标已读） |
+| `proposal.py` | **主动提议循环（chief of staff）**：规则扫描停滞/未认领/审批积压/失败/挂起任务 → 提案进审批中心等人裁，**绝不自动执行**；冷却 + 未决双重去重；可选 LLM 摘要（缺 key 降级规则文本） |
+| `threads.py` | **会话线程持久化**：thread + messages 落 SQLite，多端接续；`history` 取最近 N 条 + before 游标翻页 |
+| `voice.py` | **语音输出**：复用 multimodal MediaRouter 合成 TTS（缺 key 明示 Mock 假音频）；渠道无语音能力时文本兜底附文件路径，不谎称已发语音 |
 | `demo.py` | 5 条最小验收的自测脚本（含真·跨进程并发） |
 | `DESIGN.md` | **多渠道/多技能/多模型 运行时扩展设计**（架构、信任边界、密钥管理） |
 | `.env.example` | 全部环境变量清单（密钥只从环境变量读） |
-| `tests/` | 单元测试（unittest；验收 + WAL 健壮性 + 运行时回归 + 象棋原型 + DAG 调度 + 编排层应用），共 **299** 例（全过） |
+| `tests/` | 单元测试（unittest；验收 + WAL 健壮性 + 运行时回归 + 象棋原型 + DAG 调度 + 编排层应用 + 执行层 + 消息框架），共 **612** 例（全过） |
 | `tools/self_audit.py` | **自检评测脚本**：从代码与运行时取证（功能清点/性能实测/扫描检出率/记忆/技能/证据门禁/安全穿透），输出 JSON |
 | `SELF_AUDIT_REPORT.md` | **自检评测报告**：实测数据 + 竞品对比 + 评分卡（含发现并修复的 9 个真实缺陷：v1 的 3 个 + 深度轮 6 个） |
 | `approval.py` | **审批中心（Human-in-the-loop）**：高权限动作先挂起等真人批准，超时默认拒绝 |
@@ -1044,3 +1050,132 @@ store.list(task_id="p1/design_brief")   # 按任务取素材
 
 仍缺的（如实记录）：LLM 版拆解器、跨机分布式执行（Redis 路线未走）、
 素材库 GC 与配额、仲裁的自动策略目前只认登记的来源类型。
+
+---
+
+## 22. 执行层：常驻执行 · 调度 · 连接器 · 主动提议 · 浏览器 · 消息框架
+
+第 20/21 章解决了"多 AI 怎么协同排队"。本章补上"**AI 同事真正干活的地方**"——
+治理层（登记/DAG/审批/仲裁/记忆）早已就绪，执行层让每个 Bot 有工作区、
+有常驻进程、有定时/触发入口、有眼睛（浏览器）和嘴巴（语音）。
+**所有新模块零新依赖（纯标准库），全部配 unittest，连接纪律与既有模块一致。**
+
+### 22.1 常驻执行环境（execution/workspace.py + execution/daemon.py）
+
+每个 bot_id 一个独立目录（`work/` `outbox/` `state.json`）：相对路径越界
+（绝对路径/`..`）直接拒绝；state 原子写（mkstemp + os.replace）；`run()`
+一律委托 SandboxManager（**不自己起 subprocess**，越权预检/超时强杀/
+containment 标注都是现成的）。daemon 循环：`claim_ready` 写锁内选+认领 →
+按 payload.op 派发（shell 走沙箱 / skill 激活技能 / noop）→ complete/fail。
+**审批门红线**：payload 带 `approval_action`（send/publish/buy/delete/pay/post）
+时先请求人工批准，被拒/超时 → `needs_human` 挂起等人工，不执行。
+
+```python
+from execution.daemon import ExecutionDaemon
+
+d = ExecutionDaemon(db_path="data/task_registry.db", bot_id="writer-01")
+d.run_once(max_tasks=4)      # 单批（测试/单次用）
+d.run()                      # 常驻循环（Ctrl+C / signal 退出）
+```
+
+测试：`tests/test_execution.py` **16 项**。
+
+### 22.2 调度器（scheduler.py）——cron / interval 到期建任务
+
+纯标准库 cron 五段式（`*` `*/n` `a-b` `a-b/n` 列表；星期 0/7=周日；
+Vixie 日月或语义；366 天扫不到返回 None 明说）。规则落库，`fire_due()`
+到期即向登记处建任务并推进 next_run；**登记失败不推进**（下次重试），
+重启不重复触发。Windows spawn 兼容：入口是模块级函数。
+
+```python
+s = Scheduler(db_path="data/scheduler.db")
+s.add_job("daily-scan", cron="0 9 * * 1-5", payload={"op": "shell", "cmd": ["echo", "hi"]})
+s.fire_due()                 # [('daily-scan', 'daily-scan-169...')]
+```
+
+测试：`tests/test_scheduler.py` **14 项**。
+
+### 22.3 连接器（connectors/）——外部系统的统一开关
+
+`Connector` ABC 契约：未知 action 拒绝、**未配置明确报错不返假数据**、
+HTTP ≥400 一律抛错（404 不许被当成功数据）。已实现 `github.py`
+（get_repo/list_issues/create_issue/comment_issue，token 只进 Authorization
+Header）与 `imap.py`（poll_unseen/mark_seen/fetch_recent + EmailRule/EmailTrigger：
+未读邮件命中规则 → 建任务 → **登记成功才 mark_seen**，不丢邮件）。
+
+```python
+from connectors.imap import EmailTrigger, EmailRule
+trig = EmailTrigger(registry=reg, rules=[EmailRule(name="周报", subject_contains="报表")])
+trig.poll()                  # 命中即建任务；连接器不可用返回空（诚实降级）
+```
+
+测试：`tests/test_connectors.py` **14 项**。
+
+### 22.4 主动提议循环（proposal.py）——AI 可以提醒，放行永远在人
+
+chief of staff：周期性扫描任务表 + 审批中心，规则发现五种值得注意的情况
+（停滞 running / 无人认领 / 审批积压 / 失败待处理 / needs_human 积压汇总），
+生成提案写入审批中心等人类裁——**绝不自动执行**。去重两道闸：冷却表
+（同规则同目标冷却期内不重复）+ 未决去重（同 key 已有 pending 提案不重复弹窗）。
+可选 LLM 摘要：路由落到 Mock（即缺 key）时返回 None 不摘要——诚实降级。
+
+```python
+eng = ProposalEngine(db_path="data/proposals.db")
+eng.run_once()               # [(Proposal, approval_id)]，去留由人决定
+# python proposal.py --dry-run   # 只扫描打印，不写审批
+```
+
+测试：`tests/test_proposal.py` **24 项**。
+
+### 22.5 可编程浏览器（execution/browser.py）——Edge CDP，手写 WebSocket
+
+两种模式诚实分级：**CDP 模式**启动 Edge headless + 调试端口，用**手写的
+最小 WebSocket 客户端**（纯标准库：握手/客户端掩码/分片重组/ping-pong/
+64 位长度，线上格式由独立实现的环回服务器互操作测试锁定）说 DevTools
+Protocol：goto / get_text / click（坐标计算）/ type / screenshot /
+wait_for 全可用。**批处理兜底**：CDP 起不来时降级为 Edge 一次性 headless
+命令（--screenshot / --dump-dom），只读导航可用，交互动作明确报错不假装。
+
+```python
+with BrowserSkill(timeout=20.0) as b:      # 真机验证过：点击真改 DOM、截图是真 PNG
+    b.goto("https://example.com")
+    b.click("#btn"); b.type_text("#q", "你好")
+    b.screenshot("out.png"); b.get_text()
+# python -m execution.browser --url https://example.com --text --screenshot out.png
+```
+
+测试：`tests/test_browser.py` **29 项**（含 WebSocket 线上格式互操作）；
+真机冒烟：`tools/smoke_browser.py`。
+
+### 22.6 消息框架（threads.py + voice.py）——多端接续 + 语音输出
+
+`threads.py`：会话线程持久化（thread + messages 落 SQLite），
+`history()` 取最近 N 条 + `before` 游标翻页，`search()` 关键词检索；
+**往不存在的线程 append 明确报错**（聊天入口先 `ensure_thread()`）。
+`voice.py`：复用 multimodal MediaRouter 合成 TTS——配了 key 是真语音，
+没配就是明示 `fake=True` 的 Mock 假字节（链路照样跑通，不装）；
+渠道无语音消息能力时文本兜底附文件路径，**不谎称已发语音**。
+
+```python
+store = ThreadStore(db_path="data/threads.db")
+t = store.ensure_thread(channel="wecom")
+store.append(t["thread_id"], "user", "帮我写周报")
+store.history(t["thread_id"], limit=20)
+VoiceSpeaker().deliver(channel, user_id, "周报写好了")   # 合成→落盘→按渠道能力交付
+```
+
+测试：`tests/test_threads_voice.py` **23 项**。
+
+### 22.7 执行层全貌与诚实边界
+
+    scheduler（cron/interval）─┐
+    connectors（邮件/GitHub）──┼→ TaskRegistry（登记）→ DagScheduler（排队）
+    proposal（主动提议）──────┘        ↓
+                              execution.daemon（认领→沙箱执行→审批门）
+                                        ↓
+                     threads（会话接续）/ voice（语音）/ browser（浏览器）
+
+**仍未做（如实记录）**：真机联调（OAuth 授权流程、真实 API key 充值验证）
+需用户参与；浏览器自动化目前是单页批处理 + CDP 单 target（多标签/
+iframe/文件上传对话框未覆盖）；语音框架级可用，**音质取决于外部 TTS API**；
+云端 VM / 移动 App 不在本地版范围。

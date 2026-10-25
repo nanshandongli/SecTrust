@@ -9,7 +9,7 @@ exposed as a **zero-dependency MCP server** (36 tools, pure Python stdlib).
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-**Status: experimental (v0.8.0-alpha)** — 482 tests passing, real multi-process demos, no production traffic yet.
+**Status: experimental (v0.9.0-alpha)** — 612 tests passing, real multi-process demos, no production traffic yet.
 
 </div>
 
@@ -49,7 +49,7 @@ git clone https://github.com/nanshandongli/SecTrust.git
 cd SecTrust
 
 python demo.py                                        # ① core contract self-test (real cross-process concurrency)
-python -m unittest discover -s tests -p "test_*.py"   # ② full suite: 482 tests
+python -m unittest discover -s tests -p "test_*.py"   # ② full suite: 612 tests
 python task_center_web.py                             # ③ open http://127.0.0.1:8090 — live task dashboard
 ```
 
@@ -85,13 +85,18 @@ proposal voting (`ballot_*`), compliance scanning, long-term memory, approval qu
 | `memory_semantic.py` / `memory_hybrid.py` | Memory: BM25 + entities + optional real embeddings (Ollama/OpenAI), vector-space guards against silent dimensional corruption |
 | `channels/` | WeCom / Feishu adapters with real AES-256-CBC callback verification |
 | `games/` | Two-player Chinese chess — a live proof that the base supports real-time multi-agent play |
+| `execution/` | **Execution layer**: per-bot workspace (path-escape refusal, atomic state) + resident daemon (claim → sandbox → approval gate → complete/fail) + programmable browser (Edge CDP over a hand-rolled stdlib WebSocket client; degrades to one-shot headless batch) |
+| `scheduler.py` | Scheduler: pure-stdlib cron + interval; fires tasks on due, never double-fires across restarts |
+| `connectors/` | Connector framework (unknown action refused, unconfigured = explicit error, never fake data) + GitHub REST + IMAP email trigger |
+| `proposal.py` | Proactive proposal loop (chief of staff): rule-based scans → proposals into the approval center for human decision — **never auto-executes**; cooldown + pending dedup; optional LLM summary with honest degradation |
+| `threads.py` / `voice.py` | Conversation threads persisted in SQLite (multi-device continuity); TTS voice output via the media router (mock bytes flagged `fake` when no key) |
 | `mcp_server.py` | The MCP server: 36 tools over stdio, JSON-RPC 2.0, protocol 2026-07-28 |
 
 ## Honest status
 
-What's proven: single-machine multi-process orchestration end-to-end; 482 tests; benchmark-aligned scanner
+What's proven: single-machine multi-process orchestration end-to-end; 612 tests; benchmark-aligned scanner
 (2 TP / 0 FP on gitleaks vectors); stress-tested write throughput (~685 TPS at 8 processes, CAS claiming with
-zero duplicates); MCP tools verified from a clean install.
+zero duplicates); MCP tools verified from a clean install; real-Edge CDP smoke (click mutates DOM, real PNG out).
 
 What's **not** proven yet: cross-machine deployments (implemented, untested under real network latency);
 production traffic; PyPI/MCP Registry listing (materials ready); real WeCom/Feishu credentials.
