@@ -238,7 +238,7 @@ async function refresh(){
       const lastLog = (p.log && p.log.length) ? p.log[p.log.length-1] : '';
       const dt = (dag.tasks && dag.tasks[t.task_id]) || {};
       const depTxt = (dt.depends_on && dt.depends_on.length)
-        ? '依赖: ' + dt.depends_on.join(', ') + ((dt.waiting_on && dt.waiting_on.length) ? '\n等待: ' + dt.waiting_on.join(', ') : '')
+        ? '依赖: ' + dt.depends_on.join(', ') + ((dt.waiting_on && dt.waiting_on.length) ? '\\n等待: ' + dt.waiting_on.join(', ') : '')
         : (dt.dead_upstream && dt.dead_upstream.length ? '上游已死: ' + dt.dead_upstream.join(', ') : '—');
       return '<tr><td>'+t.task_id+'</td><td>'+t.runner_id+'</td><td>'+badge(t.status)+'</td><td class="dep-cell">'+
         depTxt+'</td><td>'+

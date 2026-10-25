@@ -35,3 +35,6 @@ SELF_AUDIT_REPORT.json
 
 # 自审报告（生成物，含假样本文本，勿提交）
 SELF_AUDIT_REPORT.md
+
+# Local deliverable: offline dashboard snapshot (contains local paths)
+dashboard_snapshot_zh.html
