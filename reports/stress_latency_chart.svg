@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 380" font-family="sans-serif">
+<rect x="0" y="0" width="760" height="380" fill="#0f172a"/>
+<text x="380" y="22" text-anchor="middle" font-size="15" font-weight="700" fill="#e2e8f0">锁获取延迟分位（ms）· 两档压测</text>
+<line x1="70" y1="300" x2="670" y2="300" stroke="#64748b" stroke-width="1.5"/>
+<line x1="70" y1="300.0" x2="670" y2="300.0" stroke="#334155" stroke-width="1"/>
+<text x="62.0" y="304.0" text-anchor="end" font-size="10" fill="#94a3b8">0.00</text>
+<line x1="70" y1="242.5" x2="670" y2="242.5" stroke="#334155" stroke-width="1"/>
+<text x="62.0" y="246.5" text-anchor="end" font-size="10" fill="#94a3b8">0.25</text>
+<line x1="70" y1="185.0" x2="670" y2="185.0" stroke="#334155" stroke-width="1"/>
+<text x="62.0" y="189.0" text-anchor="end" font-size="10" fill="#94a3b8">0.50</text>
+<line x1="70" y1="127.5" x2="670" y2="127.5" stroke="#334155" stroke-width="1"/>
+<text x="62.0" y="131.5" text-anchor="end" font-size="10" fill="#94a3b8">0.75</text>
+<line x1="70" y1="70.0" x2="670" y2="70.0" stroke="#334155" stroke-width="1"/>
+<text x="62.0" y="74.0" text-anchor="end" font-size="10" fill="#94a3b8">1.00</text>
+<rect x="106.0" y="284.4" width="34" height="15.6" fill="#3b82f6" rx="2"/>
+<text x="123.0" y="280.4" text-anchor="middle" font-size="11" fill="#e2e8f0">0.068</text>
+<rect x="150.0" y="284.8" width="34" height="15.2" fill="#f59e0b" rx="2"/>
+<text x="167.0" y="280.8" text-anchor="middle" font-size="11" fill="#e2e8f0">0.066</text>
+<text x="167.0" y="316.0" text-anchor="middle" font-size="11" fill="#cbd5e1">p50</text>
+<rect x="256.0" y="272.4" width="34" height="27.6" fill="#3b82f6" rx="2"/>
+<text x="273.0" y="268.4" text-anchor="middle" font-size="11" fill="#e2e8f0">0.120</text>
+<rect x="300.0" y="272.6" width="34" height="27.4" fill="#f59e0b" rx="2"/>
+<text x="317.0" y="268.6" text-anchor="middle" font-size="11" fill="#e2e8f0">0.119</text>
+<text x="317.0" y="316.0" text-anchor="middle" font-size="11" fill="#cbd5e1">p95</text>
+<rect x="406.0" y="265.3" width="34" height="34.7" fill="#3b82f6" rx="2"/>
+<text x="423.0" y="261.3" text-anchor="middle" font-size="11" fill="#e2e8f0">0.151</text>
+<rect x="450.0" y="265.7" width="34" height="34.3" fill="#f59e0b" rx="2"/>
+<text x="467.0" y="261.7" text-anchor="middle" font-size="11" fill="#e2e8f0">0.149</text>
+<text x="467.0" y="316.0" text-anchor="middle" font-size="11" fill="#cbd5e1">p99</text>
+<rect x="556.0" y="84.0" width="34" height="216.0" fill="#3b82f6" rx="2"/>
+<text x="573.0" y="80.0" text-anchor="middle" font-size="11" fill="#e2e8f0">0.939</text>
+<rect x="600.0" y="87.7" width="34" height="212.3" fill="#f59e0b" rx="2"/>
+<text x="617.0" y="83.7" text-anchor="middle" font-size="11" fill="#e2e8f0">0.923</text>
+<text x="617.0" y="316.0" text-anchor="middle" font-size="11" fill="#cbd5e1">max</text>
+<rect x="70" y="340" width="14" height="14" fill="#3b82f6"/>
+<text x="90" y="352" font-size="12" fill="#cbd5e1">200任务/6s 档 (1665 ops/s)</text>
+<rect x="300" y="340" width="14" height="14" fill="#f59e0b"/>
+<text x="320" y="352" font-size="12" fill="#cbd5e1">120任务/3s 档 (1761 ops/s)</text>
+</svg>

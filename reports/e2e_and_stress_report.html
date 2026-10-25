@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>本地可审计协作台 · 实跑证据</title>
+<style>
+ body{background:#0b1120;color:#e2e8f0;font-family:Segoe UI,Helvetica,Arial,sans-serif;margin:0;padding:28px}
+ h1{font-size:22px;margin:0 0 4px} h2{font-size:17px;margin:26px 0 10px;color:#93c5fd}
+ .sub{color:#94a3b8;font-size:13px;margin-bottom:18px}
+ .card{background:#111827;border:1px solid #1f2937;border-radius:12px;padding:18px;margin:14px 0}
+ .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:10px 0}
+ .kpi{background:#0f172a;border:1px solid #1f2937;border-radius:10px;padding:14px}
+ .kpi .v{font-size:24px;font-weight:700;color:#22c55e} .kpi .l{font-size:12px;color:#94a3b8}
+ table.tbl{border-collapse:collapse;width:100%;font-size:13px;margin-top:6px}
+ table.tbl th,table.tbl td{border:1px solid #1f2937;padding:7px 10px;text-align:left}
+ table.tbl th{background:#1e293b;color:#cbd5e1} table.tbl td{color:#e2e8f0}
+ .ok{color:#22c55e;font-weight:700} .warn{color:#f59e0b}
+ .boundary{background:#1c1917;border-left:4px solid #f59e0b;padding:12px 14px;border-radius:6px;
+   color:#fde68a;font-size:13px;line-height:1.6}
+ svg{width:100%;height:auto;background:#0f172a;border-radius:10px}
+ code{background:#1e293b;padding:1px 6px;border-radius:4px;font-size:12px}
+</style></head><body>
+<h1>本地可审计协作台 · 实跑证据</h1>
+<div class="sub">生成于 2026-10-25T21:33:11 · 数据来自 <code>data/cluster_stress_*.json</code> 与
+<code>data/pipeline_run_*.md</code> · 零依赖、可复跑（<code>tools/gen_evidence_report.py</code>）</div>
+
+<div class="grid">
+ <div class="kpi"><div class="v">781</div><div class="l">全量回归项（失败 0，skip 2）</div></div>
+ <div class="kpi"><div class="v">5/5</div><div class="l">端到端流水线实跑完成</div></div>
+ <div class="kpi"><div class="v">0</div><div class="l">跨机锁互斥违规 / 任务重复执行</div></div>
+ <div class="kpi"><div class="v">~1665</div><div class="l">跨机锁吞吐 ops/s（P99&lt;0.16ms）</div></div>
+</div>
+
+<h2>一、端到端流水线（DAG 实跑截图）</h2>
+<div class="card">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 470" font-family="sans-serif">
+<defs><marker id="arw" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#475569"/></marker></defs>
+<rect x="0" y="0" width="820" height="470" fill="#0f172a"/>
+<text x="410" y="16" text-anchor="middle" font-size="15" font-weight="700" fill="#e2e8f0">端到端流水线实跑 · 5/5 完成 (菱形 DAG + 真实 shell 产物)</text>
+<line x1="410.0" y1="84.0" x2="205.0" y2="150.0" stroke="#475569" stroke-width="2.5" marker-end="url(#arw)"/>
+<line x1="410.0" y1="84.0" x2="615.0" y2="150.0" stroke="#475569" stroke-width="2.5" marker-end="url(#arw)"/>
+<line x1="205.0" y1="214.0" x2="410.0" y2="290.0" stroke="#475569" stroke-width="2.5" marker-end="url(#arw)"/>
+<line x1="615.0" y1="214.0" x2="410.0" y2="290.0" stroke="#475569" stroke-width="2.5" marker-end="url(#arw)"/>
+<line x1="410.0" y1="354.0" x2="410.0" y2="400.0" stroke="#475569" stroke-width="2.5" marker-end="url(#arw)"/>
+<rect x="335" y="20" width="150" height="64" rx="10" fill="#14532d" stroke="#166534" stroke-width="2"/>
+<text x="410.0" y="42" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="14" font-weight="700" fill="#f0fdf4">调研与资料收集</text>
+<text x="410.0" y="60" text-anchor="middle" font-family="Consolas,Menlo,monospace" font-size="11" fill="#bbf7d0">op=noop</text>
+<circle cx="471" cy="34" r="9" fill="#22c55e"/>
+<text x="471" y="38" text-anchor="middle" font-size="12" font-weight="700" fill="#052e16">✓</text>
+<rect x="130" y="150" width="150" height="64" rx="10" fill="#14532d" stroke="#166534" stroke-width="2"/>
+<text x="205.0" y="172" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="14" font-weight="700" fill="#f0fdf4">静态检查</text>
+<text x="205.0" y="190" text-anchor="middle" font-family="Consolas,Menlo,monospace" font-size="11" fill="#bbf7d0">op=noop</text>
+<circle cx="266" cy="164" r="9" fill="#22c55e"/>
+<text x="266" y="168" text-anchor="middle" font-size="12" font-weight="700" fill="#052e16">✓</text>
+<rect x="540" y="150" width="150" height="64" rx="10" fill="#14532d" stroke="#166534" stroke-width="2"/>
+<text x="615.0" y="172" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="14" font-weight="700" fill="#f0fdf4">抓取原始数据</text>
+<text x="615.0" y="190" text-anchor="middle" font-family="Consolas,Menlo,monospace" font-size="11" fill="#bbf7d0">op=shell  165ms</text>
+<text x="615.0" y="205" text-anchor="middle" font-family="Consolas,Menlo,monospace" font-size="10" fill="#86efac">📄 sectrust_raw.json</text>
+<circle cx="676" cy="164" r="9" fill="#22c55e"/>
+<text x="676" y="168" text-anchor="middle" font-size="12" font-weight="700" fill="#052e16">✓</text>
+<rect x="335" y="290" width="150" height="64" rx="10" fill="#14532d" stroke="#166534" stroke-width="2"/>
+<text x="410.0" y="312" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="14" font-weight="700" fill="#f0fdf4">分析并生成报告</text>
+<text x="410.0" y="330" text-anchor="middle" font-family="Consolas,Menlo,monospace" font-size="11" fill="#bbf7d0">op=shell  178ms</text>
+<text x="410.0" y="345" text-anchor="middle" font-family="Consolas,Menlo,monospace" font-size="10" fill="#86efac">📄 sectrust_report.md</text>
+<circle cx="471" cy="304" r="9" fill="#22c55e"/>
+<text x="471" y="308" text-anchor="middle" font-size="12" font-weight="700" fill="#052e16">✓</text>
+<rect x="335" y="400" width="150" height="64" rx="10" fill="#14532d" stroke="#166534" stroke-width="2"/>
+<text x="410.0" y="422" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="14" font-weight="700" fill="#f0fdf4">发布交付物</text>
+<text x="410.0" y="440" text-anchor="middle" font-family="Consolas,Menlo,monospace" font-size="11" fill="#bbf7d0">op=noop</text>
+<circle cx="471" cy="414" r="9" fill="#22c55e"/>
+<text x="471" y="418" text-anchor="middle" font-size="12" font-weight="700" fill="#052e16">✓</text>
+<text x="20" y="455" font-size="11" fill="#94a3b8">绿框=已完成 ✓；op=noop 为占位步，op=shell 为真实落盘步（sectrust_raw.json / sectrust_report.md 写入系统临时目录）</text>
+</svg>
+<table class="tbl"><thead><tr>
+<th>任务</th>
+<th>op</th>
+<th>耗时</th>
+<th>产物</th>
+<th>状态</th>
+</tr></thead><tbody>
+<tr><td>调研与资料收集</td><td>noop</td><td>—</td><td>—</td><td>✓ completed</td></tr>
+<tr><td>静态检查</td><td>noop</td><td>—</td><td>—</td><td>✓ completed</td></tr>
+<tr><td>抓取原始数据</td><td>shell</td><td>165ms</td><td>sectrust_raw.json</td><td>✓ completed</td></tr>
+<tr><td>分析并生成报告</td><td>shell</td><td>178ms</td><td>sectrust_report.md</td><td>✓ completed</td></tr>
+<tr><td>发布交付物</td><td>noop</td><td>—</td><td>—</td><td>✓ completed</td></tr>
+</tbody></table>
+<div class="sub" style="margin-top:10px">菱形 DAG：research 扇出到 lint/fetch，汇合到 analyze，再到 publish。
+op=shell 的两步真实写入系统临时目录（<code>sectrust_raw.json</code> / <code>sectrust_report.md</code>），
+由 <code>ResultSummarizer</code> 自动抽取为产物清单——通用汇总不绑定任何模板或 op。</div>
+</div>
+
+<h2>二、真实多机压测数据（同机多进程 + 本机 TCP 协调）</h2>
+<div class="card">
+<h3 style="color:#cbd5e1;font-size:14px">基准 A · 跨机原语争用（锁 / 心跳 / 死信）</h3>
+<table class="tbl"><thead><tr>
+<th>指标</th>
+<th>200任务/6s 档</th>
+<th>120任务/3s 档</th>
+</tr></thead><tbody>
+<tr><td>机器数（进程模拟）</td><td>3</td><td>3</td></tr>
+<tr><td>锁池大小</td><td>16</td><td>12</td></tr>
+<tr><td>锁操作总数</td><td>9990</td><td>5283</td></tr>
+<tr><td>吞吐 (ops/s)</td><td>1665.0</td><td>1761.0</td></tr>
+<tr><td>P50 延迟 (ms)</td><td>0.068</td><td>0.066</td></tr>
+<tr><td>P99 延迟 (ms)</td><td>0.151</td><td>0.149</td></tr>
+<tr><td>Max 延迟 (ms)</td><td>0.939</td><td>0.923</td></tr>
+<tr><td>互斥违规（双抢）</td><td>0</td><td>0</td></tr>
+<tr><td>同锁最大并发持有</td><td>1</td><td>1</td></tr>
+<tr><td>在线机器观测</td><td>3 台全在线</td><td>3 台全在线</td></tr>
+<tr><td>死信阈值行为</td><td>驱动失败→入队→recover 消失 ✓</td><td>驱动失败→入队→recover 消失 ✓</td></tr>
+</tbody></table>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 380" font-family="sans-serif">
+<rect x="0" y="0" width="760" height="380" fill="#0f172a"/>
+<text x="380" y="22" text-anchor="middle" font-size="15" font-weight="700" fill="#e2e8f0">锁获取延迟分位（ms）· 两档压测</text>
+<line x1="70" y1="300" x2="670" y2="300" stroke="#64748b" stroke-width="1.5"/>
+<line x1="70" y1="300.0" x2="670" y2="300.0" stroke="#334155" stroke-width="1"/>
+<text x="62.0" y="304.0" text-anchor="end" font-size="10" fill="#94a3b8">0.00</text>
+<line x1="70" y1="242.5" x2="670" y2="242.5" stroke="#334155" stroke-width="1"/>
+<text x="62.0" y="246.5" text-anchor="end" font-size="10" fill="#94a3b8">0.25</text>
+<line x1="70" y1="185.0" x2="670" y2="185.0" stroke="#334155" stroke-width="1"/>
+<text x="62.0" y="189.0" text-anchor="end" font-size="10" fill="#94a3b8">0.50</text>
+<line x1="70" y1="127.5" x2="670" y2="127.5" stroke="#334155" stroke-width="1"/>
+<text x="62.0" y="131.5" text-anchor="end" font-size="10" fill="#94a3b8">0.75</text>
+<line x1="70" y1="70.0" x2="670" y2="70.0" stroke="#334155" stroke-width="1"/>
+<text x="62.0" y="74.0" text-anchor="end" font-size="10" fill="#94a3b8">1.00</text>
+<rect x="106.0" y="284.4" width="34" height="15.6" fill="#3b82f6" rx="2"/>
+<text x="123.0" y="280.4" text-anchor="middle" font-size="11" fill="#e2e8f0">0.068</text>
+<rect x="150.0" y="284.8" width="34" height="15.2" fill="#f59e0b" rx="2"/>
+<text x="167.0" y="280.8" text-anchor="middle" font-size="11" fill="#e2e8f0">0.066</text>
+<text x="167.0" y="316.0" text-anchor="middle" font-size="11" fill="#cbd5e1">p50</text>
+<rect x="256.0" y="272.4" width="34" height="27.6" fill="#3b82f6" rx="2"/>
+<text x="273.0" y="268.4" text-anchor="middle" font-size="11" fill="#e2e8f0">0.120</text>
+<rect x="300.0" y="272.6" width="34" height="27.4" fill="#f59e0b" rx="2"/>
+<text x="317.0" y="268.6" text-anchor="middle" font-size="11" fill="#e2e8f0">0.119</text>
+<text x="317.0" y="316.0" text-anchor="middle" font-size="11" fill="#cbd5e1">p95</text>
+<rect x="406.0" y="265.3" width="34" height="34.7" fill="#3b82f6" rx="2"/>
+<text x="423.0" y="261.3" text-anchor="middle" font-size="11" fill="#e2e8f0">0.151</text>
+<rect x="450.0" y="265.7" width="34" height="34.3" fill="#f59e0b" rx="2"/>
+<text x="467.0" y="261.7" text-anchor="middle" font-size="11" fill="#e2e8f0">0.149</text>
+<text x="467.0" y="316.0" text-anchor="middle" font-size="11" fill="#cbd5e1">p99</text>
+<rect x="556.0" y="84.0" width="34" height="216.0" fill="#3b82f6" rx="2"/>
+<text x="573.0" y="80.0" text-anchor="middle" font-size="11" fill="#e2e8f0">0.939</text>
+<rect x="600.0" y="87.7" width="34" height="212.3" fill="#f59e0b" rx="2"/>
+<text x="617.0" y="83.7" text-anchor="middle" font-size="11" fill="#e2e8f0">0.923</text>
+<text x="617.0" y="316.0" text-anchor="middle" font-size="11" fill="#cbd5e1">max</text>
+<rect x="70" y="340" width="14" height="14" fill="#3b82f6"/>
+<text x="90" y="352" font-size="12" fill="#cbd5e1">200任务/6s 档 (1665 ops/s)</text>
+<rect x="300" y="340" width="14" height="14" fill="#f59e0b"/>
+<text x="320" y="352" font-size="12" fill="#cbd5e1">120任务/3s 档 (1761 ops/s)</text>
+</svg>
+</div>
+<div class="card">
+<h3 style="color:#cbd5e1;font-size:14px">基准 B · 真实 ExecutionDaemon 集群（共享 SQLite + TCP 协调）</h3>
+<table class="tbl"><thead><tr>
+<th>指标</th>
+<th>200任务/6s 档</th>
+<th>120任务/3s 档</th>
+</tr></thead><tbody>
+<tr><td>任务 seed</td><td>200</td><td>120</td></tr>
+<tr><td>跨机去重完成</td><td>200</td><td>120</td></tr>
+<tr><td>重复执行（双机同跑）</td><td>0</td><td>0</td></tr>
+<tr><td>跨机放回 (requeue)</td><td>0</td><td>0</td></tr>
+<tr><td>墙钟 (s)</td><td>6.943</td><td>3.861</td></tr>
+<tr><td>吞吐 (任务/s)</td><td>28.81</td><td>31.08</td></tr>
+<tr><td>各机完成分布</td><td>{&#x27;machine-0&#x27;: 72, &#x27;machine-1&#x27;: 72, &#x27;machine-2&#x27;: 56}</td><td>{&#x27;machine-0&#x27;: 40, &#x27;machine-1&#x27;: 40, &#x27;machine-2&#x27;: 40}</td></tr>
+<tr><td>正确性</td><td>✓ 通过</td><td>✓ 通过</td></tr>
+</tbody></table>
+</div>
+
+<div class="boundary">
+<b>诚实边界（必须如实记录）：</b>本次为单宿主 + 同机多进程，进程隔离模拟机器、本机 TCP 回环模拟网络；
+协调后端是项目自带的协议兼容 FakeRedisServer（真 socket 级 TCP RESP 服务），非官方 Redis。
+真实跨机房还会叠加延迟 / 分区 / WAL 落 NFS 失效等风险。这不改变已验证的不变量
+（锁互斥、任务不重复执行、死信可恢复），但吞吐/延迟数字不应直接外推到分散物理机。
+</div>
+
+<h2>三、结论</h2>
+<div class="card">
+产品已从「功能清单」升级为<b>有数据支撑的本地可审计协作台</b>：
+<ul>
+<li>端到端：建 DAG → 真实 daemon 执行 → 通用汇总落盘，链路闭环（5/5 完成）。</li>
+<li>跨机：锁互斥 0 违规、任务跨机 0 重复执行、死信阈值正确可恢复。</li>
+<li>质量：全量回归 781 项 0 失败（skip 2）。</li>
+</ul>
+</div>
+</body></html>

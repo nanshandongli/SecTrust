@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 470" font-family="sans-serif">
+<defs><marker id="arw" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,3 L0,6 Z" fill="#475569"/></marker></defs>
+<rect x="0" y="0" width="820" height="470" fill="#0f172a"/>
+<text x="410" y="16" text-anchor="middle" font-size="15" font-weight="700" fill="#e2e8f0">端到端流水线实跑 · 5/5 完成 (菱形 DAG + 真实 shell 产物)</text>
+<line x1="410.0" y1="84.0" x2="205.0" y2="150.0" stroke="#475569" stroke-width="2.5" marker-end="url(#arw)"/>
+<line x1="410.0" y1="84.0" x2="615.0" y2="150.0" stroke="#475569" stroke-width="2.5" marker-end="url(#arw)"/>
+<line x1="205.0" y1="214.0" x2="410.0" y2="290.0" stroke="#475569" stroke-width="2.5" marker-end="url(#arw)"/>
+<line x1="615.0" y1="214.0" x2="410.0" y2="290.0" stroke="#475569" stroke-width="2.5" marker-end="url(#arw)"/>
+<line x1="410.0" y1="354.0" x2="410.0" y2="400.0" stroke="#475569" stroke-width="2.5" marker-end="url(#arw)"/>
+<rect x="335" y="20" width="150" height="64" rx="10" fill="#14532d" stroke="#166534" stroke-width="2"/>
+<text x="410.0" y="42" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="14" font-weight="700" fill="#f0fdf4">调研与资料收集</text>
+<text x="410.0" y="60" text-anchor="middle" font-family="Consolas,Menlo,monospace" font-size="11" fill="#bbf7d0">op=noop</text>
+<circle cx="471" cy="34" r="9" fill="#22c55e"/>
+<text x="471" y="38" text-anchor="middle" font-size="12" font-weight="700" fill="#052e16">✓</text>
+<rect x="130" y="150" width="150" height="64" rx="10" fill="#14532d" stroke="#166534" stroke-width="2"/>
+<text x="205.0" y="172" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="14" font-weight="700" fill="#f0fdf4">静态检查</text>
+<text x="205.0" y="190" text-anchor="middle" font-family="Consolas,Menlo,monospace" font-size="11" fill="#bbf7d0">op=noop</text>
+<circle cx="266" cy="164" r="9" fill="#22c55e"/>
+<text x="266" y="168" text-anchor="middle" font-size="12" font-weight="700" fill="#052e16">✓</text>
+<rect x="540" y="150" width="150" height="64" rx="10" fill="#14532d" stroke="#166534" stroke-width="2"/>
+<text x="615.0" y="172" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="14" font-weight="700" fill="#f0fdf4">抓取原始数据</text>
+<text x="615.0" y="190" text-anchor="middle" font-family="Consolas,Menlo,monospace" font-size="11" fill="#bbf7d0">op=shell  165ms</text>
+<text x="615.0" y="205" text-anchor="middle" font-family="Consolas,Menlo,monospace" font-size="10" fill="#86efac">📄 sectrust_raw.json</text>
+<circle cx="676" cy="164" r="9" fill="#22c55e"/>
+<text x="676" y="168" text-anchor="middle" font-size="12" font-weight="700" fill="#052e16">✓</text>
+<rect x="335" y="290" width="150" height="64" rx="10" fill="#14532d" stroke="#166534" stroke-width="2"/>
+<text x="410.0" y="312" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="14" font-weight="700" fill="#f0fdf4">分析并生成报告</text>
+<text x="410.0" y="330" text-anchor="middle" font-family="Consolas,Menlo,monospace" font-size="11" fill="#bbf7d0">op=shell  178ms</text>
+<text x="410.0" y="345" text-anchor="middle" font-family="Consolas,Menlo,monospace" font-size="10" fill="#86efac">📄 sectrust_report.md</text>
+<circle cx="471" cy="304" r="9" fill="#22c55e"/>
+<text x="471" y="308" text-anchor="middle" font-size="12" font-weight="700" fill="#052e16">✓</text>
+<rect x="335" y="400" width="150" height="64" rx="10" fill="#14532d" stroke="#166534" stroke-width="2"/>
+<text x="410.0" y="422" text-anchor="middle" font-family="Segoe UI,Helvetica,Arial,sans-serif" font-size="14" font-weight="700" fill="#f0fdf4">发布交付物</text>
+<text x="410.0" y="440" text-anchor="middle" font-family="Consolas,Menlo,monospace" font-size="11" fill="#bbf7d0">op=noop</text>
+<circle cx="471" cy="414" r="9" fill="#22c55e"/>
+<text x="471" y="418" text-anchor="middle" font-size="12" font-weight="700" fill="#052e16">✓</text>
+<text x="20" y="455" font-size="11" fill="#94a3b8">绿框=已完成 ✓；op=noop 为占位步，op=shell 为真实落盘步（sectrust_raw.json / sectrust_report.md 写入系统临时目录）</text>
+</svg>
