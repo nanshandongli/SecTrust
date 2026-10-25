@@ -103,10 +103,12 @@ class QualityGate:
     """
 
     def __init__(self, db_path: Optional[str] = None, max_rework: int = 3,
-                 evidence_gate: Optional[EvidenceGate] = None):
+                 evidence_gate: Optional[EvidenceGate] = None, cost=None):
         self.db_path = db_path
         self.max_rework = max_rework
         self.evidence_gate = evidence_gate  # 可选：与 EvidenceGate 组合双门
+        # cost：可选的 CostStore。打回重做记一笔重试成本（旁路，失败静默）
+        self.cost = cost
         if db_path:
             self._ensure_schema()
 
@@ -371,12 +373,31 @@ class QualityGate:
             self._emit(scheduler, "rework",
                        {"task_id": task_id, "rework_count": v.rework_count,
                         "violations": v.violations})
+            self._record_retry_cost(scheduler, task_id, v)
         return {"accepted": False, "completed": False, "sent_back": ok,
                 "task_id": task_id, "status": "registered" if ok else "running",
                 "rework_count": v.rework_count, "feedback": v.feedback,
                 "verdict": v.to_dict(),
                 "hint": f"按 feedback 修订后重新认领（还可重试 "
                         f"{max(0, self.max_rework - v.rework_count + 1)} 次）"}
+
+    def _record_retry_cost(self, scheduler, task_id: str,
+                           v: "QualityVerdict") -> None:
+        """打回 = 一次重试成本（旁路：记账失败绝不挡打回本身）。"""
+        if self.cost is None:
+            return
+        try:
+            tid = None
+            try:
+                t = scheduler.registry.get_task(task_id)
+                payload = t.get("payload") if t else None
+                tid = payload.get("trace_id") if isinstance(payload, dict) else None
+            except Exception:  # noqa: BLE001
+                pass
+            reason = "quality_rejected: " + "; ".join(v.violations)[:200]
+            self.cost.record_retry(task_id=task_id, trace_id=tid, reason=reason)
+        except Exception:  # noqa: BLE001 —— 旁路故障不上抛
+            pass
 
     def _escalate(self, scheduler, task_id: str, v: QualityVerdict,
                   output: str) -> dict:

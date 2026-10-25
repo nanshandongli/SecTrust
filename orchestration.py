@@ -71,11 +71,13 @@ class DagScheduler:
 
     def __init__(self, db_path=DEFAULT_DB_PATH, registry: TaskRegistry | None = None,
                  broker: Broker | None = None, events: bool = True,
-                 tracer=None):
+                 tracer=None, cost=None):
         self.registry = registry if registry is not None else TaskRegistry(db_path=db_path)
         self.db_path = self.registry.db_path
         # tracer：可选的 TraceStore。记轨迹是**旁路**——缺失或异常都不挡调度主链路
         self.tracer = tracer
+        # cost：可选的 CostStore。成本打点同样是旁路——记账失败绝不挡任务完成
+        self.cost = cost
         # events=False：只读视图（如 Web 看板）不建事件总线，避免每请求开队列句柄
         if broker is not None:
             self.broker = broker
@@ -107,6 +109,60 @@ class DagScheduler:
                 tid = self._trace_id_of(task_id)
             if tid:
                 self.tracer.record(tid, kind, task_id=task_id, **kw)
+        except Exception:  # noqa: BLE001 —— 旁路故障不上抛
+            pass
+
+    # ------------------------------------------------------------------
+    # 成本旁路：finalize_cost（best-effort，绝不挡调度主链路）
+    # ------------------------------------------------------------------
+    def _attribution(self, payload: dict) -> tuple:
+        """从 payload 取归因三元组 (role, template, tier)——缺则空串。"""
+        plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
+        return (str(payload.get("skill") or ""),
+                str(plan.get("template") or ""),
+                str(plan.get("tier") or ""))
+
+    def finalize_cost(self, task_id: str, payload: dict = None,
+                      outcome: str = "") -> dict:
+        """任务结束：聚合该任务的成本事件成快照，并补记 cost_snapshot 轨迹事件。
+
+        返回快照（cost 未注入时返回 {}）。与 trace_event 同语义：
+        记账是观测，不是完成的前置条件。
+        """
+        if self.cost is None:
+            return {}
+        try:
+            payload = payload if isinstance(payload, dict) else {}
+            tid = trace_id_of(payload) if trace_id_of is not None else None
+            role, template, tier = self._attribution(payload)
+            snap = self.cost.finalize_task(task_id, trace_id=tid, role=role,
+                                           template=template, tier=tier,
+                                           outcome=outcome)
+            # 成本快照也进轨迹（数字非敏感；detail 有界由 cost 层保证）
+            self.trace_event("cost_snapshot", task_id=task_id, trace_id=tid,
+                             summary=f"成本快照 {task_id}",
+                             detail={k: snap.get(k) for k in
+                                     ("model_calls", "input_tokens",
+                                      "output_tokens", "tool_calls", "retries",
+                                      "sandbox_seconds", "cost_estimate",
+                                      "unpriced_calls")})
+            return snap
+        except Exception:  # noqa: BLE001 —— 旁路故障不上抛
+            return {}
+
+    def record_retry_cost(self, task_id: str, reason: str = "") -> None:
+        """记一次重试/打回成本（best-effort）。"""
+        if self.cost is None:
+            return
+        try:
+            tid = None
+            try:
+                t = self.registry.get_task(task_id)
+                tid = trace_id_of(t.get("payload") if t else None) \
+                    if trace_id_of is not None else None
+            except Exception:  # noqa: BLE001
+                pass
+            self.cost.record_retry(task_id=task_id, trace_id=tid, reason=reason)
         except Exception:  # noqa: BLE001 —— 旁路故障不上抛
             pass
 
@@ -313,6 +369,8 @@ class DagScheduler:
                              content=json.dumps(result, ensure_ascii=False,
                                                 default=str)
                              if result is not None else None)
+            # 成本收尾：聚合本任务全部成本事件成快照（旁路，失败静默）
+            self.finalize_cost(task_id, payload=payload, outcome="completed")
         return ok
 
     def fail(self, task_id, error=None):
@@ -375,6 +433,9 @@ class DagScheduler:
                          summary=f"失败 {task_id}",
                          detail={"error": str(error) if error is not None else "failed",
                                  "blocked_downstream": blocked_now})
+        # 成本收尾：失败的一次尝试也是成本（记一笔重试 + 聚合快照）
+        self.record_retry_cost(task_id, reason=str(error) if error else "failed")
+        self.finalize_cost(task_id, payload=payload, outcome="failed")
         return blocked_now
 
     # ------------------------------------------------------------------

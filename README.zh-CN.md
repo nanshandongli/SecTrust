@@ -1,5 +1,5 @@
 > [!WARNING]
-> **实验性项目（v0.9.0-alpha）**：可运行、612 项测试全过的**原型**，未经过生产流量检验。
+> **实验性项目（v0.9.0-alpha）**：可运行、690 项测试全过的**原型**，未经过生产流量检验。
 > 已在单机多进程场景验证；跨机分布式（Redis 后端）已实现但未实测。欢迎试用与提 issue，API 可能变动。
 
 <div align="right">
@@ -19,7 +19,7 @@ git clone https://github.com/nanshandongli/SecTrust.git
 cd SecTrust
 
 python demo.py                                   # ① 核心契约自测（含真·跨进程并发）
-python -m unittest discover -s tests -p "test_*.py"   # ② 全量 482 项测试
+python -m unittest discover -s tests -p "test_*.py"   # ② 全量 690 项测试
 python task_center_web.py                        # ③ 浏览器打开 http://127.0.0.1:8090 看任务看板
 ```
 
@@ -36,7 +36,7 @@ python task_center_web.py                        # ③ 浏览器打开 http://12
 }
 ```
 
-40 个工具即刻可用：任务登记/认领、DAG 编排（`dag_*`）、质量回流、投票择优（`ballot_*`）、
+45 个工具即刻可用：任务登记/认领、DAG 编排（`dag_*`）、质量回流、投票择优（`ballot_*`）、
 合规扫描、长期记忆、审批查询、轨迹回放（`trace_*`）。详见下文与 [DESIGN.md](DESIGN.md)。
 
 ---
@@ -75,11 +75,12 @@ runner 用 `--api-base` 即可把登记处/心跳写到远程中心，从而放�
 | `proposal.py` | **主动提议循环（chief of staff）**：规则扫描停滞/未认领/审批积压/失败/挂起任务 → 提案进审批中心等人裁，**绝不自动执行**；冷却 + 未决双重去重；可选 LLM 摘要（缺 key 降级规则文本） |
 | `threads.py` | **会话线程持久化**：thread + messages 落 SQLite，多端接续；`history` 取最近 N 条 + before 游标翻页 |
 | `trace.py` | **轨迹回放层（Trace）**：每任务一条 trace_id 贯穿拆解/派单/执行/审批/质检/完成；结构化事件 + 摘要 + blake2b 内容指纹（原文与敏感字段不落库）；MCP 4 工具 + REST 回放端点 + CLI |
+| `cost.py` | **成本打点层（Cost）**：四层成本记账（模型 Token/工具/重试/基础设施）；任务结束落一条快照（用户给定 schema）；内置公开价静态表、未知模型不计价；按天/模板/角色聚合看板 + 异常榜；MCP 5 工具 + REST + CLI |
 | `voice.py` | **语音输出**：复用 multimodal MediaRouter 合成 TTS（缺 key 明示 Mock 假音频）；渠道无语音能力时文本兜底附文件路径，不谎称已发语音 |
 | `demo.py` | 5 条最小验收的自测脚本（含真·跨进程并发） |
 | `DESIGN.md` | **多渠道/多技能/多模型 运行时扩展设计**（架构、信任边界、密钥管理） |
 | `.env.example` | 全部环境变量清单（密钥只从环境变量读） |
-| `tests/` | 单元测试（unittest；验收 + WAL 健壮性 + 运行时回归 + 象棋原型 + DAG 调度 + 编排层应用 + 执行层 + 消息框架 + 轨迹回放），共 **645** 例（全过） |
+| `tests/` | 单元测试（unittest；验收 + WAL 健壮性 + 运行时回归 + 象棋原型 + DAG 调度 + 编排层应用 + 执行层 + 消息框架 + 轨迹回放 + 成本打点），共 **690** 例（全过） |
 | `tools/self_audit.py` | **自检评测脚本**：从代码与运行时取证（功能清点/性能实测/扫描检出率/记忆/技能/证据门禁/安全穿透），输出 JSON |
 | `SELF_AUDIT_REPORT.md` | **自检评测报告**：实测数据 + 竞品对比 + 评分卡（含发现并修复的 9 个真实缺陷：v1 的 3 个 + 深度轮 6 个） |
 | `approval.py` | **审批中心（Human-in-the-loop）**：高权限动作先挂起等真人批准，超时默认拒绝 |
@@ -92,7 +93,7 @@ runner 用 `--api-base` 即可把登记处/心跳写到远程中心，从而放�
 | `memory.py` | **轻量长期记忆（P2）**：`MemoryStore` 类，SQLite 存用户偏好 / 常用指令模板 / 常用 repo 路径，跨会话持久化 |
 | `memory_semantic.py` | **记忆增强（路线 3）**：在 SQLite 记忆之上可选叠向量层（离线 n-gram 余弦默认；可选 OpenAI/Mem0），语义检索 |
 | `mem0_adapter.py` | Mem0 / OpenMemory MCP 集成存根（可用时把记忆委托给专业记忆层） |
-| `mcp_server.py` | **零依赖 MCP Server（P0）**：JSON-RPC over stdio，暴露 40 个工具（登记处/审批/扫描/记忆/语义检索/活体验证/推送保护/分布式队列/DAG 编排/投票择优/轨迹回放） |
+| `mcp_server.py` | **零依赖 MCP Server（P0）**：JSON-RPC over stdio，暴露 45 个工具（登记处/审批/扫描/记忆/语义检索/活体验证/推送保护/分布式队列/DAG 编排/投票择优/轨迹回放/成本打点） |
 | `templates/` | **合规扫描模板库（P0）**：5 模板（密钥泄露/硬编码凭证/依赖漏洞/CI-CD/SAST）+ 执行编排（审批+沙箱双闸门） |
 | `scanner/` | **扫描深度（路线 2）**：Semgrep 适配器（AST 级，可回退正则）/ 活体验证 / 推送前保护（git hook + CI yaml） |
 | `api/` | **分布式入口（路线 1）**：`app.py` REST 服务（Bearer 鉴权 + 可观测性）+ `client.py` 远程客户端 |
@@ -1244,6 +1245,80 @@ trace_start ──→ trace_id 写进各任务 payload
 
 - 回放看到的是**结构化事件 + 摘要 + 指纹**；要看原文需重新投喂验真
   （这是特性不是缺陷——审计材料不囤敏感原文）；
-- 成本打点（Token/工具/重试/基础设施四层）与通用汇总阶段是按路线图的
-  下一步，将作为新事件 kind 与聚合视图叠在这条 Trace 上，不新起炉灶；
+- 成本打点已作为独立账本（cost.py，见第 24 章）叠在这条 Trace 上：
+  任务完成时自动记 `cost_snapshot` 事件，数字非敏感、可随轨迹回放；
 - 轨迹库独立成文件（`data/trace.db`），与任务表分开留存。
+
+## 24. 观测层：成本打点（cost.py）
+
+Trace 回答"发生了什么"，成本回答"**花了多少、花在哪**"。多 AI 协同的
+token 消耗是指数级的——一个任务拆 6 个 AI、每轮还带校验，成本可能翻几倍。
+成本层按任务、按 AI 角色、按工具记四层账，任务结束落一条快照，看板直接
+回答"哪条流水线吞金、哪些任务反复打回、哪些工具调用次数异常"。
+
+```
+record_model_call ──┐
+record_tool_call  ──┤
+record_retry      ──┼─→ cost_events（细粒度事件，四层）
+record_infra      ──┘         ↓
+                    finalize_task / cost_task（任务结束）
+                            ↓
+              cost_records 一行一个任务（用户给定 schema）
+                            ↓
+     cost_dashboard：按天 / 按模板 / 按角色 + 异常榜
+```
+
+### 24.1 四层成本
+
+| 层 | 记什么 | 打点位置 |
+|----|--------|----------|
+| `model` 模型 | 输入/输出 Token、调用次数、思考轮次 | `record_model_call` / `tracked_complete`（包一层 provider） |
+| `tool` 工具 | 浏览器/语音/文件/外部 API 调用次数 | `BrowserSkill(cost=…)` 每个动作一笔 |
+| `retry` 重试 | 失败重试、质检打回、死信 | `DagScheduler.fail` / `QualityGate._send_back` |
+| `infra` 基础设施 | 沙箱秒数、Redis、存储、日志 | `record_infra`（本地资源无诚实单价时 cost 记 0） |
+
+### 24.2 任务快照 schema（与需求规格一致）
+
+```json
+{
+  "trace_id": "tr_x", "task_id": "p1/copy",
+  "model_calls": 12, "input_tokens": 8400, "output_tokens": 2100,
+  "tool_calls": 7, "retries": 2, "sandbox_seconds": 45,
+  "cost_estimate": 0.0123
+}
+```
+
+另加归因列（`role`=payload.skill / `template`=payload.plan.template /
+`tier`=成本路由档位 / `outcome`）与诚实列 `unpriced_calls`——附加不替换。
+
+### 24.3 三条设计纪律（改动不可破坏）
+
+1. **计价诚实**：内置价格表只是公开挂牌价的静态快照（2026-10），可用
+   `COST_PRICE_TABLE`（JSON）或 `prices=` 覆盖；**未知模型不计价**——
+   cost 记 0、`unpriced_calls` +1，绝不编一个数字糊墙。Mock/Ollama
+   本地调用显式按 0 计（真免费）。
+2. **打点是旁路，不是主链路**：DagScheduler / QualityGate / BrowserSkill
+   的 cost 记账全部 best-effort——账本炸了任务照常完成；CostStore 自身
+   的错误对直接调用者如实抛出。
+3. **快照幂等 + 写自愈**：`finalize_task` 从事件重聚合后 upsert，重复
+   调用结果一致（不会把一次完成记成两倍）；写操作撞 Windows 半残连接
+   （OperationalError）→ 丢弃连接重建 → 重试一次，单语句失败无副作用，
+   重跑不重复记账（与 task_registry 同纪律）。
+
+### 24.4 入口
+
+- **MCP**：`cost_record`（四层事件）/ `cost_task`（写快照）/ `cost_finalize`
+  （聚合收尾）/ `cost_show`（任务成本+事件）/ `cost_dashboard`（看板）
+- **REST**：`GET /costs?days=30`、`GET /costs/{task_id}`
+- **CLI**：`python cost.py --model-call / --tool-call / --retry / --infra /
+  --snapshot '<json>' / --finalize --task <id> / --show / --dashboard / --stats`
+
+### 24.5 诚实边界
+
+- `cost_estimate` 是**量级估算**（公开挂牌价快照），不是账单——阶梯价、
+  缓存命中价、批量折扣都不在表内；看板自带 `price_note` 提醒；
+- 模型层 token 来自 provider 返回的 usage；Mock 调用无用量数据，
+  记 `model_calls=1`、tokens=0——调用发生过，只是没数，不猜；
+- 任务完成时 DagScheduler 自动 `finalize_task` 并补记 `cost_snapshot`
+  轨迹事件；runner 尚未统一接入 orchestrator，模型层打点由调用方经
+  `tracked_complete` / `cost_record` 显式完成（接线面已在测试锁定）。

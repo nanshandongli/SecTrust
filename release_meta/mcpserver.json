@@ -55,6 +55,11 @@
     "ballot_confirm",
     "ballot_status",
     "ballot_submit",
+    "cost_dashboard",
+    "cost_finalize",
+    "cost_record",
+    "cost_show",
+    "cost_task",
     "dag_add",
     "dag_claim_ready",
     "dag_complete",
@@ -92,7 +97,7 @@
     "validate_secret"
   ],
   "capabilities": {
-    "audit": "所有高危动作（扫描/执行）强制经过审批中心 + 沙箱双闸门；29 个工具全部带 readOnly/destructive/openWorld 风险注解",
+    "audit": "所有高危动作（扫描/执行）强制经过审批中心 + 沙箱双闸门；45 个工具全部带 readOnly/destructive/openWorld 风险注解",
     "stateful": "协议层无状态（无会话）；持久化依赖本地 SQLite（WAL）；可选切换 HTTP API / 消息队列实现跨机部署",
     "auth": "OAuth 2.1 资源服务器：RFC 9728 元数据端点 + RFC 8707 受众绑定 + RFC 9207 iss 校验 + CIMD（见 OAuth_ROADMAP.md）",
     "scanning": "78 条结构化检测器 + 香农熵兜底未知形态 + 指纹/基线/三档抑制 + diff-aware 增量 + SARIF 2.1.0；可选 semgrep AST 引擎与密钥活体验证",

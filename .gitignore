@@ -38,3 +38,6 @@ SELF_AUDIT_REPORT.md
 
 # Local deliverable: offline dashboard snapshot (contains local paths)
 dashboard_snapshot_zh.html
+
+# Local MCP client config (contains machine-specific paths)
+mcp_client_config.claude_desktop.json

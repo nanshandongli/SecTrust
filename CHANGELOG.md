@@ -8,6 +8,35 @@
 ## [0.9.0] — 未发布
 
 ### 新增
+- **观测层：成本打点（`cost.py`）**——Trace 之上叠一本可归因的成本账：
+  - **四层记账**：`model`（输入/输出 Token、调用次数、思考轮次）/
+    `tool`（浏览器/语音/文件/外部 API 调用次数）/ `retry`（失败重试、
+    质检打回、死信）/ `infra`（沙箱秒数、Redis、存储、日志）。
+    细粒度事件落 `cost_events`，任务结束聚合/直写一条快照落
+    `cost_records`——schema 与需求规格一致（trace_id/task_id/
+    model_calls/input_tokens/output_tokens/tool_calls/retries/
+    sandbox_seconds/cost_estimate），另加归因列 role/template/tier/
+    outcome 与诚实列 unpriced_calls（附加不替换）。
+  - **计价诚实**：内置公开挂牌价静态快照（2026-10，USD/1K tokens，
+    长前缀匹配），`COST_PRICE_TABLE`（JSON）或 `prices=` 可覆盖；
+    **未知模型不计价**（cost 记 0、unpriced_calls +1），绝不编数字；
+    Mock/Ollama 显式按 0 计（真免费）。
+  - **看板**：`cost_dashboard` 按天 / 按任务模板 / 按 AI 角色聚合，
+    外加异常榜（吞金任务 / 反复打回 / 工具调用异常），自带 price_note。
+  - **接线（全部 best-effort，账本炸了不挡干活）**：
+    `DagScheduler(cost=…)` 完成任务自动 `finalize_task` + 补记
+    `cost_snapshot` 轨迹事件（失败任务记一笔重试成本后同样收尾）；
+    `QualityGate(cost=…)` 打回即记重试；`BrowserSkill(cost=…)`
+    每个浏览器动作记一笔工具成本（失败也记）；模型调用经
+    `tracked_complete()` 包一层按 usage 记账（兼容 OpenAI 与
+    Anthropic 两种键风格，Mock 无用量时 calls=1/tokens=0 不猜）。
+  - 入口三件套：MCP `cost_record/cost_task/cost_finalize/cost_show/
+    cost_dashboard`（40 → 45 工具）、REST `GET /costs` 与
+    `GET /costs/{task_id}`、CLI（`--model-call/--tool-call/--retry/
+    --infra/--snapshot/--finalize/--show/--dashboard/--stats`）。
+  - 测试：`tests/test_cost.py` 32 项（计价诚实性/聚合精确/幂等/看板/
+    脱敏与有界/线程安全/跨线程 close/CLI 全流程）+
+    `tests/test_cost_wiring.py` 13 项（四挂点 + 旁路纪律 + 两入口）。
 - **观测层：Trace 轨迹回放（`trace.py`）**——多 AI 协同出事时的"黑匣子"：
   - 每条任务/流水线一条 `trace_id`，贯穿拆解→派单→执行→审批→质检→
     收尾；`seq` 按 trace 单调分配，回放顺序即发生顺序，`after_seq` 游标

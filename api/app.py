@@ -26,6 +26,7 @@ from memory import MemoryStore, _memory_db_path
 from task_registry import TaskRegistry, DEFAULT_DB_PATH
 from templates import execute_scan, list_templates, request_scan
 from trace import TraceStore
+from cost import CostStore
 
 from security.oauth import (TokenValidator, ResourceServerValidator, extract_bearer,
                             protected_resource_metadata, www_authenticate)
@@ -90,6 +91,8 @@ class RegistryAPI:
         ("POST", r"^/scan/execute$", "_scan_execute"),
         ("GET", r"^/traces$", "_trace_list"),
         ("GET", r"^/traces/([^/]+)$", "_trace_show"),
+        ("GET", r"^/costs$", "_cost_dashboard"),
+        ("GET", r"^/costs/([^/]+)$", "_cost_show"),
     ]
 
     def _dispatch(self, method: str, path: str) -> Optional[Tuple[str, Tuple]]:
@@ -300,6 +303,27 @@ class RegistryAPI:
         finally:
             store.close()
         return 200, {"trace": meta, "events": events}
+
+    def _cost_db_path(self) -> str:
+        return os.getenv("COST_DB_PATH") or os.path.join(
+            os.path.dirname(self.db_path or DEFAULT_DB_PATH) or "data", "cost.db")
+
+    def _cost_dashboard(self, args, body, q):
+        store = CostStore(db_path=self._cost_db_path())
+        try:
+            return 200, store.dashboard(days=int(q.get("days", ["30"])[0]))
+        finally:
+            store.close()
+
+    def _cost_show(self, args, body, q):
+        store = CostStore(db_path=self._cost_db_path())
+        try:
+            rec = store.task_cost(args[0])
+            if rec is None:
+                return 404, {"error": "not found"}
+        finally:
+            store.close()
+        return 200, rec
 
     # ---------- HTTP 处理器 ----------
     def make_handler(self):

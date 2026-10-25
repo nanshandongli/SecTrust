@@ -69,6 +69,7 @@ from templates import (
     run_scan,
 )
 from trace import TraceError, TraceStore
+from cost import CostError, CostStore
 
 # ---------------------------------------------------------------------------
 # 协议版本（MCP 2026-07-28 对齐）
@@ -701,6 +702,101 @@ _TOOLS = [
             },
         },
     },
+    # ---- 观测层 成本打点（四层成本 + 聚合看板；见 cost.py）----
+    {
+        "name": "cost_record",
+        "description": ("记一条成本事件。四层之一：model=模型 Token 调用 / "
+                        "tool=工具调用 / retry=重试打回 / infra=基础设施秒数。"
+                        "模型层按内置公开挂牌价估算；未知模型不计价"
+                        "（记 unpriced_calls，不编数字糊墙）。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "layer": {"type": "string", "description": "model/tool/retry/infra"},
+                "task_id": {"type": "string", "description": "可选：关联任务"},
+                "trace_id": {"type": "string", "description": "可选：关联轨迹"},
+                "model": {"type": "string", "description": "模型名（layer=model）"},
+                "input_tokens": {"type": "integer", "description": "输入 Token（model 层）"},
+                "output_tokens": {"type": "integer", "description": "输出 Token（model 层）"},
+                "rounds": {"type": "integer", "description": "思考轮次（model 层，可选）"},
+                "tool": {"type": "string", "description": "工具名（layer=tool）"},
+                "reason": {"type": "string", "description": "重试原因（layer=retry）"},
+                "kind": {"type": "string", "description": "设施类型（layer=infra，缺省 sandbox）"},
+                "seconds": {"type": "number", "description": "秒数（infra 层）"},
+                "actor": {"type": "string", "description": "行为方（runner/agent/human）"},
+            },
+            "required": ["layer"],
+        },
+    },
+    {
+        "name": "cost_task",
+        "description": ("任务结束时写一条成本快照（schema：trace_id/task_id/"
+                        "model_calls/input_tokens/output_tokens/tool_calls/retries/"
+                        "sandbox_seconds/cost_estimate，另可带归因 role/template/"
+                        "tier 与 outcome）。调用方握有全部数字时用这个；"
+                        "只想从已记事件聚合请用 cost_finalize。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "任务 id"},
+                "trace_id": {"type": "string", "description": "轨迹 id"},
+                "role": {"type": "string", "description": "AI 角色（payload.skill）"},
+                "template": {"type": "string", "description": "任务模板名"},
+                "tier": {"type": "string", "description": "成本路由档位 simple/medium/complex"},
+                "model_calls": {"type": "integer", "description": "模型调用次数"},
+                "input_tokens": {"type": "integer", "description": "输入 Token 合计"},
+                "output_tokens": {"type": "integer", "description": "输出 Token 合计"},
+                "tool_calls": {"type": "integer", "description": "工具调用次数"},
+                "retries": {"type": "integer", "description": "重试/打回次数"},
+                "sandbox_seconds": {"type": "number", "description": "沙箱秒数"},
+                "cost_estimate": {"type": "number", "description": "成本估算（USD）"},
+                "outcome": {"type": "string", "description": "completed/failed"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "cost_finalize",
+        "description": ("从已记成本事件聚合出任务快照并落库（幂等：重复调用"
+                        "结果一致，不会把一次完成记成两倍）。任务完成时由 "
+                        "DagScheduler 自动调用；也可手动补记归因。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "任务 id"},
+                "trace_id": {"type": "string", "description": "轨迹 id"},
+                "role": {"type": "string", "description": "AI 角色"},
+                "template": {"type": "string", "description": "任务模板名"},
+                "tier": {"type": "string", "description": "成本路由档位"},
+                "outcome": {"type": "string", "description": "completed/failed"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "cost_show",
+        "description": "看一个任务的成本：快照 + 细粒度事件（复盘/归因用）。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "任务 id"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "cost_dashboard",
+        "description": ("成本看板：按天 / 按任务模板 / 按 AI 角色聚合，"
+                        "外加异常榜——哪些任务吞金、哪些反复打回、"
+                        "哪些工具调用次数异常。cost_estimate 是公开挂牌价"
+                        "静态快照的量级估算，非账单。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer", "description": "统计最近几天，缺省 30"},
+            },
+        },
+    },
 ]
 
 
@@ -819,6 +915,22 @@ _TOOL_ANNOTATIONS: "dict[str, dict]" = {
     "trace_list":           {"readOnlyHint": True, "destructiveHint": False,
                              "idempotentHint": True, "openWorldHint": False,
                              "title": "列最近轨迹（只读）"},
+    # ---- 观测层 成本（四层打点 + 看板；见 cost.py）----
+    "cost_record":          {"readOnlyHint": False, "destructiveHint": False,
+                             "idempotentHint": False, "openWorldHint": False,
+                             "title": "记一条成本事件（model/tool/retry/infra）"},
+    "cost_task":            {"readOnlyHint": False, "destructiveHint": False,
+                             "idempotentHint": True, "openWorldHint": False,
+                             "title": "写任务成本快照（upsert，幂等）"},
+    "cost_finalize":        {"readOnlyHint": False, "destructiveHint": False,
+                             "idempotentHint": True, "openWorldHint": False,
+                             "title": "从事件聚合任务成本（幂等）"},
+    "cost_show":            {"readOnlyHint": True, "destructiveHint": False,
+                             "idempotentHint": True, "openWorldHint": False,
+                             "title": "查看任务成本（只读）"},
+    "cost_dashboard":       {"readOnlyHint": True, "destructiveHint": False,
+                             "idempotentHint": True, "openWorldHint": False,
+                             "title": "成本聚合看板（只读）"},
 }
 
 
@@ -878,6 +990,12 @@ def _trace_db_path() -> str:
     """轨迹库独立成文件：事件流是审计材料，与任务表分开留存。"""
     return os.getenv("TRACE_DB_PATH") or os.path.join(
         os.path.dirname(DEFAULT_DB_PATH) or "data", "trace.db")
+
+
+def _cost_db_path() -> str:
+    """成本库独立成文件：账本与任务表分开留存（可按需归档/清零）。"""
+    return os.getenv("COST_DB_PATH") or os.path.join(
+        os.path.dirname(DEFAULT_DB_PATH) or "data", "cost.db")
 
 
 def _build_queue():
@@ -1377,6 +1495,88 @@ def _dispatch(name: str, args: dict) -> str:
             # trace_list
             return json.dumps(store.list(limit=args.get("limit") or 50,
                                          status=args.get("status")),
+                              ensure_ascii=False, indent=2, default=str)
+        finally:
+            store.close()
+
+    if name in ("cost_record", "cost_task", "cost_finalize", "cost_show",
+                "cost_dashboard"):
+        store = CostStore(db_path=_cost_db_path())
+        try:
+            if name == "cost_record":
+                layer = args.get("layer", "")
+                try:
+                    if layer == "model":
+                        eid = store.record_model_call(
+                            task_id=args.get("task_id"),
+                            trace_id=args.get("trace_id"),
+                            model=args.get("model", ""),
+                            input_tokens=args.get("input_tokens") or 0,
+                            output_tokens=args.get("output_tokens") or 0,
+                            rounds=args.get("rounds") or 0,
+                            actor=args.get("actor", ""))
+                    elif layer == "tool":
+                        eid = store.record_tool_call(
+                            task_id=args.get("task_id"),
+                            trace_id=args.get("trace_id"),
+                            tool=args.get("tool", ""),
+                            actor=args.get("actor", ""))
+                    elif layer == "retry":
+                        eid = store.record_retry(
+                            task_id=args.get("task_id"),
+                            trace_id=args.get("trace_id"),
+                            reason=args.get("reason", ""),
+                            actor=args.get("actor", ""))
+                    elif layer == "infra":
+                        eid = store.record_infra(
+                            task_id=args.get("task_id"),
+                            trace_id=args.get("trace_id"),
+                            kind=args.get("kind", "sandbox"),
+                            seconds=args.get("seconds") or 0.0,
+                            actor=args.get("actor", ""))
+                    else:
+                        return json.dumps({"error": "cost_rejected",
+                                           "reason": f"未知成本层: {layer}"
+                                           "（model/tool/retry/infra）"},
+                                          ensure_ascii=False)
+                except CostError as e:
+                    return json.dumps({"error": "cost_rejected", "reason": str(e)},
+                                      ensure_ascii=False)
+                return json.dumps({"event_id": eid, "layer": layer},
+                                  ensure_ascii=False)
+
+            if name == "cost_task":
+                try:
+                    tid = store.record_task(args)
+                except CostError as e:
+                    return json.dumps({"error": "cost_rejected", "reason": str(e)},
+                                      ensure_ascii=False)
+                return json.dumps({"task_id": tid, "written": True},
+                                  ensure_ascii=False)
+
+            if name == "cost_finalize":
+                try:
+                    snap = store.finalize_task(
+                        args["task_id"], trace_id=args.get("trace_id"),
+                        role=args.get("role", ""),
+                        template=args.get("template", ""),
+                        tier=args.get("tier", ""),
+                        outcome=args.get("outcome", ""))
+                except CostError as e:
+                    return json.dumps({"error": "cost_rejected", "reason": str(e)},
+                                      ensure_ascii=False)
+                return json.dumps(snap, ensure_ascii=False, indent=2)
+
+            if name == "cost_show":
+                rec = store.task_cost(args.get("task_id", ""))
+                if rec is None:
+                    return json.dumps({"error": "cost_rejected",
+                                       "reason": "该任务无成本记录"},
+                                      ensure_ascii=False)
+                return json.dumps(rec, ensure_ascii=False, indent=2, default=str)
+
+            # cost_dashboard
+            return json.dumps(store.dashboard(days=args.get("days") or 30),
                               ensure_ascii=False, indent=2, default=str)
         finally:
             store.close()

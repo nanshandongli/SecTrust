@@ -372,7 +372,7 @@ class BrowserSkill:
     def __init__(self, edge_path: str = None, timeout: float = 15.0,
                  headless: bool = True, launcher=None, ws_factory=None,
                  http_get=None, tracer=None, task_id: str = None,
-                 trace_id: str = None):
+                 trace_id: str = None, cost=None):
         self.edge_path = edge_path or find_edge()
         self.timeout = timeout
         self.headless = headless
@@ -392,6 +392,9 @@ class BrowserSkill:
         self._tracer = tracer
         self._task_id = task_id
         self._trace_id = trace_id
+        # 成本旁路：cost 是鸭子类型（有 .record_tool_call(...) 即可）。
+        # 未注入或记账失败都绝不影响浏览器动作本身。
+        self._cost = cost
 
     # ---- 启动 ----
     def start(self) -> str:
@@ -521,9 +524,27 @@ class BrowserSkill:
             d["error"] = str(e)
             self._trace_event("tool_call", summary + "（失败）", detail=d,
                               duration=time.time() - t0)
+            self._cost_tool_call(summary + "（失败）", d, time.time() - t0)
             raise
         self._trace_event("tool_call", summary, detail=detail, content=content,
                           duration=time.time() - t0)
+        self._cost_tool_call(summary, detail, time.time() - t0)
+
+    def _cost_tool_call(self, summary: str, detail: dict = None,
+                        duration: float = None):
+        """浏览器动作 = 一次工具成本（旁路：记账失败不影响动作本身）。"""
+        if self._cost is None:
+            return
+        try:
+            d = dict(detail) if detail else {}
+            if duration is not None:
+                d["duration_s"] = round(duration, 3)
+            self._cost.record_tool_call(
+                task_id=self._task_id, trace_id=self._trace_id,
+                tool=summary.split(" ", 1)[0] or "browser",
+                actor="browser", detail=d)
+        except Exception:  # noqa: BLE001 —— 记账失败不影响浏览器动作
+            pass
 
     def goto(self, url: str):
         self._last_url = url
