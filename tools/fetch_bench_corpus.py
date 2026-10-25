@@ -38,9 +38,9 @@ RAW = "https://raw.githubusercontent.com/gitleaks/gitleaks/master"
 # 即官方预期"这里有发现"。README 类文件官方用于无发现场景。
 VECTORS = [
     ("testdata/repos/nogit/api.go", "detect",
-     "gitleaks 官方测试向量：第 20 行 awsToken := \"AKIALALEMEL33243OLIA\"（其 .gitleaksignore 明确指向 aws-access-key:20）"),
+     "gitleaks 官方测试向量：第 20 行 awsToken := \"AKIALALEMEL33243OLIA\"（其 .gitleaksignore 明确指向 aws-access-key:20）"),  # scanner:allow
     ("testdata/repos/nogit/.env.prod", "detect",
-     "gitleaks 官方测试向量：DB_PASSWORD=8ae31cacf141669ddfb5da（高熵口令，gitleaks 在该目录预期有发现）"),
+     "gitleaks 官方测试向量：DB_PASSWORD=8ae31cacf141669ddfb5da（高熵口令，gitleaks 在该目录预期有发现）"),  # scanner:allow
     ("testdata/repos/small/README.md", "clean",
      "gitleaks 官方测试向量：纯说明文档，无凭证"),
 ]

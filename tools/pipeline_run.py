@@ -35,6 +35,9 @@ from orchestration import DagScheduler                  # noqa: E402
 from task_registry import TaskRegistry                  # noqa: E402
 from execution.daemon import ExecutionDaemon            # noqa: E402
 from summarizer import ResultSummarizer                 # noqa: E402
+from trace import TraceStore, new_trace_id              # noqa: E402
+from cost import CostStore                              # noqa: E402
+from approval import ApprovalCenter                      # noqa: E402
 
 
 def build_dag(sched: DagScheduler, with_shell: bool = False) -> None:
@@ -81,10 +84,55 @@ def build_dag(sched: DagScheduler, with_shell: bool = False) -> None:
                    depends_on=["analyze", "lint"])
 
 
+def _emit_closure(reg: TaskRegistry, db_path: str, out_dir: str = "data",
+                  title: str = "任务结案报告") -> tuple:
+    """在真实跑完的 DAG 之上，记录 Trace/Cost/Approval 三路数据并落盘统一结案报告。
+
+    用同一 trace_id 把整条流水线串起来：每个完成任务记 plan_built + task_completed；
+    publish 步（高危动作）走一次审批链（request→approve）；成本记一次模型调用
+    （mock 显式 $0，诚实）。最终 ResultSummarizer.write_closure 把三路并成一份
+    JSON + 标准化 Markdown。返回 (md_path, json_path)。
+    """
+    trace = TraceStore(db_path)
+    cost = CostStore(os.path.join(os.path.dirname(os.path.abspath(db_path)),
+                                 "cost_closure.db"))
+    appr = ApprovalCenter(db_path, tracer=trace)   # 复用同一 trace 实例
+    tid = new_trace_id()
+    trace.start_trace(title="pipeline_closure", kind="pipeline", trace_id=tid)
+
+    for r in reg.list_tasks(limit=100000):
+        pid = r["payload"] if isinstance(r["payload"], dict) else {}
+        name = pid.get("name") or r["task_id"]
+        if r["status"] == "completed":
+            trace.record(tid, "plan_built", task_id=r["task_id"], summary="拆解: " + name)
+            trace.record(tid, "task_completed", task_id=r["task_id"], summary="完成: " + name)
+            # 成本：演示一次模型调用（mock 显式 $0——真免费，不是"不知道"）
+            cost.record_model_call(task_id=r["task_id"], trace_id=tid,
+                                   model="mock", input_tokens=120, output_tokens=60)
+            cost.finalize_task(r["task_id"], trace_id=tid, outcome="ok")
+        # publish 是高危动作：走一次审批链（request→approve）
+        if r["task_id"] == "publish" and r["status"] == "completed":
+            aid = appr.request("publish", "发布交付物", task_id="publish", trace_id=tid)
+            appr.decide(aid, "approve", by="human")
+
+    trace.finish(tid, status="completed")
+    rs = ResultSummarizer()
+    mp, jp = rs.write_closure(reg, out_dir=out_dir, trace=trace, cost=cost,
+                              approval=appr, trace_id=tid, title=title)
+    trace.close()
+    cost.close()
+    appr.close()
+    return mp, jp
+
+
 def run_pipeline(db_path: str, title: str = "流水线交付物",
                  with_shell: bool = False, timeout: float = 60.0,
-                 poll: float = 0.05) -> tuple:
-    """建图 → 真实执行 → 汇总。返回 (markdown, data)。"""
+                 poll: float = 0.05, closure: bool = False,
+                 closure_out_dir: str = "data") -> tuple:
+    """建图 → 真实执行 → 汇总。
+
+    返回 (markdown, data)；当 closure=True 时额外返回第三元素 (md_path, json_path)。
+    """
     sched = DagScheduler(db_path)
     build_dag(sched, with_shell=with_shell)
 
@@ -105,8 +153,14 @@ def run_pipeline(db_path: str, title: str = "流水线交付物",
     reg = TaskRegistry(db_path=db_path)
     try:
         md, data = ResultSummarizer().summarize(reg, title=title)
+        closure_paths = None
+        if closure:
+            closure_paths = _emit_closure(reg, db_path, out_dir=closure_out_dir,
+                                         title=title)
     finally:
         reg.close()
+    if closure:
+        return md, data, closure_paths
     return md, data
 
 
@@ -117,6 +171,9 @@ def main():
     ap.add_argument("--title", default="流水线交付物", help="交付物标题")
     ap.add_argument("--with-shell", action="store_true", help="含真实 shell 产物任务")
     ap.add_argument("--timeout", type=float, default=60.0)
+    ap.add_argument("--closure", action="store_true",
+                    help="额外落盘「任务结案报告」：Trace 回放+成本看板+审批链统一产物")
+    ap.add_argument("--out-dir", default="data", help="结案报告落盘目录（--closure）")
     args = ap.parse_args()
 
     tmpdb = None
@@ -126,8 +183,10 @@ def main():
         tmpdb = tempfile.mkdtemp(prefix="pipeline_db_")
         db_path = os.path.join(tmpdb, "pipeline.db")
 
-    md, data = run_pipeline(db_path, title=args.title,
-                            with_shell=args.with_shell, timeout=args.timeout)
+    result = run_pipeline(db_path, title=args.title, with_shell=args.with_shell,
+                          timeout=args.timeout, closure=args.closure,
+                          closure_out_dir=args.out_dir)
+    md, data = result[0], result[1]
     out = args.out or os.path.join(
         "data", "pipeline_run_%s.md" % time.strftime("%Y%m%d_%H%M%S"))
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
@@ -138,6 +197,11 @@ def main():
     print("\n交付物已落盘：%s" % out)
     print("完成度：%s（%d/%d）" % ("✓" if data["complete"] else "⚠ 未完成",
                                   data["by_status"].get("completed", 0), data["total"]))
+    if args.closure and len(result) == 3 and result[2]:
+        mp, jp = result[2]
+        print("\n任务结案报告（统一结构化产物）已落盘：")
+        print("  markdown: %s" % mp)
+        print("  json    : %s" % jp)
     return 0
 
 

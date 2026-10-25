@@ -588,8 +588,8 @@ DETECTORS: Tuple[Detector, ...] = (
     ),
     Detector(
         id="basic-auth-in-url", name="Credentials in URL",
-        description="URL 内嵌用户名密码（scheme://user:pass@host）",
-        regex=r"\b([a-zA-Z][a-zA-Z0-9+.\-]{2,10}://[^\s:/@]{1,64}:[^\s:/@]{1,64}@[^\s/]{3,})",
+        description="URL 内嵌用户名密码（scheme://user:pass@host）",  # scanner:allow
+        regex=r"\b([a-zA-Z][a-zA-Z0-9+.\-]{2,10}://[^\s:/@]{1,64}:[^\s:/@]{1,64}@[^\s/]{3,})",  # scanner:allow
         keywords=("://",), severity="high", tags=("auth", "url"), provider="generic",
     ),
     Detector(
@@ -716,7 +716,7 @@ def _suppress_hit(secret: str, line: str) -> Optional[str]:
     """判定是否应被抑制词拦下。比"整行扫抑制词"精确得多——
 
     教训：早期实现是 `hit_stopword(secret) or hit_stopword("", line)`（整行找抑制词），
-    结果 `postgres://admin:xxx@db.internal.example:5432` 因**域名**含 example 被判为
+    结果 `postgres://admin:xxx@db.internal.example:5432` 因**域名**含 example 被判为  # scanner:allow
     示例值而漏报（真实凭证被抑制 = 假阴性，比误报危险得多）。因此：
       · URL / 连接串形态（含 ://）——形态本身足够独特，不做抑制词判定；
       · 其余——只看 secret 值本身；
@@ -789,10 +789,10 @@ if __name__ == "__main__":
     import json
     print(json.dumps(detector_stats(), ensure_ascii=False, indent=2))
     sample = '\n'.join([
-        'AWS_KEY = "AKIAIOSFODNN7REALKEY"',
-        'aws_secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYzEXAMPLEKEY"',
-        'github_token = "ghp_012345678901234567890123456789abcdef"',
-        'password = "hunter2hunter2"',
+        'AWS_KEY = "AKIAIOSFODNN7REALKEY"',  # scanner:allow
+        'aws_secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYzEXAMPLEKEY"',  # scanner:allow
+        'github_token = "ghp_012345678901234567890123456789abcdef"',  # scanner:allow
+        'password = "hunter2hunter2"',  # scanner:allow
     ])
     for f in find_in_text(sample):
         print(f["line_no"], f["rule_id"], f["severity"], f["secret"][:12] + "...",

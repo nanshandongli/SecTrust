@@ -330,6 +330,27 @@ class ApprovalCenter:
         ]
 
     # ---- 审计链：审批行 + 轨迹证据 ----
+    def approvals_for_task(self, task_id: str, limit: int = 100) -> list:
+        """按任务反查审批列表（倒序）。结案报告按任务聚合审批链用。"""
+        if not task_id:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT approval_id, task_id, channel, user_id, action, detail, status, "
+                "created_at, decided_at, decided_by, trace_id FROM approvals "
+                "WHERE task_id=? ORDER BY created_at DESC LIMIT ?",
+                (task_id, int(limit)),
+            ).fetchall()
+        return [
+            {
+                "approval_id": r[0], "task_id": r[1], "channel": r[2], "user_id": r[3],
+                "action": r[4], "detail": r[5], "status": r[6],
+                "created_at": r[7], "decided_at": r[8], "decided_by": r[9],
+                "trace_id": r[10],
+            }
+            for r in rows
+        ]
+
     def _row(self, approval_id: str):
         """取单条审批行（dict；不存在返回 None）。"""
         with self._connect() as conn:

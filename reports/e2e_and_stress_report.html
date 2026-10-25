@@ -30,6 +30,13 @@
  <div class="kpi"><div class="v">~1665</div><div class="l">跨机锁吞吐 ops/s（P99&lt;0.16ms）</div></div>
 </div>
 
+<div class="boundary" style="border-left-color:#22c55e">
+<b>信任锚点（请先读这条）：</b>本页所有数字均来自<b>本地真实跑出来的数据</b>，可复跑、可审计；
+但我们<b>如实声明</b>——本次为单宿主 + 同机多进程（进程模拟机器、本机 TCP 回环模拟网络），
+协调后端是项目自带的协议兼容 FakeRedisServer，<b>非官方 Redis</b>。吞吐/延迟数字<b>不往外推</b>到分散物理机
+（详见下方「诚实边界」）。我们宁可把天花板写清楚，也不把玩具数字包装成生产基准——这正是专业版付费点的起点。
+</div>
+
 <h2>一、端到端流水线（DAG 实跑截图）</h2>
 <div class="card">
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 470" font-family="sans-serif">
@@ -173,13 +180,55 @@ op=shell 的两步真实写入系统临时目录（<code>sectrust_raw.json</code
 （锁互斥、任务不重复执行、死信可恢复），但吞吐/延迟数字不应直接外推到分散物理机。
 </div>
 
-<h2>三、结论</h2>
+<h2>三、任务结案报告样例（Trace 回放 + 成本 + 审批链 统一落盘）</h2>
+
+<div class="card">
+<p class="sub">「任务结案报告」= 把 <b>Trace 回放</b>、<b>成本看板</b>、<b>审批链</b> 三路审计数据
+统一落盘成一份结构化产物（JSON + Markdown 双格式）。一次流水线跑完，自动产出可审计交付物——
+无需人工拼装证据。下文为本次实跑样例（任务「发布交付物」）。</p>
+
+<h3 style="color:#cbd5e1;font-size:14px">概览</h3>
+<table class="tbl"><thead><tr><th>状态</th><th>数量</th></tr></thead><tbody><tr><td>completed</td><td>5</td></tr></tbody></table>
+
+<h3 style="color:#cbd5e1;font-size:14px">逐任务明细 · 样板任务（三路证据一次对齐）</h3>
+<p><b>Trace 回放</b>（trace_id=tr_7bf31ff14679，本任务 4 事件）：</p>
+<table class="tbl"><thead><tr><th>#</th><th>类型</th><th>角色</th><th>摘要</th></tr></thead><tbody><tr><td>1</td><td>plan_built</td><td>—</td><td>拆解: 发布交付物</td></tr><tr><td>2</td><td>task_completed</td><td>—</td><td>完成: 发布交付物</td></tr><tr><td>3</td><td>approval_requested</td><td>—</td><td>请求审批 publish</td></tr><tr><td>4</td><td>approval_decided</td><td>human</td><td>approval_decided publish（approved）</td></tr></tbody></table>
+<p><b>成本</b>：模型调用 1 · 令牌 120/60 · 工具调用 0 · 重试 0 · 估算 $0.0</p>
+<p><b>审批链</b>：</p><div>· <code>ap-81daed41f2</code> action=publish status=<b>approved</b> by=human <span class="warn">⚠ risk=high</span></div>
+
+<h3 style="color:#cbd5e1;font-size:14px">全局轨迹回放（整条流水线一次）</h3>
+<div class="sub">轨迹 tr_7bf31ff14679 · 状态 completed · 事件 12 条</div>
+
+<h3 style="color:#cbd5e1;font-size:14px">成本看板（近 30 天）</h3>
+<div class="sub">任务数 5 · 模型调用 5 · 令牌 900
+· 工具调用 0 · 重试 0 · 估算 $0.0
+（0 次未计价）</div>
+
+<h3 style="color:#cbd5e1;font-size:14px">审批链审计汇总</h3>
+<div class="sub">涉及审批的任务数 1 · 高危动作（risk=high）审计事件 2 条</div>
+
+<div class="sub" style="margin-top:12px">完整产物（逐任务全量 + Markdown 版）由
+<code>python tools/pipeline_run.py --with-shell --closure</code> 生成，落盘
+<code>data/closure_report_*.json/.md</code>。</div>
+</div>
+
+
+<h2>四、结论与专业版前瞻</h2>
 <div class="card">
 产品已从「功能清单」升级为<b>有数据支撑的本地可审计协作台</b>：
 <ul>
 <li>端到端：建 DAG → 真实 daemon 执行 → 通用汇总落盘，链路闭环（5/5 完成）。</li>
 <li>跨机：锁互斥 0 违规、任务跨机 0 重复执行、死信阈值正确可恢复。</li>
 <li>质量：全量回归 781 项 0 失败（skip 2）。</li>
+<li>审计：本页「任务结案报告」即开箱能力——Trace/成本/审批链三路自动并成一份可交付产物。</li>
 </ul>
+<p style="margin-top:12px"><b>专业版差异点（把"本地审计能力"变成"企业可交付物"）：</b></p>
+<ul>
+<li><b>真机多机房压测报告</b>：补上本页诚实边界里的空白——在真实分散物理机/多可用区跑同套不变量，给出可外推的吞吐/延迟基准。</li>
+<li><b>跨地域延迟看板</b>：把单宿主下的锁/任务延迟，升级为跨地域分位看板与异常告警。</li>
+<li><b>审批链审计导出</b>：把结案报告里的审批链一键导出为合规留存格式（PDF/SARIF/审计流），满足企业审计与留痕要求。</li>
+</ul>
+<div class="sub" style="margin-top:8px">免费/社区版已具备"审计数据生成能力"；专业版做的是"把这些数据变成合规交付物"。详见
+<code>PRODUCT_ANALYSIS.md</code> 第八节。</div>
 </div>
 </body></html>

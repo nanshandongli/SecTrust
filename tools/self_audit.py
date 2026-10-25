@@ -34,8 +34,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # 全世界公开已知的"测试向量"密钥（gitleaks 官方测试语料）。
 # 它们不是真实凭证——本仓库为对齐公开基准而引用，自扫时应豁免而非报泄露。
 KNOWN_PUBLIC_TEST_VECTORS = {
-    "AKIALALEMEL33243OLIA",            # gitleaks api.go 第 20 行
-    "8ae31cacf141669ddfb5da",          # gitleaks .env.prod 的 DB_PASSWORD
+    "AKIALALEMEL33243OLIA",            # gitleaks api.go 第 20 行  # scanner:allow
+    "8ae31cacf141669ddfb5da",          # gitleaks .env.prod 的 DB_PASSWORD  # scanner:allow
 }
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)

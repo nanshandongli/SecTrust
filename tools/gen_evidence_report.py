@@ -49,6 +49,103 @@ E2E = {
 REGRESSION = {"total": 781, "skipped": 2, "failed": 0}
 
 
+# ---- 任务结案报告样例（来自 data/closure_report_*.json）-------------------
+def load_latest_closure():
+    """读取最新的「任务结案报告」JSON（若存在）。缺失则 demo 页优雅提示。"""
+    import glob
+    fs = sorted(glob.glob(os.path.join(DATA, "closure_report_*.json")))
+    if not fs:
+        return None
+    try:
+        with open(fs[-1], "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:  # noqa: BLE001 —— 旁路：证据缺失不阻断证据页生成
+        return None
+
+
+def render_closure_html(d):
+    """把一份「任务结案报告」渲染为 HTML 样例（Trace + 成本 + 审批链 三路并列）。"""
+    if not d:
+        return ('<div class="card"><div class="sub">未生成任务结案报告。运行 '
+                '<code>python tools/pipeline_run.py --with-shell --closure</code> 生成 '
+                '后再跑本脚本即可嵌入。</div></div>')
+    s = d.get("summary", {})
+    by = s.get("by_status", {})
+    overview = "".join(
+        "<tr><td>%s</td><td>%s</td></tr>" % (esc(k), esc(v))
+        for k, v in sorted(by.items()))
+    # 选一个带审批链的任务做样板（优先高风险 publish），否则取首个
+    show = next((t for t in d.get("tasks", []) if t.get("approval", {}).get("available")),
+                (d.get("tasks") or [None])[0])
+    tr = (show or {}).get("trace", {})
+    tev = "".join(
+        "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
+            esc(e.get("seq")), esc(e.get("kind")), esc(e.get("actor") or "—"),
+            esc(e.get("summary") or ""))
+        for e in tr.get("events", []))
+    rec = (show or {}).get("cost", {}).get("record", {}) or {}
+    cost_line = ("模型调用 %s · 令牌 %s/%s · 工具调用 %s · 重试 %s · 估算 $%s"
+                 % (rec.get("model_calls"), rec.get("input_tokens"),
+                    rec.get("output_tokens"), rec.get("tool_calls"),
+                    rec.get("retries"), rec.get("cost_estimate")))
+    appr_html = ""
+    for ch in (show or {}).get("approval", {}).get("approvals", []):
+        ap = ch.get("approval", {})
+        risk = ""
+        for ev in ch.get("events", []):
+            if isinstance(ev.get("detail"), dict) and ev["detail"].get("risk"):
+                risk = ev["detail"]["risk"]
+        badge = (' <span class="warn">⚠ risk=%s</span>' % esc(risk)) if risk == "high" else ""
+        appr_html += ("<div>· <code>%s</code> action=%s status=<b>%s</b> by=%s%s</div>"
+                      % (esc(ap.get("approval_id")), esc(ap.get("action")),
+                         esc(ap.get("status")), esc(ap.get("decided_by") or "—"), badge))
+    if not appr_html:
+        appr_html = '<div class="sub">（该任务无审批）</div>'
+    trr = d.get("trace_replay") or {}
+    gmeta = trr.get("meta") or {}
+    gcount = len(trr.get("events", []))
+    dash = d.get("cost_dashboard") or {}
+    tot = dash.get("totals", {})
+    n_appr_tasks = sum(1 for t in d.get("tasks", []) if t.get("approval", {}).get("available"))
+    n_high = 0
+    for t in d.get("tasks", []):
+        for ch in t.get("approval", {}).get("approvals", []):
+            for ev in ch.get("events", []):
+                if isinstance(ev.get("detail"), dict) and ev["detail"].get("risk") == "high":
+                    n_high += 1
+    return f"""
+<div class="card">
+<p class="sub">「任务结案报告」= 把 <b>Trace 回放</b>、<b>成本看板</b>、<b>审批链</b> 三路审计数据
+统一落盘成一份结构化产物（JSON + Markdown 双格式）。一次流水线跑完，自动产出可审计交付物——
+无需人工拼装证据。下文为本次实跑样例（任务「{esc((show or {}).get('name', ''))}」）。</p>
+
+<h3 style="color:#cbd5e1;font-size:14px">概览</h3>
+<table class="tbl"><thead><tr><th>状态</th><th>数量</th></tr></thead><tbody>{overview}</tbody></table>
+
+<h3 style="color:#cbd5e1;font-size:14px">逐任务明细 · 样板任务（三路证据一次对齐）</h3>
+<p><b>Trace 回放</b>（trace_id={esc(tr.get('trace_id'))}，本任务 {len(tr.get('events', []))} 事件）：</p>
+<table class="tbl"><thead><tr><th>#</th><th>类型</th><th>角色</th><th>摘要</th></tr></thead><tbody>{tev}</tbody></table>
+<p><b>成本</b>：{esc(cost_line)}</p>
+<p><b>审批链</b>：</p>{appr_html}
+
+<h3 style="color:#cbd5e1;font-size:14px">全局轨迹回放（整条流水线一次）</h3>
+<div class="sub">轨迹 {esc(d.get('trace_id'))} · 状态 {esc(gmeta.get('status'))} · 事件 {gcount} 条</div>
+
+<h3 style="color:#cbd5e1;font-size:14px">成本看板（近 {esc(dash.get('days', 30))} 天）</h3>
+<div class="sub">任务数 {esc(tot.get('tasks'))} · 模型调用 {esc(tot.get('model_calls'))} · 令牌 {esc(tot.get('tokens'))}
+· 工具调用 {esc(tot.get('tool_calls'))} · 重试 {esc(tot.get('retries'))} · 估算 ${esc(tot.get('cost_estimate'))}
+（{esc(tot.get('unpriced_calls'))} 次未计价）</div>
+
+<h3 style="color:#cbd5e1;font-size:14px">审批链审计汇总</h3>
+<div class="sub">涉及审批的任务数 {n_appr_tasks} · 高危动作（risk=high）审计事件 {n_high} 条</div>
+
+<div class="sub" style="margin-top:12px">完整产物（逐任务全量 + Markdown 版）由
+<code>python tools/pipeline_run.py --with-shell --closure</code> 生成，落盘
+<code>data/closure_report_*.json/.md</code>。</div>
+</div>
+"""
+
+
 # ---- SVG 辅助 -------------------------------------------------------------
 def esc(s):
     return html.escape(str(s))
@@ -195,6 +292,7 @@ def table(headers, rows, cls="tbl"):
 def build_html():
     dag = build_dag_svg()
     lat = build_latency_svg()
+    closure = load_latest_closure()
     a200 = STRESS_200["bench_a_coordination"]
     b200 = STRESS_200["bench_b_pipeline"]
     a120 = STRESS_120["bench_a_coordination"]
@@ -275,6 +373,13 @@ def build_html():
  <div class="kpi"><div class="v">~1665</div><div class="l">跨机锁吞吐 ops/s（P99&lt;0.16ms）</div></div>
 </div>
 
+<div class="boundary" style="border-left-color:#22c55e">
+<b>信任锚点（请先读这条）：</b>本页所有数字均来自<b>本地真实跑出来的数据</b>，可复跑、可审计；
+但我们<b>如实声明</b>——本次为单宿主 + 同机多进程（进程模拟机器、本机 TCP 回环模拟网络），
+协调后端是项目自带的协议兼容 FakeRedisServer，<b>非官方 Redis</b>。吞吐/延迟数字<b>不往外推</b>到分散物理机
+（详见下方「诚实边界」）。我们宁可把天花板写清楚，也不把玩具数字包装成生产基准——这正是专业版付费点的起点。
+</div>
+
 <h2>一、端到端流水线（DAG 实跑截图）</h2>
 <div class="card">
 {dag}
@@ -302,14 +407,26 @@ op=shell 的两步真实写入系统临时目录（<code>sectrust_raw.json</code
 （锁互斥、任务不重复执行、死信可恢复），但吞吐/延迟数字不应直接外推到分散物理机。
 </div>
 
-<h2>三、结论</h2>
+<h2>三、任务结案报告样例（Trace 回放 + 成本 + 审批链 统一落盘）</h2>
+{render_closure_html(closure)}
+
+<h2>四、结论与专业版前瞻</h2>
 <div class="card">
 产品已从「功能清单」升级为<b>有数据支撑的本地可审计协作台</b>：
 <ul>
 <li>端到端：建 DAG → 真实 daemon 执行 → 通用汇总落盘，链路闭环（5/5 完成）。</li>
 <li>跨机：锁互斥 0 违规、任务跨机 0 重复执行、死信阈值正确可恢复。</li>
 <li>质量：全量回归 {REGRESSION['total']} 项 0 失败（skip {REGRESSION['skipped']}）。</li>
+<li>审计：本页「任务结案报告」即开箱能力——Trace/成本/审批链三路自动并成一份可交付产物。</li>
 </ul>
+<p style="margin-top:12px"><b>专业版差异点（把"本地审计能力"变成"企业可交付物"）：</b></p>
+<ul>
+<li><b>真机多机房压测报告</b>：补上本页诚实边界里的空白——在真实分散物理机/多可用区跑同套不变量，给出可外推的吞吐/延迟基准。</li>
+<li><b>跨地域延迟看板</b>：把单宿主下的锁/任务延迟，升级为跨地域分位看板与异常告警。</li>
+<li><b>审批链审计导出</b>：把结案报告里的审批链一键导出为合规留存格式（PDF/SARIF/审计流），满足企业审计与留痕要求。</li>
+</ul>
+<div class="sub" style="margin-top:8px">免费/社区版已具备"审计数据生成能力"；专业版做的是"把这些数据变成合规交付物"。详见
+<code>PRODUCT_ANALYSIS.md</code> 第八节。</div>
 </div>
 </body></html>"""
     return html_doc
