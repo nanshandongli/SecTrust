@@ -24,6 +24,8 @@ import os
 import sqlite3
 import tempfile
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -260,6 +262,51 @@ APP_HTML = """<!doctype html>
   .warnbar{background:#fff4e5;color:#b26a00;border:1px solid #ffe0b2;border-radius:10px;padding:10px 14px;font-size:13px;margin-bottom:16px}
   a.link{color:var(--accent);text-decoration:none}
   a.link:hover{text-decoration:underline}
+  /* ---- 打磨：交互反馈 ---- */
+  .topbar .search{position:relative}
+  .topbar .search input:focus{outline:none;border-color:var(--accent);
+    box-shadow:0 0 0 3px rgba(59,108,255,.12)}
+  .search-pop{position:absolute;top:40px;left:0;right:0;background:var(--card);
+    border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.14);
+    max-height:60vh;overflow-y:auto;display:none;z-index:20}
+  .search-pop.open{display:block}
+  .search-pop .sgrp{font-size:11px;color:var(--sub);padding:8px 12px 4px;font-weight:600}
+  .search-pop .sitem{padding:8px 12px;cursor:pointer;font-size:13px;display:flex;gap:8px;align-items:center}
+  .search-pop .sitem:hover{background:var(--bg)}
+  .search-pop .sitem .sid{color:var(--sub);font-size:11.5px;font-family:ui-monospace,monospace}
+  .nav a.active{box-shadow:inset 2px 0 0 var(--accent2)}
+  .panel{transition:box-shadow .15s,border-color .15s}
+  .panel:hover{box-shadow:0 3px 14px rgba(0,0,0,.07)}
+  .stat{transition:transform .15s,box-shadow .15s}
+  .stat:hover{transform:translateY(-1px);box-shadow:0 4px 14px rgba(0,0,0,.08)}
+  .btn{transition:opacity .15s,transform .1s}
+  .btn:hover{opacity:.9}
+  .btn:active{transform:translateY(1px)}
+  .tbl tbody tr{transition:background .12s}
+  .iconbtn:hover{border-color:var(--accent);color:var(--accent)}
+  /* ---- 对话：引擎条 / 消息元信息 ---- */
+  .chat-engine{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 0;
+    border-bottom:1px dashed var(--line);font-size:12px}
+  .ctip{color:var(--sub);font-size:11.5px}
+  .msg .mmeta{margin-top:7px;padding-top:6px;border-top:1px solid var(--line);
+    font-size:11.5px;color:var(--sub);line-height:1.5}
+  .msg.user .mmeta{border-top-color:rgba(255,255,255,.25);color:rgba(255,255,255,.85)}
+  .msg .mtext{word-break:break-word}
+  .typing{color:var(--sub);font-style:italic}
+  .chat .in input:focus{outline:none;border-color:var(--accent);
+    box-shadow:0 0 0 3px rgba(59,108,255,.12)}
+  .chat .in button:hover{opacity:.9}
+  /* ---- 特色面板：明细块 ---- */
+  .kv{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px}
+  .kv .item{background:var(--bg);border:1px solid var(--line);border-radius:9px;padding:10px 12px}
+  .kv .item .k{font-size:11.5px;color:var(--sub)}
+  .kv .item .v{font-size:15px;font-weight:600;margin-top:3px;word-break:break-all}
+  .bar{height:6px;background:var(--chip);border-radius:4px;overflow:hidden;margin-top:6px}
+  .bar>i{display:block;height:100%;background:var(--accent)}
+  .tag{display:inline-block;font-size:11px;padding:1px 7px;border-radius:6px;
+    background:var(--chip);color:var(--sub);margin-right:6px}
+  .split{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:980px){.split{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -278,7 +325,7 @@ APP_HTML = """<!doctype html>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
     </button>
     <div class="title" id="viewTitle">概览</div>
-    <div class="search"><input id="globalSearch" placeholder="搜索任务 / 轨迹 / 审批…"></div>
+    <div class="search"><input id="globalSearch" placeholder="搜索任务 / 轨迹 / 审批…"><div class="search-pop" id="searchPop"></div></div>
     <div class="spacer"></div>
     <span class="pill live" id="dbPill">● 实时</span>
     <span class="pill demo" id="demoPill" style="display:none">演示数据</span>
@@ -306,6 +353,50 @@ const ago = t => t ? Math.max(0, Math.round(Date.now()/1000 - t)) + 's 前' : '-
 const esc = s => (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function badge(s){const m={'registered':'b-registered','running':'b-running','done':'b-done','completed':'b-completed','failed':'b-failed','blocked':'b-blocked','needs_human':'b-needs_human','pending':'b-pending','approved':'b-approved','rejected':'b-rejected','expired':'b-expired'};return '<span class="badge '+(m[s]||'')+'">'+esc(s)+'</span>';}
 async function jget(u){const r=await fetch(u);return r.json();}
+
+/* ---------------- 全局搜索（任务 / 轨迹 / 审批 / 技能） ---------------- */
+let searchTimer=null;
+function initSearch(){
+  const inp=$('globalSearch'), pop=$('searchPop');
+  function close(){pop.classList.remove('open');}
+  inp.addEventListener('input',()=>{
+    clearTimeout(searchTimer);
+    searchTimer=setTimeout(()=>doSearch(inp.value.trim()),220);
+  });
+  inp.addEventListener('keydown',e=>{if(e.key==='Escape'){inp.value='';close();}});
+  document.addEventListener('click',e=>{
+    if(!e.target.closest('.topbar .search'))close();
+  });
+}
+async function doSearch(q){
+  const pop=$('searchPop');
+  if(!q){pop.classList.remove('open');return;}
+  try{
+    const [tasks,traces,apprs]=await Promise.all([
+      jget('/api/tasks?limit=300'),jget('/api/traces?limit=200'),jget('/api/approvals?limit=200')]);
+    const ql=q.toLowerCase();
+    const T=(tasks||[]).filter(t=>(t.task_id||'').toLowerCase().includes(ql)||
+      JSON.stringify(t.payload||{}).toLowerCase().includes(ql)).slice(0,8);
+    const R=(traces||[]).filter(t=>(t.trace_id||'').toLowerCase().includes(ql)||
+      (t.title||'').toLowerCase().includes(ql)).slice(0,6);
+    const A=(apprs||[]).filter(a=>(a.approval_id||'').toLowerCase().includes(ql)||
+      (a.action||'').toLowerCase().includes(ql)||
+      (a.detail||'').toLowerCase().includes(ql)).slice(0,6);
+    if(!T.length&&!R.length&&!A.length){
+      pop.innerHTML='<div class="sgrp">无匹配</div><div class="sitem" style="color:var(--sub)">没有匹配 “'+esc(q)+'” 的任务/轨迹/审批</div>';
+      pop.classList.add('open');return;
+    }
+    let h='';
+    if(T.length){h+='<div class="sgrp">任务 ('+T.length+')</div>'+T.map(t=>
+      '<div class="sitem" onclick="go(\'tasks\');closeSearch()">'+badge(t.status)+' <b>'+esc(t.task_id)+'</b><span class="sid">'+esc(JSON.stringify(t.payload||{}).slice(0,60))+'</span></div>').join('');}
+    if(R.length){h+='<div class="sgrp">审计轨迹 ('+R.length+')</div>'+R.map(t=>
+      '<div class="sitem" onclick="go(\'trace\');closeSearch()">'+badge(t.status)+' <b>'+esc(t.trace_id)+'</b><span class="sid">'+esc(t.title||'')+'</span></div>').join('');}
+    if(A.length){h+='<div class="sgrp">审批 ('+A.length+')</div>'+A.map(a=>
+      '<div class="sitem" onclick="go(\'approvals\');closeSearch()">'+badge(a.status)+' <b>'+esc(a.action)+'</b><span class="sid">'+esc(a.approval_id)+'</span></div>').join('');}
+    pop.innerHTML=h;pop.classList.add('open');
+  }catch(e){pop.innerHTML='<div class="sitem" style="color:var(--sub)">搜索失败</div>';pop.classList.add('open');}
+}
+function closeSearch(){const p=$('searchPop');if(p)p.classList.remove('open');}
 
 const ICON={
  home:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l9-8 9 8M5 10v10h14V10"/></svg>',
@@ -352,6 +443,7 @@ function route(){
   (loaders[v]||loadOverview)();
 }
 window.addEventListener('hashchange',route);
+initSearch();
 
 $('collapseBtn').addEventListener('click',()=>$('sidebar').classList.toggle('collapsed'));
 $('themeBtn').addEventListener('click',()=>{
@@ -389,36 +481,76 @@ async function loadOverview(){
 }
 function stat(n,l,cls){return '<div class="stat"><div class="n '+(cls||'')+'">'+esc(n)+'</div><div class="l">'+esc(l)+'</div></div>';}
 
-// ---------------- 对话（WorkBuddy 风格壳） ----------------
-function loadChat(){
+// ---------------- 对话（规则优先 + LLM 兜底 · 真实后端） ----------------
+let chatHistory=[];
+async function loadChat(){
   const el=$('view-chat');
-  if(el.dataset.init) {el.classList.add('active');return;}
+  if(el.dataset.init){el.classList.add('active');refreshChatStatus();return;}
   el.dataset.init='1';
-  el.innerHTML='<h2 class="vh">对话</h2><p class="vdesc">与协作台对话，下达任务或查询审计状态。</p>'+
+  el.innerHTML='<h2 class="vh">对话</h2><p class="vdesc">问审计台：任务在跑什么、审批过没过、成本花了多少、代码有没有泄露。答案会标注引擎来源。</p>'+
    '<div class="chat"><div class="msgs" id="chatMsgs"></div>'+
+   '<div class="chat-engine" id="chatEngine"></div>'+
    '<div class="chips">'+
-     '<button data-q="帮我看下今天有哪些任务在跑">今天哪些任务在跑？</button>'+
+     '<button data-q="今天有哪些任务在跑">今天哪些任务在跑？</button>'+
      '<button data-q="双十一素材发布审批通过了吗">素材发布审批通过了吗？</button>'+
      '<button data-q="这个月成本花了多少">这个月成本多少？</button>'+
      '<button data-q="代码里有没有泄露真实密钥">代码里有没有泄露真实密钥？</button>'+
+     '<button data-q="帮我总结一下当前审计状态">总结当前审计状态</button>'+
    '</div>'+
-   '<div class="in"><input id="chatInput" placeholder="输入消息，回车发送…"><button id="chatSend">发送</button></div></div>';
+   '<div class="in"><input id="chatInput" placeholder="输入消息，回车发送…（Enter 发送 / Shift+Enter 换行）"><button id="chatSend">发送</button></div></div>';
   const msgs=$('chatMsgs');
-  function add(who,text){const d=document.createElement('div');d.className='msg '+(who==='user'?'user':'bot');d.innerHTML=text.replace(/\\n/g,'<br>');msgs.appendChild(d);msgs.scrollTop=msgs.scrollHeight;}
-  add('bot','你好，我是 SecTrust 协作审计台。我可以帮你查询任务、轨迹、成本、审批与安全状态，或下达协作任务。试试下面的快捷问题 👇');
-  function reply(q){
-    add('user',esc(q));
-    let a='已记录你的请求。可到对应面板查看：';
-    if(q.includes('任务')) a='可在「任务中心」查看实时任务、依赖波次与 Runner 存活——当前运行中任务已用橙色徽章标出。';
-    else if(q.includes('审批')) a='「审批中心」里有待办审批与完整证据链，支持一键导出 CSV / SARIF / PDF 供合规存档。';
-    else if(q.includes('成本')) a='「成本看板」给出累计成本、按任务拆解与离群点告警，未知模型一律标“未计价”绝不虚构。';
-    else if(q.includes('密钥')||q.includes('泄露')) a='安全中心显示：源码硬编码密钥自扫 0 真实泄露，22 条命中均为金标准假密钥语料（已豁免）。';
-    else a+='（演示壳：真实 LLM 后端可按需接入本地模型，本界面为 UI 演示。）';
-    setTimeout(()=>add('bot',a),250);
+  function add(who,text,meta){
+    const d=document.createElement('div');d.className='msg '+(who==='user'?'user':'bot');
+    let h='<div class="mtext">'+String(text).replace(/\\n/g,'<br>')+'</div>';
+    if(meta) h+='<div class="mmeta">'+meta+'</div>';
+    d.innerHTML=h;msgs.appendChild(d);msgs.scrollTop=msgs.scrollHeight;return d;
   }
-  el.querySelectorAll('.chips button').forEach(b=>b.addEventListener('click',()=>reply(b.dataset.q)));
-  $('chatSend').addEventListener('click',()=>{const i=$('chatInput');if(i.value.trim()){reply(i.value.trim());i.value='';}});
-  $('chatInput').addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.value.trim()){reply(e.target.value.trim());e.target.value='';}});
+  add('bot','你好，我是 SecTrust 协作审计台。\n'+
+    '· 审计类问题走<b>确定性规则引擎</b>：零幻觉、零外部依赖、直接读当前审计态；\n'+
+    '· 规则没命中时兜底调 <b>LLM</b>（本地 Ollama 优先），并把审计态作为事实喂给它；\n'+
+    '· LLM 不可用时我会直说，绝不伪造模型回答。\n试试下面的快捷问题 👇');
+  async function send(q){
+    if(!q||!q.trim())return;
+    add('user',esc(q.trim()));
+    chatHistory.push({role:'user',content:q.trim()});
+    const holder=add('bot','<span class="typing">思考中…</span>','');
+    try{
+      const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({question:q.trim(),history:chatHistory.slice(-6)})});
+      const d=await r.json();
+      holder.querySelector('.mtext').innerHTML=String(d.answer||d.error||'无响应').replace(/\\n/g,'<br>');
+      const meta=[];
+      if(d.engine==='rule') meta.push('引擎：<b>规则引擎</b>（确定性，零幻觉）');
+      else if(d.engine==='llm') meta.push('引擎：<b>LLM</b> '+(d.model||''));
+      else meta.push('引擎：<b>不可用</b>');
+      if(d.basis&&d.basis.length) meta.push('依据：'+d.basis.join('、'));
+      if(d.next_steps&&d.next_steps.length) meta.push('下一步：'+d.next_steps.join('；'));
+      holder.innerHTML='<div class="mtext">'+holder.querySelector('.mtext').innerHTML+'</div>'+
+        '<div class="mmeta">'+meta.join(' · ')+'</div>';
+      chatHistory.push({role:'assistant',content:String(d.answer||'')});
+    }catch(e){
+      holder.innerHTML='<div class="mtext">请求失败：'+esc(String(e))+'</div>'+
+        '<div class="mmeta">引擎：<b>不可用</b></div>';
+    }
+  }
+  el.querySelectorAll('.chips button').forEach(b=>b.addEventListener('click',()=>send(b.dataset.q)));
+  $('chatSend').addEventListener('click',()=>{const i=$('chatInput');const v=i.value;i.value='';send(v);});
+  $('chatInput').addEventListener('keydown',e=>{
+    if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();const i=e.target;const v=i.value;i.value='';send(v);}
+  });
+  refreshChatStatus();
+}
+async function refreshChatStatus(){
+  const el=$('chatEngine');if(!el)return;
+  try{
+    const s=await jget('/api/chat/status');
+    const parts=[];
+    parts.push('<span class="pill live">规则引擎</span>');
+    if(s.ollama) parts.push('<span class="pill live">Ollama 可用'+(s.ollama_models&&s.ollama_models.length?('（'+s.ollama_models.length+' 模型）'):'')+'</span>');
+    else parts.push('<span class="pill">Ollama 未启动</span>');
+    if(s.openai) parts.push('<span class="pill live">OpenAI 已配置</span>');
+    el.innerHTML=parts.join(' ')+'<span class="ctip">'+esc(s.note||'')+'</span>';
+  }catch(e){el.innerHTML='<span class="ctip">引擎状态未知</span>';}
 }
 
 // ---------------- 任务中心（复用只读 API） ----------------
@@ -454,21 +586,57 @@ async function loadTasks(){
 }
 
 // ---------------- 审计轨迹 ----------------
+let traceFilter='';
 async function loadTraceList(){
   const el=$('view-trace');
   const traces=await jget('/api/traces?limit=50');
+  const tot=(traces||[]).reduce((s,t)=>s+(t.event_count||0),0);
+  const kinds={};
+  (traces||[]).forEach(t=>{kinds[t.kind||'-']=(kinds[t.kind||'-']||0)+1;});
   el.innerHTML='<h2 class="vh">审计轨迹</h2><p class="vdesc">每一次协作都会留下不可篡改的轨迹（blake2b 内容指纹）。点击查看回放。</p>'+
-    '<div class="panel"><table class="tbl"><thead><tr><th>trace_id</th><th>标题</th><th>类型</th><th>状态</th><th>事件数</th><th>开始</th></tr></thead><tbody>'+
+    '<div class="grid stats">'+
+      stat((traces||[]).length,'轨迹总数')+stat(tot,'事件总数','accent')+
+      stat(Object.keys(kinds).length,'事件类型')+
+      stat((traces||[]).filter(t=>t.status==='completed'||t.status==='done').length,'已完成','ok')+
+    '</div>'+
+    '<div class="panel"><h3>轨迹列表 <span class="tag" style="margin-left:6px">共 '+(traces||[]).length+' 条</span></h3>'+
+    '<table class="tbl"><thead><tr><th>trace_id</th><th>标题</th><th>类型</th><th>状态</th><th>事件数</th><th>开始</th></tr></thead><tbody>'+
       (traces.length?traces.map(t=>'<tr style="cursor:pointer" onclick="loadTrace(\''+esc(t.trace_id)+'\')"><td>'+esc(t.trace_id)+'</td><td>'+esc(t.title||'')+'</td><td>'+esc(t.kind||'')+'</td><td>'+badge(t.status)+'</td><td>'+(t.event_count||0)+'</td><td>'+fmt(t.started_at)+'</td></tr>').join(''):'<tr><td colspan="6" class="empty">暂无轨迹</td></tr>')+'</tbody></table></div>'+
     '<div id="traceDetail"></div>';
 }
 async function loadTrace(tid){
-  const el=$('traceDetail');el.innerHTML='<div class="panel"><div class="empty">加载中…</div></div>';
+  const el=$('traceDetail');el.dataset.tid=tid;el.innerHTML='<div class="panel"><div class="empty">加载中…</div></div>';
   const d=await jget('/api/trace/'+encodeURIComponent(tid));
   const evs=(d.events||[]);
+  const actors={},kinds={};
+  evs.forEach(e=>{actors[e.actor||'-']=(actors[e.actor||'-']||0)+1;kinds[e.kind||'-']=(kinds[e.kind||'-']||0)+1;});
+  // 按任务分区（两层视图：per-task 过滤 + 全局回放）
+  const byTask={};
+  evs.forEach(e=>{const t=e.task_id||'(无任务)';(byTask[t]=byTask[t]||[]).push(e);});
+  const tkeys=Object.keys(byTask);
+  const shown=traceFilter?evs.filter(e=>e.kind===traceFilter):evs;
   el.innerHTML='<div class="panel"><h3>轨迹回放 · '+esc(d.title||tid)+' <span style="color:var(--sub);font-weight:400">'+badge(d.status)+'</span></h3>'+
-    '<div class="tl">'+(evs.length?evs.map(e=>'<div class="ev"><div class="k">'+esc(e.kind)+'</div><div class="meta">#'+(e.seq||0)+' · '+(e.actor||'-')+' · '+fmt(e.ts)+'</div>'+(e.detail?('<div class="det">'+esc(JSON.stringify(e.detail))+'</div>'):'')+'</div>').join(''):'<div class="empty">该轨迹暂无事件</div>')+'</div></div>';
+    '<div class="kv" style="margin-bottom:12px">'+
+      '<div class="item"><div class="k">事件总数</div><div class="v">'+evs.length+'</div></div>'+
+      '<div class="item"><div class="k">涉及角色</div><div class="v">'+Object.keys(actors).length+'</div></div>'+
+      '<div class="item"><div class="k">事件类型</div><div class="v">'+Object.keys(kinds).length+'</div></div>'+
+      '<div class="item"><div class="k">涉及任务</div><div class="v">'+tkeys.length+'</div></div>'+
+    '</div>'+
+    '<div class="split">'+
+      '<div><h3 style="font-size:13px;margin:0 0 8px">按任务分区（per-task 视图）</h3>'+
+        tkeys.map(t=>'<div style="margin-bottom:8px"><div class="tag">'+esc(t)+'</div>'+
+          '<span style="color:var(--sub);font-size:12px">'+byTask[t].length+' 个事件：'+byTask[t].map(e=>esc(e.kind)).join(' → ')+'</span></div>').join('')+
+      '</div>'+
+      '<div><h3 style="font-size:13px;margin:0 0 8px">全局回放（时间线）</h3>'+
+        '<div class="row" style="margin-bottom:8px"><button class="btn ghost" onclick="setTraceFilter(\'\')">全部</button>'+
+        Object.keys(kinds).map(k=>'<button class="btn ghost" onclick="setTraceFilter(\''+esc(k)+'\')">'+esc(k)+' ('+kinds[k]+')</button>').join('')+
+        '</div>'+
+        '<div class="tl">'+(shown.length?shown.map(e=>'<div class="ev"><div class="k">'+esc(e.kind)+'</div><div class="meta">#'+(e.seq||0)+' · '+(e.actor||'-')+' · '+fmt(e.ts)+(e.task_id?(' · 任务 '+esc(e.task_id)):'')+'</div>'+(e.detail?('<div class="det">'+esc(JSON.stringify(e.detail))+'</div>'):'')+'</div>').join(''):'<div class="empty">该轨迹暂无事件</div>')+'</div>'+
+      '</div>'+
+    '</div></div>';
 }
+function setTraceFilter(k){traceFilter=k;const el=$('traceDetail');
+  const cur=el.dataset.tid;if(cur)loadTrace(cur);}
 
 // ---------------- 成本看板 ----------------
 async function loadCost(){
@@ -476,42 +644,92 @@ async function loadCost(){
   const d=await jget('/api/cost?days=30');const tot=d.totals||{};
   const tmpl=(d.by_template||[]);const role=(d.by_role||[]);
   const outs=(d.outliers&&d.outliers.top_cost)||[];
+  const total=Number(tot.cost_estimate||0);
+  const maxT=Math.max(1,...tmpl.map(r=>Number(r.cost_estimate||0)));
+  const maxR=Math.max(1,...role.map(r=>Number(r.cost_estimate||0)));
   el.innerHTML='<h2 class="vh">成本看板</h2><p class="vdesc">'+esc(d.price_note||'')+'</p>'+
     '<div class="grid stats">'+
-      stat('¥'+((tot.cost_estimate)||0).toFixed(2),'累计金额')+stat(tot.model_calls||0,'模型调用')+
+      stat('¥'+total.toFixed(2),'累计金额','accent')+stat(tot.model_calls||0,'模型调用')+
       stat(tot.tool_calls||0,'工具调用')+stat(outs.length,'离群点','warn')+
+      stat(tot.tokens||0,'tokens')+
     '</div>'+
-    '<div class="panel"><h3>按模板拆解</h3><table class="tbl"><thead><tr><th>模板</th><th>任务数</th><th>金额</th><th>模型调用</th><th>tokens</th><th>工具调用</th></tr></thead><tbody>'+
-      (tmpl.length?tmpl.map(r=>'<tr><td>'+esc(r.key)+'</td><td>'+(r.tasks||0)+'</td><td>¥'+((r.cost_estimate)||0).toFixed(2)+'</td><td>'+(r.model_calls||0)+'</td><td>'+(r.tokens||0)+'</td><td>'+(r.tool_calls||0)+'</td></tr>').join(''):'<tr><td colspan="6" class="empty">暂无成本记录</td></tr>')+'</tbody></table></div>'+
-    '<div class="panel"><h3>按角色拆解</h3><table class="tbl"><thead><tr><th>角色</th><th>任务数</th><th>金额</th><th>模型调用</th><th>工具调用</th></tr></thead><tbody>'+
-      (role.length?role.map(r=>'<tr><td>'+esc(r.key)+'</td><td>'+(r.tasks||0)+'</td><td>¥'+((r.cost_estimate)||0).toFixed(2)+'</td><td>'+(r.model_calls||0)+'</td><td>'+(r.tool_calls||0)+'</td></tr>').join(''):'<tr><td colspan="5" class="empty">暂无</td></tr>')+'</tbody></table></div>'+
-    (outs.length?'<div class="panel"><h3>离群点告警（Top 花费）</h3>'+outs.map(o=>'<div class="check"><div class="dot" style="background:var(--warn)">!</div><div><div class="t">'+esc(o.task_id||'-')+' · 模板 '+(o.template||'-')+' · ¥'+((o.cost_estimate)||0).toFixed(2)+'</div><div class="d">retries: '+(o.retries||0)+' · tool_calls: '+(o.tool_calls||0)+'</div></div></div>').join('')+'</div>':'');
+    '<div class="split">'+
+    '<div class="panel"><h3>按模板拆解</h3>'+
+      (tmpl.length?tmpl.map(r=>'<div style="margin-bottom:10px"><div class="row" style="justify-content:space-between">'+
+        '<span><b>'+esc(r.key)+'</b> <span class="tag">'+esc(r.role||'-')+'</span></span>'+
+        '<span>¥'+((r.cost_estimate)||0).toFixed(2)+' · '+(r.tasks||0)+' 任务</span></div>'+
+        '<div class="bar"><i style="width:'+Math.round(Number(r.cost_estimate||0)/maxT*100)+'%"></i></div></div>').join('')
+        :'<div class="empty">暂无成本记录</div>')+
+    '</div>'+
+    '<div class="panel"><h3>按角色拆解</h3>'+
+      (role.length?role.map(r=>'<div style="margin-bottom:10px"><div class="row" style="justify-content:space-between">'+
+        '<span><b>'+esc(r.key)+'</b></span><span>¥'+((r.cost_estimate)||0).toFixed(2)+' · '+(r.tasks||0)+' 任务</span></div>'+
+        '<div class="bar"><i style="width:'+Math.round(Number(r.cost_estimate||0)/maxR*100)+'%;background:var(--accent2)"></i></div></div>').join('')
+        :'<div class="empty">暂无</div>')+
+    '</div></div>'+
+    '<div class="panel"><h3>按任务明细 <span class="tag" style="margin-left:6px">点击行可下钻</span></h3>'+
+      '<table class="tbl"><thead><tr><th>task_id</th><th>模板</th><th>角色</th><th>金额</th><th>模型调用</th><th>工具调用</th><th>tokens</th><th>重试</th></tr></thead><tbody>'+
+      ((d.records||d.task_costs||[]).length?(d.records||d.task_costs||[]).map(r=>'<tr style="cursor:pointer" onclick="showTaskCost(\''+esc(r.task_id)+'\')"><td>'+esc(r.task_id)+'</td><td>'+esc(r.template||'-')+'</td><td>'+esc(r.role||'-')+'</td><td>¥'+((r.cost_estimate)||0).toFixed(2)+'</td><td>'+(r.model_calls||0)+'</td><td>'+(r.tool_calls||0)+'</td><td>'+(r.tokens||0)+'</td><td>'+(r.retries||0)+'</td></tr>').join(''):'<tr><td colspan="8" class="empty">暂无逐任务成本记录</td></tr>')+
+      '</tbody></table></div>'+
+    (outs.length?'<div class="panel"><h3>离群点告警（Top 花费）</h3>'+outs.map(o=>'<div class="check"><div class="dot" style="background:var(--warn)">!</div><div><div class="t">'+esc(o.task_id||'-')+' · 模板 '+(o.template||'-')+' · ¥'+((o.cost_estimate)||0).toFixed(2)+'</div><div class="d">retries: '+(o.retries||0)+' · tool_calls: '+(o.tool_calls||0)+'</div></div></div>').join('')+'</div>':'')+
+    '<div id="costDetail"></div>';
+}
+async function showTaskCost(tid){
+  const el=$('costDetail');el.innerHTML='<div class="panel"><div class="empty">加载中…</div></div>';
+  const d=await jget('/api/cost/task/'+encodeURIComponent(tid));
+  el.innerHTML='<div class="panel"><h3>任务成本下钻 · '+esc(tid)+'</h3>'+
+    '<div class="kv">'+
+      '<div class="item"><div class="k">累计金额</div><div class="v">¥'+((d.cost_estimate)||0).toFixed(2)+'</div></div>'+
+      '<div class="item"><div class="k">模型调用</div><div class="v">'+(d.model_calls||0)+'</div></div>'+
+      '<div class="item"><div class="k">工具调用</div><div class="v">'+(d.tool_calls||0)+'</div></div>'+
+      '<div class="item"><div class="k">重试</div><div class="v">'+(d.retries||0)+'</div></div>'+
+    '</div>'+
+    '<pre class="tbl td pre" style="margin-top:12px;white-space:pre-wrap;font-size:12px;color:var(--sub)">'+esc(JSON.stringify(d,null,2).slice(0,4000))+'</pre>'+
+  '</div>';
 }
 
 // ---------------- 审批中心 ----------------
+let apprTab='all';
 async function loadApprovals(){
   const el=$('view-approvals');
   if(!el.dataset.init){
     el.dataset.init='1';
-    el.innerHTML='<h2 class="vh">审批中心</h2><p class="vdesc">Human-in-the-loop：高危操作需审批，完整证据链可导出存档。</p>'+
+    el.innerHTML='<h2 class="vh">审批中心</h2><p class="vdesc">Human-in-the-loop：高危操作需审批，完整证据链可导出存档。默认拒绝：未决即不执行。</p>'+
       '<div id="apprBody"></div><div id="apprDetail"></div>';
   }
-  const a=await jget('/api/approvals?limit=50');
-  $('apprBody').innerHTML='<div class="panel"><table class="tbl"><thead><tr><th>approval_id</th><th>action</th><th>detail</th><th>状态</th><th>任务</th><th>决策人</th><th>证据链</th></tr></thead><tbody>'+
-    (a.length?a.map(x=>'<tr><td>'+esc(x.approval_id)+'</td><td>'+esc(x.action)+'</td><td class="pre">'+esc(x.detail)+'</td><td>'+badge(x.status)+'</td><td>'+esc(x.task_id||'-')+'</td><td>'+(x.decided_by||'-')+'</td><td><button class="btn ghost" onclick="loadApproval(\''+esc(x.approval_id)+'\')">查看</button></td></tr>').join(''):'<tr><td colspan="7" class="empty">无审批记录</td></tr>')+'</tbody></table></div>';
+  const a=await jget('/api/approvals?limit=200');
+  const cnt=s=>a.filter(x=>x.status===s).length;
+  const tabs=[['all','全部 '+a.length],['pending','待审批 '+cnt('pending')],
+    ['approved','已通过 '+cnt('approved')],['rejected','已拒绝 '+cnt('rejected')],
+    ['expired','已过期 '+cnt('expired')]];
+  const shown=apprTab==='all'?a:a.filter(x=>x.status===apprTab);
+  $('apprBody').innerHTML='<div class="panel"><div class="tabs">'+
+    tabs.map(t=>'<button class="'+(apprTab===t[0]?'active':'')+'" onclick="setApprTab(\''+t[0]+'\')">'+esc(t[1])+'</button>').join('')+
+    '</div>'+
+    '<table class="tbl"><thead><tr><th>approval_id</th><th>action</th><th>detail</th><th>状态</th><th>任务</th><th>决策人</th><th>证据链</th></tr></thead><tbody>'+
+    (shown.length?shown.map(x=>'<tr><td>'+esc(x.approval_id)+'</td><td>'+esc(x.action)+'</td><td class="pre">'+esc(x.detail)+'</td><td>'+badge(x.status)+'</td><td>'+esc(x.task_id||'-')+'</td><td>'+(x.decided_by||'-')+'</td><td><button class="btn ghost" onclick="loadApproval(\''+esc(x.approval_id)+'\')">查看</button></td></tr>').join(''):'<tr><td colspan="7" class="empty">该状态下无审批记录</td></tr>')+'</tbody></table></div>';
 }
+function setApprTab(t){apprTab=t;loadApprovals();}
 async function loadApproval(aid){
   const el=$('apprDetail');el.innerHTML='<div class="panel"><div class="empty">加载中…</div></div>';
   const d=await jget('/api/audit/approval/'+encodeURIComponent(aid));
   const ap=d.approval||{};const evs=d.events||[];
+  const risk=ap.risk||'normal';
   el.innerHTML='<div class="panel"><h3>证据链 · '+esc(aid)+' '+badge(ap.status||'')+'</h3>'+
-    '<div class="row" style="margin-bottom:10px"><span class="badge '+(ap.risk==='high'?'b-failed':'')+'">risk: '+(ap.risk||'normal')+'</span>'+
-      '<span style="color:var(--sub)">action: '+esc(ap.action||'')+'</span></div>'+
-    '<div class="tl">'+(evs.length?evs.map(e=>'<div class="ev"><div class="k">'+esc(e.kind)+'</div><div class="meta">'+(e.actor||'-')+' · '+fmt(e.ts)+'</div></div>').join(''):'<div class="empty">该审批无关联轨迹事件</div>')+'</div>'+
+    '<div class="kv" style="margin-bottom:12px">'+
+      '<div class="item"><div class="k">动作</div><div class="v" style="font-size:13.5px">'+esc(ap.action||'-')+'</div></div>'+
+      '<div class="item"><div class="k">风险等级</div><div class="v" style="color:'+(risk==='high'?'var(--warn)':'var(--ok)')+'">'+esc(risk)+'</div></div>'+
+      '<div class="item"><div class="k">关联轨迹</div><div class="v" style="font-size:12px">'+esc(ap.trace_id||'-')+'</div></div>'+
+      '<div class="item"><div class="k">轨迹事件</div><div class="v">'+evs.length+'</div></div>'+
+      '<div class="item"><div class="k">决策人</div><div class="v" style="font-size:13.5px">'+esc(ap.decided_by||'-')+'</div></div>'+
+      '<div class="item"><div class="k">决策时间</div><div class="v" style="font-size:12.5px">'+fmt(ap.decided_at)+'</div></div>'+
+    '</div>'+
+    '<div class="tl">'+(evs.length?evs.map(e=>'<div class="ev"><div class="k">'+esc(e.kind)+'</div><div class="meta">#'+(e.seq||0)+' · '+(e.actor||'-')+' · '+fmt(e.ts)+'</div></div>').join(''):'<div class="empty">该审批无关联轨迹事件</div>')+'</div>'+
     '<div class="row" style="margin-top:14px">'+
       '<a class="btn" href="/api/export/approval/'+encodeURIComponent(aid)+'?fmt=csv">导出 CSV</a>'+
       '<a class="btn" href="/api/export/approval/'+encodeURIComponent(aid)+'?fmt=sarif">导出 SARIF</a>'+
       '<a class="btn" href="/api/export/approval/'+encodeURIComponent(aid)+'?fmt=pdf">导出 PDF</a>'+
+      '<span class="ctip">CSV 用于台账、SARIF 用于合规扫描器接入、PDF 用于人工归档</span>'+
     '</div></div>';
 }
 
@@ -519,15 +737,44 @@ async function loadApproval(aid){
 async function loadSecurity(){
   const el=$('view-security');
   const s=await jget('/api/security');
+  const cont=s.sandbox_containment||'-';
+  const tiers=[
+    ['advisory','仅命令预检','不隔离文件系统/网络，只做黑名单预检','弱'],
+    ['limited','资源限制沙箱','RLIMIT 内存/CPU/进程数 + 进程树清理 + 输出截断','中'],
+    ['os','OS 级隔离','Docker/E2B 容器，文件系统与网络真正隔离','强'],
+  ];
   el.innerHTML='<h2 class="vh">安全中心</h2><p class="vdesc">本地可审计协作台的安全姿态与卖点（详见安全白皮书）。</p>'+
-    '<div class="grid stats">'+stat(esc(s.sandbox_backend||'-'),'沙箱后端')+stat(esc(s.sandbox_containment||'-'),'隔离档位')+stat('0','真实密钥泄露','ok')+'</div>'+
-    '<div class="panel"><h3>沙箱隔离</h3><div class="check"><div class="dot">✓</div><div><div class="t">当前后端：'+esc(s.sandbox_backend||'-')+'（'+esc(s.sandbox_containment||'-')+'）</div><div class="d">'+esc(s.sandbox_note||'')+'</div></div></div>'+
-      '<div class="check"><div class="dot">✓</div><div><div class="t">三档隔离：advisory / limited / os</div><div class="d">Docker 8 点加固（非 root、cap-drop、只读根、默认拒绝网络闸）。</div></div></div></div>'+
+    '<div class="grid stats">'+
+      stat(esc(s.sandbox_backend||'-'),'沙箱后端')+
+      stat(esc(cont),'隔离档位','accent')+
+      stat('0','真实密钥泄露','ok')+
+      stat(esc(s.self_scan_hits||0),'扫描命中（均为假密钥语料）')+
+    '</div>'+
+    '<div class="panel"><h3>沙箱隔离三档 <span class="tag" style="margin-left:6px">当前：'+esc(cont)+'</span></h3>'+
+      tiers.map(t=>{
+        const on=(cont===t[0]);
+        return '<div class="check"><div class="dot" style="background:'+(on?'var(--accent)':'var(--ok)')+'">'+(on?'●':'✓')+'</div>'+
+          '<div><div class="t">'+t[0]+' · '+t[1]+' <span class="tag">隔离强度：'+t[3]+'</span></div>'+
+          '<div class="d">'+t[2]+(on?'　<b style="color:var(--accent)">← 当前档位</b>':'')+'</div></div></div>';
+      }).join('')+
+      '<div class="warnbar" style="margin-top:12px">诚实边界：仅 <code class="k">os</code> 档真正隔离文件系统与网络。'+
+      '降级到 <code class="k">limited</code> 只限制资源，<code class="k">advisory</code> 仅做命令预检——'+
+      '<b>不可信代码必须在 os 档运行</b>。设置 <code class="k">SANDBOX_REQUIRE_STRONG=1</code> 可拒绝降级。</div>'+
+      '<div class="check"><div class="dot">✓</div><div><div class="t">Docker 8 点加固</div>'+
+      '<div class="d">非 root nobody(65534) · --cap-drop ALL · 只读根 + tmpfs /tmp · 默认 --network none · '+
+      '内存/CPU/PID 限额 · 输入只读/输出分离挂载 · 命令白名单（禁裸 shell） · --runtime 预留 gVisor/Kata</div></div></div>'+
+      '<div class="check"><div class="dot">✓</div><div><div class="t">默认拒绝网络闸</div>'+
+      '<div class="d">网络出口需带已批准 approval_id，绕过后端直接调也拦得住（manager 层强制）。</div></div></div>'+
+    '</div>'+
     '<div class="panel"><h3>权限最小化</h3>'+
-      '<div class="check"><div class="dot">✓</div><div><div class="t">审批默认拒绝 + 超时过期</div></div></div>'+
-      '<div class="check"><div class="dot">✓</div><div><div class="t">工作区隔离（per-bot work/outbox/state.json）</div></div></div>'+
-      '<div class="check"><div class="dot">✓</div><div><div class="t">OAuth scope 最小化</div></div></div></div>'+
-    '<div class="panel"><h3>密钥扫描</h3><div class="check"><div class="dot">✓</div><div><div class="t">源码硬编码密钥自扫：0 真实泄露</div><div class="d">22 条命中均为金标准假密钥语料（tools/scan_bench.py），已排除；公开测试向量豁免。</div></div></div>'+
+      '<div class="check"><div class="dot">✓</div><div><div class="t">审批默认拒绝 + 超时过期</div><div class="d">未显式批准即不执行；挂起超时自动标 expired。</div></div></div>'+
+      '<div class="check"><div class="dot">✓</div><div><div class="t">工作区隔离</div><div class="d">per-bot 目录：work/（jail）· outbox/（需审批才可外发）· state.json（原子替换写入）。</div></div></div>'+
+      '<div class="check"><div class="dot">✓</div><div><div class="t">路径逃逸防护</div><div class="d">bot_id 白名单正则校验；绝对路径与 .. 一律拒绝。</div></div></div>'+
+      '<div class="check"><div class="dot">✓</div><div><div class="t">OAuth scope 最小化</div><div class="d">Token 按 scope 签发与校验，密钥只从环境变量读取，不硬编码。</div></div></div></div>'+
+    '<div class="panel"><h3>密钥扫描</h3>'+
+      '<div class="check"><div class="dot">✓</div><div><div class="t">源码硬编码密钥自扫：0 真实泄露</div>'+
+      '<div class="d">'+(s.self_scan_hits||0)+' 条 high/critical 命中均为金标准假密钥语料库（tools/scan_bench.py），已排除；公开已知测试向量豁免；'+
+      '误报用行内 <code class="k"># scanner:allow</code> 精确豁免，不放宽扫描规则。</div></div></div>'+
       '<a class="link" href="/api/security/whitepaper" target="_blank">查看安全白皮书 →</a></div>';
 }
 
@@ -552,7 +799,16 @@ async function loadSettings(){
       '<span>成本：<code class="k">'+esc(ov.db_cost||'')+'</code></span></div>'+
       '<div style="margin-top:8px">'+(ov.demo_mode?'<span class="pill demo">演示模式：数据隔离在 console_demo_*.db</span>':'<span class="pill">真实库模式</span>')+'</div></div>'+
     (ov.demo_mode?'<div class="panel"><h3>演示数据</h3><button class="btn" onclick="reseed()">重新生成演示数据</button></div>':'')+
+    '<div class="panel"><h3>对话引擎</h3><div id="setChat" style="color:var(--sub)">加载中…</div>'+
+      '<div class="ctip" style="margin-top:8px">规则引擎始终可用（确定性、零幻觉）；'+
+      'LLM 兜底优先本地 Ollama（<code class="k">OLLAMA_BASE_URL</code>，默认 http://127.0.0.1:11434），'+
+      '其次 OpenAI 兼容端点（<code class="k">OPENAI_API_KEY</code>）。两者都不可用时会明确告知，绝不伪造模型回答。</div></div>'+
     '<div class="panel"><h3>关于</h3><div class="row" style="color:var(--sub)">协作审计台 SecTrust Console · v0.9 · 零依赖 stdlib http.server · 仿 WorkBuddy 界面</div></div>';
+  const st=await jget('/api/chat/status');
+  $('setChat').innerHTML='<div class="row"><span class="pill live">规则引擎</span>'+
+    (st.ollama?('<span class="pill live">Ollama 可用：'+esc((st.ollama_models||[]).join(', ')||'已连接')+'</span>')
+              :('<span class="pill">Ollama 未启动</span>'))+
+    (st.openai?'<span class="pill live">OpenAI 已配置</span>':'<span class="pill">OpenAI 未配置</span>')+'</div>';
 }
 async function reseed(){
   await jget('/api/seed');location.reload();
@@ -663,6 +919,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/skills":
             return self._json(self._skills())
+        if path == "/api/chat/status":
+            return self._json(self._chat_service().status())
         if path == "/api/seed":
             if not self.demo_mode:
                 return self._json({"error": "seed only in demo mode"}, 403)
@@ -770,6 +1028,7 @@ class Handler(BaseHTTPRequestHandler):
             "sandbox_containment": sandbox.get("containment"),
             "sandbox_note": sandbox.get("note"),
             "self_scan_real_leaks": 0,
+            "self_scan_hits": 22,
             "self_scan_note": "22 条 high/critical 命中均为金标准假密钥语料，已排除。",
         }
 
@@ -818,6 +1077,43 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *args):
         pass
+
+    # ---- 对话后端 ----
+    def _chat_service(self):
+        if getattr(Handler, "_chat", None) is None:
+            from console_chat import ChatService
+            Handler._chat = ChatService(self._chat_context)
+        return Handler._chat
+
+    def _chat_context(self):
+        """喂给对话引擎的当前审计态（只读聚合）。"""
+        return {
+            "overview": self._overview(),
+            "tasks": self.registry.list_tasks(limit=1000),
+            "approvals": self.approval.list_approvals(limit=200),
+            "cost": self._cost(days=30),
+            "security": self._security(),
+        }
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path != "/api/chat":
+            return self._json({"error": "not found", "path": path}, 404)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
+        except (ValueError, OSError):
+            return self._json({"error": "bad request"}, 400)
+        question = str(payload.get("question") or "")
+        history = payload.get("history") or []
+        if not isinstance(history, list):
+            history = []
+        try:
+            result = self._chat_service().ask(question, history)
+        except Exception as e:  # noqa: BLE001
+            return self._json({"error": str(e), "engine": "unavailable"}, 500)
+        return self._json(result)
 
 
 def main():
