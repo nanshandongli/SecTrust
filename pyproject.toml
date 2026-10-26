@@ -67,6 +67,7 @@ Changelog = "https://github.com/nanshandongli/SecTrust/blob/main/CHANGELOG.md"
 [tool.setuptools]
 # 根级单文件模块（全部是公开入口或被包内 import）
 py-modules = [
+    "audit_suite",
     "approval",
     "arbiter",
     "assets",

@@ -41,3 +41,6 @@ dashboard_snapshot_zh.html
 
 # Local MCP client config (contains machine-specific paths)
 mcp_client_config.claude_desktop.json
+
+# 审计三件套演示产物（合成数据 + 内嵌字体 PDF，体积大，可复跑生成，不提交）
+reports/audit_suite_demo/

@@ -166,6 +166,9 @@ shell 两步真实落盘 `sectrust_raw.json` / `sectrust_report.md`，被汇总�
 
 ### 7.3 诚实边界（不夸大）
 
+> 此写法（**先讲天花板，再讲数据**）已被固化为所有对外材料的**标准范式**，见
+> [`docs/honest_boundary_paradigm.md`](docs/honest_boundary_paradigm.md)。
+
 本次为**单宿主 + 同机多进程**（进程隔离模拟机器、本机 TCP 回环模拟网络）；
 协调后端是项目自带的协议兼容 `FakeRedisServer`（真 socket 级 TCP RESP 服务），非官方 Redis。
 真实跨机房还会叠加延迟 / 分区 / WAL 落 NFS 失效等风险。

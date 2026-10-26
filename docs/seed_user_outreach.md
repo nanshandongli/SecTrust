@@ -1,6 +1,7 @@
 # 种子用户触达话术 + 反馈观测清单
 
 > 用途：把「协作台实跑证据页」发给目标种子用户，配合 PRODUCT_ANALYSIS.md 第八节的付费点描述，观察反馈。
+> 话术里的「先讲天花板」写法即本项目对外**标准范式**，见 [`docs/honest_boundary_paradigm.md`](docs/honest_boundary_paradigm.md)。
 > 证据页链接（已发布，可外部访问）：
 > **https://collab-console-evidence.app.workbuddy.host/?sharecode=P3IGLCF62C**
 > 证据页由 `reports/e2e_and_stress_report.html` 零依赖生成，内联全部 SVG，无外部依赖、无真实凭证。
