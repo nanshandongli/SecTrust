@@ -73,6 +73,7 @@ py-modules = [
     "assets",
     "ballot",
     "config",
+    "console_api",
     "console_chat",
     "console_web",
     "cost",

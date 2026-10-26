@@ -34,7 +34,9 @@ from approval import ApprovalCenter
 from trace import TraceStore
 from cost import CostStore
 from audit_suite import AuditSuite
+from scheduler import Scheduler
 from task_center_web import dag_view
+import console_api
 
 
 # --------------------------------------------------------------------------
@@ -307,9 +309,97 @@ APP_HTML = """<!doctype html>
     background:var(--chip);color:var(--sub);margin-right:6px}
   .split{display:grid;grid-template-columns:1fr 1fr;gap:14px}
   @media(max-width:980px){.split{grid-template-columns:1fr}}
+  /* ---- 登录页 ---- */
+  .login-wrap{position:fixed;inset:0;z-index:100;display:flex;align-items:center;
+    justify-content:center;background:var(--bg)}
+  .login-wrap.hidden{display:none}
+  .login-card{width:400px;max-width:92vw;background:var(--card);border:1px solid var(--line);
+    border-radius:16px;padding:32px;box-shadow:0 12px 40px rgba(0,0,0,.12)}
+  .login-card .logo{width:44px;height:44px;border-radius:12px;margin-bottom:16px;
+    background:linear-gradient(135deg,#3b6cff,#16b8a6);display:flex;align-items:center;
+    justify-content:center;color:#fff;font-weight:800;font-size:20px}
+  .login-card h1{font-size:19px;margin:0 0 4px}
+  .login-card .sub{color:var(--sub);font-size:13px;margin-bottom:22px}
+  .login-card label{display:block;font-size:12.5px;color:var(--sub);margin:14px 0 6px}
+  .login-card input,.login-card select{width:100%;padding:10px 12px;border:1px solid var(--line);
+    border-radius:9px;background:var(--bg);color:var(--txt);font-size:14px}
+  .login-card input:focus,.login-card select:focus{outline:none;border-color:var(--accent);
+    box-shadow:0 0 0 3px rgba(59,108,255,.12)}
+  .login-card button{width:100%;margin-top:22px;background:var(--accent);color:#fff;
+    border:none;padding:11px;border-radius:10px;font-size:14px;cursor:pointer;font-weight:600}
+  .login-card button:hover{opacity:.92}
+  .login-note{margin-top:16px;padding:10px 12px;background:var(--bg);border:1px solid var(--line);
+    border-radius:9px;font-size:11.5px;color:var(--sub);line-height:1.6}
+  .login-err{color:var(--warn);font-size:12.5px;margin-top:10px;min-height:16px}
+  /* ---- 导航分组 ---- */
+  .nav-group{font-size:10.5px;color:#5c6570;letter-spacing:.06em;padding:12px 12px 5px;
+    font-weight:700;text-transform:uppercase}
+  .sidebar.collapsed .nav-group{opacity:0;height:14px;padding:4px 0}
+  .nav-foot .u{color:var(--sidebar-txt);font-size:12px;display:block}
+  .nav-foot .r{color:#8b949e;font-size:11px}
+  /* ---- 工作台首页 ---- */
+  .ws-hero{background:linear-gradient(135deg,rgba(59,108,255,.10),rgba(22,184,166,.08));
+    border:1px solid var(--line);border-radius:14px;padding:20px 22px;margin-bottom:16px}
+  .ws-hero h2{margin:0 0 6px;font-size:19px}
+  .ws-hero p{margin:0 0 14px;color:var(--sub);font-size:13px}
+  .quick-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}
+  .quick{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;
+    cursor:pointer;text-align:left;font-size:13.5px;color:var(--txt);transition:.15s}
+  .quick:hover{border-color:var(--accent);transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,0,.07)}
+  .quick .qi{display:block;font-size:19px;margin-bottom:5px}
+  .quick .qd{display:block;color:var(--sub);font-size:11.5px;margin-top:2px;line-height:1.5}
+  /* ---- 表单 ---- */
+  .fld{margin-bottom:14px}
+  .fld label{display:block;font-size:12.5px;color:var(--sub);margin-bottom:5px}
+  .fld input,.fld select,.fld textarea{width:100%;padding:9px 12px;border:1px solid var(--line);
+    border-radius:9px;background:var(--bg);color:var(--txt);font-size:13.5px;font-family:inherit}
+  .fld textarea{min-height:78px;resize:vertical}
+  .fld input:focus,.fld select:focus,.fld textarea:focus{outline:none;
+    border-color:var(--accent);box-shadow:0 0 0 3px rgba(59,108,255,.12)}
+  .fld .hint{font-size:11.5px;color:var(--sub);margin-top:4px}
+  .form-err{color:var(--warn);font-size:12.5px;margin-top:8px;min-height:16px}
+  .form-ok{color:var(--ok);font-size:12.5px;margin-top:8px;min-height:16px}
+  /* ---- 列表条目 ---- */
+  .litem{display:flex;align-items:center;gap:12px;padding:11px 12px;border:1px solid var(--line);
+    border-radius:10px;margin-bottom:8px;background:var(--bg)}
+  .litem .grow{flex:1;min-width:0}
+  .litem .nm{font-weight:600;font-size:13.5px;word-break:break-word}
+  .litem .mt{color:var(--sub);font-size:12px;margin-top:2px}
+  .litem .ops{display:flex;gap:6px;flex:0 0 auto}
+  .iconbtn.sm{width:28px;height:28px;border-radius:7px}
+  .card-grid{grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
+  .acard{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;
+    box-shadow:var(--shadow);transition:.15s}
+  .acard:hover{transform:translateY(-1px);box-shadow:0 5px 16px rgba(0,0,0,.08)}
+  .acard .ah{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+  .acard .an{font-weight:600;font-size:14px}
+  .acard .ak{font-size:11px;color:var(--accent2);margin-bottom:6px}
+  .acard .ad{font-size:12.5px;color:var(--sub);line-height:1.55}
+  .avatar{width:30px;height:30px;border-radius:9px;flex:0 0 auto;display:flex;
+    align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:13px}
 </style>
 </head>
 <body>
+
+<!-- ===== 登录页 ===== -->
+<div class="login-wrap" id="loginWrap">
+  <div class="login-card">
+    <div class="logo">S</div>
+    <h1>SecTrust 协作审计台</h1>
+    <div class="sub">本地多 AI 协作的可审计控制台</div>
+    <label for="loginUser">用户名</label>
+    <input id="loginUser" placeholder="例如 operator" value="operator" autocomplete="username">
+    <label for="loginRole">岗位角色</label>
+    <select id="loginRole"></select>
+    <button id="loginBtn">进入工作台</button>
+    <div class="login-err" id="loginErr"></div>
+    <div class="login-note" id="loginNote">
+      本地演示级身份：无密码校验、令牌不防伪造，<b>不构成安全边界</b>。
+      它的作用是提供界面角色上下文（审计名单 / 权限视角）。
+    </div>
+  </div>
+</div>
+
 <div class="sidebar" id="sidebar">
   <div class="brand">
     <div class="logo">S</div>
@@ -324,17 +414,28 @@ APP_HTML = """<!doctype html>
     <button class="iconbtn" id="collapseBtn" title="折叠/展开导航">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
     </button>
-    <div class="title" id="viewTitle">概览</div>
+    <div class="title" id="viewTitle">工作台</div>
     <div class="search"><input id="globalSearch" placeholder="搜索任务 / 轨迹 / 审批…"><div class="search-pop" id="searchPop"></div></div>
     <div class="spacer"></div>
+    <button class="btn" id="newTaskBtn" style="display:none">＋ 新建任务</button>
     <span class="pill live" id="dbPill">● 实时</span>
     <span class="pill demo" id="demoPill" style="display:none">演示数据</span>
+    <button class="iconbtn" id="userBtn" title="当前用户" style="display:none">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6 8-6s8 2 8 6"/></svg>
+    </button>
     <button class="iconbtn" id="themeBtn" title="切换主题">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
     </button>
   </div>
   <div class="content">
-    <div class="view active" id="view-overview"></div>
+    <div class="view active" id="view-workspace"></div>
+    <div class="view" id="view-newtask"></div>
+    <div class="view" id="view-roster"></div>
+    <div class="view" id="view-assistants"></div>
+    <div class="view" id="view-connectors"></div>
+    <div class="view" id="view-schedule"></div>
+    <div class="view" id="view-library"></div>
+    <div class="view" id="view-overview"></div>
     <div class="view" id="view-chat"></div>
     <div class="view" id="view-tasks"></div>
     <div class="view" id="view-trace"></div>
@@ -409,23 +510,49 @@ const ICON={
  puzzle:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 3a2 2 0 0 1 4 0v2h2a2 2 0 0 1 2 2v2h2a2 2 0 0 1 0 4h-2v2a2 2 0 0 1-2 2h-2v-2H9v2a2 2 0 0 1-4 0v-2H3a2 2 0 0 1 0-4h2V9a2 2 0 0 1 2-2h2z"/></svg>',
  gear:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.5-2.4 1a7 7 0 0 0-1.7-1L14.5 3h-5l-.3 2.5a7 7 0 0 0-1.7 1l-2.4-1-2 3.5 2 1.5a7 7 0 0 0 0 2l-2 1.5 2 3.5 2.4-1a7 7 0 0 0 1.7 1l.3 2.5h5l.3-2.5a7 7 0 0 0 1.7-1l2.4 1 2-3.5-2-1.5a7 7 0 0 0 .1-1z"/></svg>'
 };
-const NAV=[
- {id:'overview',label:'概览',icon:ICON.home},
- {id:'chat',label:'对话',icon:ICON.chat},
- {id:'tasks',label:'任务中心',icon:ICON.tasks},
- {id:'trace',label:'审计轨迹',icon:ICON.trace},
- {id:'cost',label:'成本看板',icon:ICON.cost},
- {id:'approvals',label:'审批中心',icon:ICON.approve},
- {id:'security',label:'安全中心',icon:ICON.shield},
- {id:'skills',label:'技能',icon:ICON.puzzle},
- {id:'settings',label:'设置',icon:ICON.gear}
+Object.assign(ICON,{
+ plus:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>',
+ people:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="8" r="3.2"/><path d="M2 20c0-3.3 3.1-5 7-5s7 1.7 7 5"/><path d="M17 5.2a3.2 3.2 0 0 1 0 5.6M18 20c0-2.2-.9-3.8-2.3-4.6"/></svg>',
+ link:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg>',
+ clock:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+ folder:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
+ grid:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>',
+ sparkle:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M18 16l.8 2.2L21 19l-2.2.8L18 22l-.8-2.2L15 19l2.2-.8z"/></svg>'
+});
+const NAV_GROUPS=[
+ {group:'工作台',items:[
+   {id:'workspace',label:'工作台',icon:ICON.home},
+   {id:'newtask',label:'新建任务',icon:ICON.plus},
+   {id:'chat',label:'助理对话',icon:ICON.chat},
+ ]},
+ {group:'审计',items:[
+   {id:'roster',label:'审计名单',icon:ICON.people},
+   {id:'tasks',label:'任务中心',icon:ICON.tasks},
+   {id:'trace',label:'审计轨迹',icon:ICON.trace},
+   {id:'approvals',label:'审批中心',icon:ICON.approve},
+   {id:'cost',label:'成本看板',icon:ICON.cost},
+ ]},
+ {group:'资源',items:[
+   {id:'assistants',label:'助理',icon:ICON.puzzle},
+   {id:'connectors',label:'技能连接器',icon:ICON.link},
+   {id:'library',label:'资料库',icon:ICON.folder},
+   {id:'schedule',label:'定时任务',icon:ICON.clock},
+ ]},
+ {group:'系统',items:[
+   {id:'overview',label:'概览',icon:ICON.grid},
+   {id:'security',label:'安全中心',icon:ICON.shield},
+   {id:'skills',label:'技能',icon:ICON.sparkle},
+   {id:'settings',label:'设置',icon:ICON.gear},
+ ]},
 ];
-const TITLES={overview:'概览',chat:'对话',tasks:'任务中心',trace:'审计轨迹',cost:'成本看板',
-  approvals:'审批中心',security:'安全中心',skills:'技能',settings:'设置'};
+const NAV=NAV_GROUPS.flatMap(g=>g.items);
+const TITLES={};NAV.forEach(n=>TITLES[n.id]=n.label);
 
-// 渲染侧边栏
-$('nav').innerHTML = NAV.map(n=>
-  '<a data-view="'+n.id+'">'+n.icon+'<span class="label">'+n.label+'</span></a>').join('');
+// 渲染侧边栏（分组）
+$('nav').innerHTML = NAV_GROUPS.map(g=>
+  '<div class="nav-group">'+g.group+'</div>'+
+  g.items.map(n=>'<a data-view="'+n.id+'" title="'+n.label+'">'+n.icon+'<span class="label">'+n.label+'</span></a>').join('')
+).join('');
 $('nav').querySelectorAll('a').forEach(a=>a.addEventListener('click',()=>go(a.dataset.view)));
 
 function go(view){
@@ -433,14 +560,17 @@ function go(view){
   location.hash = '#/'+view;
 }
 function route(){
-  const v = (location.hash.replace('#/','')||'overview');
+  const v = (location.hash.replace('#/','')||'workspace');
   NAV.forEach(n=>{const a=$('nav').querySelector('a[data-view="'+n.id+'"]');if(a)a.classList.toggle('active',n.id===v);});
   document.querySelectorAll('.view').forEach(el=>el.classList.remove('active'));
   const view=$('view-'+v); if(view) view.classList.add('active');
-  $('viewTitle').textContent = TITLES[v]||'概览';
-  const loaders={overview:loadOverview,chat:loadChat,tasks:loadTasks,trace:loadTraceList,
-    cost:loadCost,approvals:loadApprovals,security:loadSecurity,skills:loadSkills,settings:loadSettings};
-  (loaders[v]||loadOverview)();
+  $('viewTitle').textContent = TITLES[v]||'工作台';
+  const loaders={workspace:loadWorkspace,newtask:loadNewTask,roster:loadRoster,
+    assistants:loadAssistants,connectors:loadConnectors,schedule:loadSchedule,
+    library:loadLibrary,overview:loadOverview,chat:loadChat,tasks:loadTasks,
+    trace:loadTraceList,cost:loadCost,approvals:loadApprovals,security:loadSecurity,
+    skills:loadSkills,settings:loadSettings};
+  (loaders[v]||loadWorkspace)();
 }
 window.addEventListener('hashchange',route);
 initSearch();
@@ -451,6 +581,330 @@ $('themeBtn').addEventListener('click',()=>{
   document.documentElement.setAttribute('data-theme',t);localStorage.setItem('wbtheme',t);
 });
 (function(){const t=localStorage.getItem('wbtheme');if(t)document.documentElement.setAttribute('data-theme',t);})();
+
+// ================= 登录 / 会话 =================
+let SESSION=null;
+function initLogin(){
+  const roles=window.__ROLES__||[];
+  $('loginRole').innerHTML=roles.map(r=>'<option value="'+r.id+'">'+esc(r.name)+' · '+esc(r.desc)+'</option>').join('');
+  $('loginBtn').addEventListener('click',doLogin);
+  $('loginUser').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();});
+}
+async function doLogin(){
+  const btn=$('loginBtn');btn.disabled=true;btn.textContent='登录中…';
+  $('loginErr').textContent='';
+  try{
+    const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({user:$('loginUser').value,role:$('loginRole').value})});
+    const d=await r.json();
+    if(!r.ok||!d.token){$('loginErr').textContent=d.error||'登录失败';return;}
+    SESSION=d;
+    localStorage.setItem('wbSession',d.token);
+    applySession(d);
+    $('loginWrap').classList.add('hidden');
+    go('workspace');
+  }catch(e){$('loginErr').textContent='登录请求失败：'+e;}
+  finally{btn.disabled=false;btn.textContent='进入工作台';}
+}
+function applySession(s){
+  $('userBtn').style.display='flex';
+  $('newTaskBtn').style.display='inline-block';
+  const roleName=(window.__ROLES__||[]).find(r=>r.id===s.role);
+  $('navfoot').innerHTML='v0.9 · 本地可审计<span class="u">'+esc(s.user)+' · '+esc(roleName?roleName.name:s.role)+'</span>'+
+    '<span class="r" id="logoutBtn" style="cursor:pointer;text-decoration:underline">退出登录</span>';
+  const lo=$('logoutBtn');
+  if(lo)lo.addEventListener('click',doLogout);
+}
+async function doLogout(){
+  try{await fetch('/api/logout',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({token:SESSION?SESSION.token:''})});}catch(e){}
+  SESSION=null;localStorage.removeItem('wbSession');
+  $('loginWrap').classList.remove('hidden');
+  $('userBtn').style.display='none';
+  $('newTaskBtn').style.display='none';
+  $('navfoot').textContent='v0.9 · 本地可审计';
+}
+async function restoreSession(){
+  const t=localStorage.getItem('wbSession');
+  if(!t)return false;
+  try{
+    const r=await fetch('/api/session',{headers:{'X-Session-Token':t}});
+    const d=await r.json();
+    if(!d.ok)return false;
+    SESSION=d.session;applySession(d.session);
+    $('loginWrap').classList.add('hidden');
+    return true;
+  }catch(e){return false;}
+}
+
+// ================= 工作台首页 =================
+async function loadWorkspace(){
+  const el=$('view-workspace');
+  const [ov,as,lb,sch]=await Promise.all([
+    jget('/api/overview'),jget('/api/assistants'),jget('/api/library'),jget('/api/schedule')]);
+  const c=ov.counts||{};
+  const user=SESSION?SESSION.user:'operator';
+  const roleName=SESSION?((window.__ROLES__||[]).find(r=>r.id===SESSION.role)||{name:SESSION.role}):{name:'访客'};
+  el.innerHTML='<div class="ws-hero">'+
+    '<h2>你好，'+esc(user)+' <span class="pill">'+esc(roleName.name)+'</span></h2>'+
+    '<p>本地多 AI 协作的可审计控制台 —— 每个动作留痕、成本可归因、高危需审批、密钥零泄露。</p>'+
+    '<div class="quick-grid">'+
+      '<button class="quick" onclick="go(\'newtask\')"><span class="qi">➕</span>新建任务<span class="qd">登记带依赖的任务，自动记录轨迹</span></button>'+
+      '<button class="quick" onclick="go(\'chat\')"><span class="qi">💬</span>问助理<span class="qd">规则引擎优先，LLM 兜底</span></button>'+
+      '<button class="quick" onclick="go(\'roster\')"><span class="qi">👥</span>审计名单<span class="qd">'+((as.counts||{}).on_duty||0)+' 个岗位在岗</span></button>'+
+      '<button class="quick" onclick="go(\'assistants\')"><span class="qi">🧩</span>助理<span class="qd">'+((as.counts||{}).total||0)+' 个可用助理</span></button>'+
+      '<button class="quick" onclick="go(\'schedule\')"><span class="qi">⏰</span>定时任务<span class="qd">'+((sch.jobs||[]).length)+' 条调度规则</span></button>'+
+      '<button class="quick" onclick="go(\'library\')"><span class="qi">📁</span>资料库<span class="qd">'+((lb.counts||{}).documents||0)+' 份产物 · '+((lb.counts||{}).assets||0)+' 个素材</span></button>'+
+    '</div></div>'+
+    '<div class="grid stats">'+
+      stat(c.tasks_total,'任务总数')+stat(c.running,'运行中','accent')+stat(c.pending,'待审批','warn')+
+      stat(c.traces,'审计轨迹')+stat('¥'+(ov.cost_total||0).toFixed(2),'累计成本')+stat(ov.security_score+'/100','安全评分','ok')+
+    '</div>'+
+    '<div class="split" style="margin-top:16px">'+
+      '<div class="panel"><h3>最近任务</h3><div id="wsRecent"><div class="empty">加载中…</div></div></div>'+
+      '<div class="panel"><h3>系统状态</h3>'+
+        '<div class="check"><div class="dot">✓</div><div><div class="t">沙箱隔离：'+esc(ov.sandbox_backend||'-')+'（'+esc(ov.sandbox_containment||'-')+'）</div><div class="d">'+esc(ov.sandbox_note||'')+'</div></div></div>'+
+        '<div class="check"><div class="dot">✓</div><div><div class="t">源码硬编码密钥自扫：0 真实泄露</div><div class="d">'+((ov.counts&&ov.counts.self_scan_hits)||0)+' 条命中均为金标准假密钥语料，已排除。</div></div></div>'+
+        '<div class="check"><div class="dot">✓</div><div><div class="t">审批默认拒绝</div><div class="d">高危动作未获批准即不执行。</div></div></div>'+
+      '</div></div>';
+  // 最近任务
+  try{
+    const ts=await jget('/api/tasks?limit=6');
+    $('wsRecent').innerHTML=ts.length?ts.map(t=>'<div class="litem"><div class="grow"><div class="nm">'+esc((t.payload&&t.payload.title)||t.task_id)+'</div>'+
+      '<div class="mt">'+esc(t.task_id)+' · '+esc((t.payload&&t.payload.role)||'-')+' · '+fmt(t.created_at)+'</div></div>'+
+      badge(t.status)+'</div>').join(''):'<div class="empty">暂无任务</div>';
+  }catch(e){$('wsRecent').innerHTML='<div class="empty">加载失败</div>';}
+}
+
+// ================= 新建任务 =================
+async function loadNewTask(){
+  const el=$('view-newtask');
+  const roles=window.__ROLES__||[];
+  if(!el.dataset.init){
+    el.dataset.init='1';
+    el.innerHTML='<h2 class="vh">新建任务</h2><p class="vdesc">登记一个可调度的任务；依赖会进入 DAG 调度，创建动作会记入审计轨迹。</p>'+
+      '<div class="split"><div class="panel"><h3>任务定义</h3>'+
+        '<div class="fld"><label>任务标题 *</label><input id="ntTitle" placeholder="例如：生成双十一主图素材" maxlength="120"></div>'+
+        '<div class="fld"><label>岗位角色 *</label><select id="ntRole">'+roles.map(r=>'<option value="'+r.id+'">'+esc(r.name)+' — '+esc(r.desc)+'</option>').join('')+'</select></div>'+
+        '<div class="fld"><label>模板</label><input id="ntTemplate" placeholder="例如：promo-material（可留空）"></div>'+
+        '<div class="fld"><label>优先级</label><select id="ntPriority"><option value="normal">普通</option><option value="high">高</option><option value="low">低</option></select></div>'+
+        '<div class="fld"><label>依赖任务（逗号分隔的 task_id）</label><input id="ntDeps" placeholder="留空表示无依赖"><div class="hint">依赖会写入 DAG；不存在的任务会被拒绝。</div></div>'+
+        '<div class="fld"><label>备注</label><textarea id="ntNote" placeholder="补充说明"></textarea></div>'+
+        '<button class="btn" id="ntSubmit">创建任务</button>'+
+        '<div class="form-err" id="ntErr"></div><div class="form-ok" id="ntOk"></div>'+
+      '</div>'+
+      '<div class="panel"><h3>可依赖的已有任务</h3><div id="ntCandidates"><div class="empty">加载中…</div></div>'+
+        '<div class="panel" style="margin-top:16px"><h3>写操作边界</h3>'+
+        '<div class="check"><div class="dot">✓</div><div><div class="t">只写 tasks 表 + trace 事件</div><div class="d">不碰审批、成本、素材等其他表。</div></div></div>'+
+        '<div class="check"><div class="dot">✓</div><div><div class="t">创建人写入轨迹</div><div class="d">谁在何时建了什么，可审计。</div></div></div>'+
+      '</div></div>';
+    $('ntSubmit').addEventListener('click',submitNewTask);
+  }
+  // 候选依赖任务
+  try{
+    const ts=await jget('/api/tasks?limit=40');
+    $('ntCandidates').innerHTML=ts.length?ts.map(t=>'<div class="litem"><div class="grow"><div class="nm">'+esc((t.payload&&t.payload.title)||t.task_id)+'</div>'+
+      '<div class="mt">'+esc(t.task_id)+' · '+esc((t.payload&&t.payload.role)||'-')+'</div></div>'+
+      '<div class="ops"><button class="btn ghost" onclick="addDep(\''+esc(t.task_id)+'\')">选为依赖</button></div></div>').join('')
+      :'<div class="empty">暂无已有任务</div>';
+  }catch(e){$('ntCandidates').innerHTML='<div class="empty">加载失败</div>';}
+}
+function addDep(tid){
+  const i=$('ntDeps');const cur=i.value.split(/[,，\\s]+/).filter(Boolean);
+  if(cur.indexOf(tid)<0)cur.push(tid);
+  i.value=cur.join(',');
+}
+async function submitNewTask(){
+  $('ntErr').textContent='';$('ntOk').textContent='';
+  const deps=$('ntDeps').value.split(/[,，\s]+/).filter(Boolean);
+  const body={title:$('ntTitle').value,role:$('ntRole').value,template:$('ntTemplate').value,
+    priority:$('ntPriority').value,note:$('ntNote').value,depends_on:deps,
+    operator:SESSION?SESSION.user:'operator'};
+  try{
+    const r=await fetch('/api/tasks/new',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)});
+    const d=await r.json();
+    if(!r.ok||!d.ok){$('ntErr').textContent=d.error||'创建失败';return;}
+    $('ntOk').textContent='已创建任务 '+d.task_id+(d.trace_id?('（轨迹 '+d.trace_id+'）'):'');
+    $('ntTitle').value='';$('ntDeps').value='';$('ntNote').value='';
+    setTimeout(()=>loadNewTask(),600);
+  }catch(e){$('ntErr').textContent='请求失败：'+e;}
+}
+
+// ================= 审计名单 =================
+async function loadRoster(){
+  const el=$('view-roster');
+  const d=await jget('/api/roster');
+  const cnt=d.counts||{};
+  el.innerHTML='<h2 class="vh">审计名单</h2><p class="vdesc">'+esc(d.note||'')+'</p>'+
+    '<div class="grid stats">'+stat(cnt.roles||0,'岗位')+stat(cnt.on_duty||0,'在岗','accent')+stat(cnt.standby||0,'待命')+stat((d.models||[]).length,'可用模型')+'</div>'+
+    '<div class="panel"><h3>花名册</h3>'+
+      (d.entries||[]).map(e=>'<div class="litem"><div class="avatar" style="background:'+avatarColor(e.id)+'">'+esc(e.name.slice(0,1))+'</div>'+
+        '<div class="grow"><div class="nm">'+esc(e.name)+' <span class="tag">'+esc(e.id)+'</span> '+
+          (e.on_duty?'<span class="pill live">在岗</span>':'<span class="pill">待命</span>')+'</div>'+
+        '<div class="mt">'+esc(e.desc)+' · 模型 '+esc(e.model)+'</div>'+
+        '<div class="mt">技能：'+(e.skills_installed.length?e.skills_installed.map(esc).join('、'):'<span style="color:var(--sub)">未安装</span>')+'</div>'+
+        (e.on_duty_users.length?('<div class="mt">在岗人员：'+e.on_duty_users.map(esc).join('、')+'</div>'):'')+
+        '</div>'+
+        '<div class="ops"><button class="btn ghost" onclick="rosterTask(\''+esc(e.id)+'\',\''+esc(e.name)+'\')">派任务</button></div></div>').join('')+
+    '</div>'+
+    '<div class="panel"><h3>模型</h3><div class="row">'+(d.models||[]).map(m=>'<span class="pill">'+esc(m)+'</span>').join('')+'</div></div>';
+}
+function avatarColor(id){const cs=['#3b6cff','#16b8a6','#f59e0b','#ef4444','#8b5cf6','#ec4899'];
+  let h=0;for(const ch of String(id))h=(h*31+ch.charCodeAt(0))>>>0;return cs[h%cs.length];}
+function rosterTask(roleId,roleName){
+  $('ntRole').value=roleId;
+  const d=document.getElementById('view-newtask');d.dataset.init='';delete d.dataset.init;
+  go('newtask');
+  setTimeout(()=>{const t=$('ntTitle');if(t)t.placeholder='指派给 '+roleName+' 的任务：';},200);
+}
+
+// ================= 助理 =================
+async function loadAssistants(){
+  const el=$('view-assistants');
+  const d=await jget('/api/assistants');
+  const c=d.counts||{};
+  el.innerHTML='<h2 class="vh">助理</h2><p class="vdesc">'+esc(d.note||'')+'</p>'+
+    '<div class="grid stats">'+stat(c.total||0,'助理总数','accent')+stat(c.experts||0,'内置专家')+stat(c.skills||0,'已装技能')+'</div>'+
+    '<div class="panel"><h3>内置专家</h3>'+
+      (d.assistants||[]).filter(a=>a.kind==='内置专家').map(a=>'<div class="litem"><div class="avatar" style="background:'+avatarColor(a.id)+'">'+esc(a.name.slice(0,1))+'</div>'+
+        '<div class="grow"><div class="nm">'+esc(a.name)+' '+(a.installed?'<span class="pill live">就绪</span>':'<span class="pill">缺技能</span>')+'</div>'+
+        '<div class="mt">'+esc(a.desc)+'</div>'+
+        '<div class="mt">依赖技能：'+(a.skills.length?a.skills.map(esc).join('、'):'无')+'</div></div>'+
+        '<div class="ops"><button class="btn ghost" onclick="go(\'chat\')">对话</button></div></div>').join('')+
+    '</div>'+
+    '<div class="panel"><h3>技能型助理 <span class="tag" style="margin-left:6px">来自真实已装技能</span></h3>'+
+      '<div class="grid card-grid">'+(d.assistants||[]).filter(a=>a.kind!=='内置专家').map(a=>'<div class="acard">'+
+        '<div class="ah"><div class="avatar" style="width:24px;height:24px;font-size:11px;background:'+avatarColor(a.id)+'">'+esc(a.name.slice(0,1))+'</div>'+
+        '<div class="an">'+esc(a.name)+'</div></div>'+
+        '<div class="ak">'+esc(a.kind)+'</div>'+
+        '<div class="ad">'+esc(a.desc||'（无描述）')+'</div></div>').join('')+'</div>'+
+    '</div>';
+}
+
+// ================= 技能连接器 =================
+async function loadConnectors(){
+  const el=$('view-connectors');
+  const d=await jget('/api/connectors');
+  el.innerHTML='<h2 class="vh">技能连接器</h2><p class="vdesc">'+esc(d.note||'')+'</p>'+
+    '<div class="grid stats">'+
+      stat(d.skillhub&&d.skillhub.available?'可用':'不可用','SkillHub',(d.skillhub&&d.skillhub.available)?'ok':'warn')+
+      stat((d.local_connectors||[]).length,'本地连接器')+stat('~/.workbuddy/skills','安装目标')+
+    '</div>'+
+    '<div class="panel"><h3>SkillHub 连接</h3>'+
+      '<div class="check"><div class="dot" style="background:'+(d.skillhub&&d.skillhub.available?'var(--ok)':'var(--warn)')+'">'+(d.skillhub&&d.skillhub.available?'✓':'!')+'</div>'+
+        '<div><div class="t">官方 CLI：'+esc((d.skillhub&&d.skillhub.note)||'未知')+'</div>'+
+        '<div class="d">路径：'+esc((d.skillhub&&d.skillhub.cli)||'未找到')+'</div></div></div>'+
+      '<div class="fld" style="margin-top:14px"><label>搜索社区技能</label>'+
+        '<div class="row"><input id="connQ" placeholder="关键词，如：周报 / 安全测试 / 数据分析" style="flex:1">'+
+        '<button class="btn" onclick="connSearch()">搜索</button></div></div>'+
+      '<div id="connResults"></div>'+
+    '</div>'+
+    '<div class="panel"><h3>本地连接器</h3>'+
+      ((d.local_connectors||[]).length?d.local_connectors.map(c=>'<div class="litem"><div class="grow"><div class="nm">'+esc(c.name)+'</div>'+
+        '<div class="mt">'+esc(c.desc||'')+'</div></div><span class="pill live">已内置</span></div>').join('')
+        :'<div class="empty">未检测到本地连接器</div>')+
+    '</div>';
+}
+async function connSearch(){
+  const q=$('connQ').value.trim();
+  const box=$('connResults');
+  if(!q){box.innerHTML='<div class="empty">输入关键词后搜索</div>';return;}
+  box.innerHTML='<div class="empty">搜索中…</div>';
+  try{
+    const r=await jget('/api/connectors/skillhub/search?q='+encodeURIComponent(q));
+    if(!r.ok){box.innerHTML='<div class="warnbar">'+esc(r.error||'搜索失败')+'</div>';return;}
+    if(!r.results.length){box.innerHTML='<div class="empty">没有匹配 “'+esc(q)+'” 的技能</div>';return;}
+    box.innerHTML=r.results.map(s=>'<div class="litem"><div class="grow"><div class="nm">'+esc(s.name)+' <span class="tag">'+esc(s.slug)+'</span></div>'+
+      '<div class="mt">'+esc(s.desc||'')+(s.author?(' · '+esc(s.author)):'')+'</div></div>'+
+      '<div class="ops"><button class="btn" onclick="connInstall(\''+esc(s.slug)+'\')">安装</button></div></div>').join('');
+  }catch(e){box.innerHTML='<div class="warnbar">搜索失败：'+esc(String(e))+'</div>';}
+}
+async function connInstall(slug){
+  if(!confirm('把技能 '+slug+' 安装到 WorkBuddy 用户级技能目录？'))return;
+  const box=$('connResults');
+  box.insertAdjacentHTML('afterbegin','<div class="warnbar" id="connInstalling">正在安装 '+esc(slug)+'…</div>');
+  try{
+    const r=await fetch('/api/connectors/skillhub/install',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({slug:slug})});
+    const d=await r.json();
+    const n=document.getElementById('connInstalling');
+    if(n)n.remove();
+    if(d.ok)box.insertAdjacentHTML('afterbegin','<div class="warnbar" style="background:#e8f5e9;color:#2e7d32;border-color:#c8e6c9">安装成功：'+esc(slug)+'。'+esc(d.note||'')+'</div>');
+    else box.insertAdjacentHTML('afterbegin','<div class="warnbar">安装失败：'+esc(d.error||'未知错误')+'</div>');
+  }catch(e){
+    const n=document.getElementById('connInstalling');if(n)n.remove();
+    box.insertAdjacentHTML('afterbegin','<div class="warnbar">安装请求失败：'+esc(String(e))+'</div>');
+  }
+}
+
+// ================= 定时任务 =================
+async function loadSchedule(){
+  const el=$('view-schedule');
+  const d=await jget('/api/schedule');
+  const jobs=d.jobs||[];
+  el.innerHTML='<h2 class="vh">定时任务</h2><p class="vdesc">'+esc(d.note||'')+'</p>'+
+    '<div class="grid stats">'+stat(jobs.length,'调度规则','accent')+stat(jobs.filter(j=>j.enabled).length,'已启用','ok')+stat(jobs.filter(j=>!j.enabled).length,'已停用')+'</div>'+
+    '<div class="panel"><h3>新增调度</h3>'+
+      '<div class="fld"><label>规则名称</label><input id="scName" placeholder="例如：每日密钥自扫"></div>'+
+      '<div class="fld"><label>job_id（唯一）</label><input id="scId" placeholder="例如：daily_self_scan"></div>'+
+      '<div class="fld"><label>cron 表达式 *</label><input id="scCron" placeholder="0 3 * * *（分 时 日 月 周）"><div class="hint">'+esc((d.templates&&d.templates.cron_help)||'')+'</div></div>'+
+      '<div class="fld"><label>预置模板</label><div class="row">'+
+        ((d.templates&&d.templates.presets)||[]).map(p=>'<button class="btn ghost" onclick="applyPreset(\''+esc(p.id)+'\',\''+esc(p.name)+'\',\''+esc(p.cron)+'\')">'+esc(p.name)+'</button>').join('')+
+      '</div></div>'+
+      '<button class="btn" onclick="scAdd()">添加</button><div class="form-err" id="scErr"></div><div class="form-ok" id="scOk"></div>'+
+    '</div>'+
+    '<div class="panel"><h3>已注册规则</h3>'+
+      (jobs.length?jobs.map(j=>'<div class="litem"><div class="grow"><div class="nm">'+esc(j.name||j.job_id)+' '+(j.enabled?'<span class="pill live">启用</span>':'<span class="pill">停用</span>')+'</div>'+
+        '<div class="mt">'+esc(j.job_id)+' · '+esc(j.kind)+' '+esc(j.spec)+' · 下次 '+fmt(j.next_run)+' · 上次 '+fmt(j.last_run)+'</div></div>'+
+        '<div class="ops"><button class="btn ghost" onclick="scToggle(\''+esc(j.job_id)+'\')">'+(j.enabled?'停用':'启用')+'</button>'+
+        '<button class="btn ghost" onclick="scRemove(\''+esc(j.job_id)+'\')">删除</button></div></div>').join('')
+        :'<div class="empty">暂无调度规则</div>')+
+    '</div>';
+}
+function applyPreset(id,name,cron){$('scId').value=id;$('scName').value=name;$('scCron').value=cron;}
+async function scAdd(){
+  $('scErr').textContent='';$('scOk').textContent='';
+  try{
+    const r=await fetch('/api/schedule',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({job_id:$('scId').value.trim(),name:$('scName').value.trim(),cron:$('scCron').value.trim()})});
+    const d=await r.json();
+    if(!d.ok){$('scErr').textContent=d.error||'添加失败';return;}
+    $('scOk').textContent='已添加 '+d.job.job_id;
+    loadSchedule();
+  }catch(e){$('scErr').textContent='请求失败：'+e;}
+}
+async function scToggle(jobId){
+  await fetch('/api/schedule/toggle',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({job_id:jobId})});
+  loadSchedule();
+}
+async function scRemove(jobId){
+  if(!confirm('删除调度规则 '+jobId+'？'))return;
+  await fetch('/api/schedule/remove',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({job_id:jobId})});
+  loadSchedule();
+}
+
+// ================= 资料库 =================
+async function loadLibrary(){
+  const el=$('view-library');
+  const d=await jget('/api/library');
+  const c=d.counts||{};
+  el.innerHTML='<h2 class="vh">资料库</h2><p class="vdesc">'+esc(d.note||'')+'</p>'+
+    '<div class="grid stats">'+stat(c.documents||0,'产物文档','accent')+stat(c.assets||0,'素材资产')+stat((d.assets&&d.assets.total_bytes)||0,'素材字节')+'</div>'+
+    '<div class="panel"><h3>产物与文档 <span class="tag" style="margin-left:6px">最近 '+(d.entries||[]).length+' 项</span></h3>'+
+      ((d.entries||[]).length?d.entries.map(e=>'<div class="litem"><div class="grow"><div class="nm">'+esc(e.name)+' <span class="tag">'+esc(e.kind)+'</span></div>'+
+        '<div class="mt">'+esc(e.path)+' · '+Math.round(e.size/1024)+' KB · '+fmt(e.mtime)+'</div></div>'+
+        '<div class="ops"><span class="pill">'+esc(e.ext)+'</span></div></div>').join('')
+        :'<div class="empty">资料库为空</div>')+
+    '</div>'+
+    '<div class="panel"><h3>素材资产（内容寻址 + 版本链）</h3>'+
+      ((d.asset_items||[]).length?d.asset_items.map(a=>'<div class="litem"><div class="grow"><div class="nm">'+esc(a.name||a.asset_id)+'</div>'+
+        '<div class="mt">'+esc(a.asset_id||'')+' · '+esc(a.kind||'-')+' · '+(a.size||0)+' B'+(a.task_id?(' · 任务 '+esc(a.task_id)):'')+'</div></div></div>').join('')
+        :'<div class="empty">暂无素材资产'+(d.assets&&d.assets.error?('（'+esc(d.assets.error)+'）'):'')+'</div>')+
+    '</div>';
+}
 
 // ---------------- 概览 ----------------
 async function loadOverview(){
@@ -821,7 +1275,12 @@ $('globalSearch').addEventListener('keydown',e=>{
 });
 
 // 启动
-route();
+initLogin();
+(async()=>{
+  const ok=await restoreSession();
+  if(!ok){go('workspace');}
+  else{route();}
+})();
 </script>
 </body>
 </html>"""
@@ -837,6 +1296,10 @@ class Handler(BaseHTTPRequestHandler):
     cost = None
     demo_mode = False
     skills_dir = None
+    sessions = None
+    scheduler = None
+    project_root = None
+    _chat = None
 
     def _json(self, obj, code=200):
         data = json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8")
@@ -871,7 +1334,7 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
 
         if path == "/" or path == "/index.html":
-            self._html(APP_HTML)
+            self._html(getattr(Handler, "app_html", None) or APP_HTML)
             return
         if path == "/api/overview":
             return self._json(self._overview())
@@ -921,6 +1384,35 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(self._skills())
         if path == "/api/chat/status":
             return self._json(self._chat_service().status())
+        # ---- 工作台新增 ----
+        if path == "/api/roles":
+            return self._json({"roles": console_api.ROLES})
+        if path == "/api/session":
+            tok = self.headers.get("X-Session-Token", "")
+            sess = self.sessions.verify(tok) if self.sessions else None
+            if not sess:
+                return self._json({"ok": False, "error": "会话无效或已过期"}, 401)
+            return self._json({"ok": True, "session": sess})
+        if path == "/api/roster":
+            return self._json(self._roster())
+        if path == "/api/assistants":
+            return self._json(self._assistants())
+        if path == "/api/connectors":
+            return self._json(console_api.connector_status(self.skills_dir))
+        if path == "/api/connectors/skillhub/search":
+            q = qs.get("q", [""])[0]
+            return self._json(console_api._skillhub_search(q))
+        if path == "/api/schedule":
+            jobs = []
+            try:
+                jobs = self.scheduler.list_jobs() if self.scheduler else []
+            except Exception as e:  # noqa: BLE001
+                return self._json({"error": str(e)}, 500)
+            return self._json({"jobs": jobs,
+                               "templates": console_api.job_payload_template(),
+                               "note": "调度规则落 SQLite（scheduler.py），到点由调度器触发。"})
+        if path == "/api/library":
+            return self._json(console_api.library_index(self.project_root))
         if path == "/api/seed":
             if not self.demo_mode:
                 return self._json({"error": "seed only in demo mode"}, 403)
@@ -1098,22 +1590,121 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
-        if path != "/api/chat":
-            return self._json({"error": "not found", "path": path}, 404)
         try:
             n = int(self.headers.get("Content-Length") or 0)
             payload = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
         except (ValueError, OSError):
             return self._json({"error": "bad request"}, 400)
-        question = str(payload.get("question") or "")
-        history = payload.get("history") or []
-        if not isinstance(history, list):
-            history = []
+
+        if path == "/api/chat":
+            question = str(payload.get("question") or "")
+            history = payload.get("history") or []
+            if not isinstance(history, list):
+                history = []
+            try:
+                result = self._chat_service().ask(question, history)
+            except Exception as e:  # noqa: BLE001
+                return self._json({"error": str(e), "engine": "unavailable"}, 500)
+            return self._json(result)
+
+        # ---- 登录 / 会话 ----
+        if path == "/api/login":
+            try:
+                res = self.sessions.login(str(payload.get("user") or ""),
+                                          str(payload.get("role") or "auditor"))
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
+            return self._json(res)
+        if path == "/api/logout":
+            ok = self.sessions.logout(str(payload.get("token") or ""))
+            return self._json({"ok": ok})
+
+        # ---- 新建任务（写操作）----
+        if path == "/api/tasks/new":
+            operator = str(payload.get("operator") or "operator")
+            tok = self.headers.get("X-Session-Token", "")
+            sess = self.sessions.verify(tok) if self.sessions else None
+            if sess:
+                operator = sess["user"]
+            deps = payload.get("depends_on") or []
+            if not isinstance(deps, list):
+                deps = []
+            res = console_api.create_task(
+                self.registry, self.trace,
+                str(payload.get("title") or ""), str(payload.get("role") or ""),
+                depends_on=deps, template=str(payload.get("template") or ""),
+                priority=str(payload.get("priority") or "normal"),
+                note=str(payload.get("note") or ""), operator=operator)
+            return self._json(res, 200 if res.get("ok") else 400)
+
+        # ---- SkillHub 安装 ----
+        if path == "/api/connectors/skillhub/install":
+            slug = str(payload.get("slug") or "").strip()
+            if not slug:
+                return self._json({"ok": False, "error": "缺少 slug"}, 400)
+            res = console_api._skillhub_install(slug, self.skills_dir)
+            return self._json(res)
+
+        # ---- 定时任务增删 ----
+        if path == "/api/schedule":
+            job_id = str(payload.get("job_id") or "").strip()
+            name = str(payload.get("name") or "").strip() or job_id
+            cron = str(payload.get("cron") or "").strip() or None
+            interval = payload.get("interval")
+            interval = float(interval) if interval else None
+            if not job_id:
+                return self._json({"ok": False, "error": "缺少 job_id"}, 400)
+            res = console_api.add_job(self.scheduler, job_id, name, cron, interval,
+                                      payload.get("payload"))
+            return self._json(res, 200 if res.get("ok") else 400)
+        if path == "/api/schedule/toggle":
+            job_id = str(payload.get("job_id") or "").strip()
+            enable = bool(payload.get("enabled", True))
+            try:
+                ok = self.scheduler.set_enabled(job_id, enable)
+            except Exception as e:  # noqa: BLE001
+                return self._json({"ok": False, "error": str(e)}, 500)
+            return self._json({"ok": bool(ok)})
+        if path == "/api/schedule/remove":
+            job_id = str(payload.get("job_id") or "").strip()
+            try:
+                ok = self.scheduler.remove_job(job_id)
+            except Exception as e:  # noqa: BLE001
+                return self._json({"ok": False, "error": str(e)}, 500)
+            return self._json({"ok": bool(ok)})
+
+        return self._json({"error": "not found", "path": path}, 404)
+
+    # ---- 工作台数据聚合 ----
+    def _roster(self):
+        skills = self._skills()
+        sessions = self.sessions.list_users() if self.sessions else []
+        models = []
         try:
-            result = self._chat_service().ask(question, history)
-        except Exception as e:  # noqa: BLE001
-            return self._json({"error": str(e), "engine": "unavailable"}, 500)
-        return self._json(result)
+            from config import load_config
+            cfg = load_config()
+            models = [cfg.model.default_model]
+            if cfg.model.openai_api_key:
+                models.append("openai/*")
+            if cfg.model.anthropic_api_key:
+                models.append("anthropic/*")
+            if cfg.model.ollama_base_url:
+                models.append("ollama/*")
+        except Exception:  # noqa: BLE001
+            models = ["mock"]
+        return console_api.audit_roster(console_api.ROLES, sessions, skills, models)
+
+    def _assistants(self):
+        skills = self._skills()
+        library_skills = []
+        try:
+            from agentskills.loader import SkillLibrary
+            lib = SkillLibrary()
+            lib.refresh()
+            library_skills = lib.list()
+        except Exception:  # noqa: BLE001
+            library_skills = []
+        return console_api.assistants(skills, library_skills)
 
 
 def main():
@@ -1125,6 +1716,8 @@ def main():
     ap.add_argument("--cost-db", default="data/cost.db")
     ap.add_argument("--skills-dir",
                     default=os.path.expanduser("~/.workbuddy/skills"))
+    ap.add_argument("--schedule-db", default="",
+                    help="调度规则库路径（默认与登记处同目录的 console_schedule.db）")
     ap.add_argument("--seed", action="store_true",
                     help="生成并读取隔离演示数据（console_demo_*.db）")
     ap.add_argument("--seed-path", default="data",
@@ -1146,9 +1739,27 @@ def main():
     Handler.approval = ApprovalCenter(args.db_path, tracer=Handler.trace)
     Handler.cost = CostStore(args.cost_db)
     Handler.skills_dir = args.skills_dir
+    Handler.project_root = os.path.dirname(os.path.abspath(__file__))
+    Handler.sessions = console_api.SessionStore()
+    # 调度器用**独立**调度库（避免与登记处同库时的表/锁竞争），
+    # 但共享同一个 TaskRegistry 实例——到点登记的任务会出现在任务中心。
+    try:
+        sched_db = args.schedule_db or os.path.join(
+            os.path.dirname(os.path.abspath(args.db_path)), "console_schedule.db")
+        Handler.scheduler = Scheduler(db_path=sched_db, registry=Handler.registry)
+    except Exception as e:  # noqa: BLE001
+        print("[警告] 调度器初始化失败（定时任务面板将显示为空）：%s" % e)
+        Handler.scheduler = None
+
+    # 注入前端需要的角色表（登录下拉 + 审计名单共用）
+    Handler.app_html = APP_HTML.replace(
+        "<script>",
+        "<script>window.__ROLES__=%s;"
+        % json.dumps(console_api.ROLES, ensure_ascii=False), 1)
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print("协作审计台已启动： http://%s:%d/  （Ctrl+C 退出）" % (args.host, args.port))
+    print("  · 首次进入需登录（本地演示级身份，无密码校验）")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1159,6 +1770,11 @@ def main():
         Handler.trace.close()
         Handler.cost.close()
         Handler.approval.close()
+        if Handler.scheduler:
+            try:
+                Handler.scheduler.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 if __name__ == "__main__":
