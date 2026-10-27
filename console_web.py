@@ -38,6 +38,7 @@ from scheduler import Scheduler
 from task_center_web import dag_view
 import console_api
 import console_actions
+from model_profiles import ModelProfileStore
 
 
 # --------------------------------------------------------------------------
@@ -299,6 +300,19 @@ APP_HTML = """<!doctype html>
   .chat .in input:focus{outline:none;border-color:var(--accent);
     box-shadow:0 0 0 3px rgba(59,108,255,.12)}
   .chat .in button:hover{opacity:.9}
+  /* ---- 对话：模型选择器 + 配置弹窗 ---- */
+  .msel{display:inline-flex;align-items:center;gap:5px}
+  .msel select{font-size:12px;padding:4px 8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--txt)}
+  #chatModelCfg{padding:5px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--txt);cursor:pointer;font-size:12px}
+  #chatModelCfg:hover{border-color:var(--accent);color:var(--accent)}
+  .model-cfg{margin:0 0 10px;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--panel);display:flex;flex-direction:column;gap:9px}
+  .model-cfg.hidden{display:none}
+  .cfg-row{display:flex;align-items:center;gap:10px}
+  .cfg-row label{width:64px;color:var(--sub);font-size:12px;flex:none}
+  .cfg-row input,.cfg-row select{flex:1;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--txt);font-size:13px}
+  .cfg-actions{margin-top:2px}
+  .cfg-actions button{padding:6px 16px;border:none;border-radius:8px;cursor:pointer;background:var(--accent);color:#fff;font-size:13px}
+  .cfg-actions .ghost{background:var(--line);color:var(--txt)}
   /* ---- 特色面板：明细块 ---- */
   .kv{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px}
   .kv .item{background:var(--bg);border:1px solid var(--line);border-radius:9px;padding:10px 12px}
@@ -1014,7 +1028,23 @@ async function loadChat(){
   el.dataset.init='1';
   el.innerHTML='<h2 class="vh">对话</h2><p class="vdesc">问审计台：任务在跑什么、审批过没过、成本花了多少、代码有没有泄露。答案会标注引擎来源。</p>'+
    '<div class="chat"><div class="msgs" id="chatMsgs"></div>'+
-   '<div class="chat-engine" id="chatEngine"></div>'+
+   '<div class="chat-engine" id="chatEngine">'+
+     '<label class="msel">模型 <select id="chatModel"></select></label>'+
+     '<button id="chatModelCfg" type="button">⚙ 配置模型</button>'+
+     '<span id="chatModelHint" class="ctip"></span>'+
+   '</div>'+
+   '<div id="modelCfg" class="model-cfg hidden">'+
+     '<div class="cfg-row"><label>名称</label><input id="cfgName" placeholder="例如：我的 DeepSeek"></div>'+
+     '<div class="cfg-row"><label>类型</label><select id="cfgProvider">'+
+       '<option value="ollama">本地 Ollama（无需密钥）</option>'+
+       '<option value="openai">OpenAI 兼容（DeepSeek / Qwen / GLM / Moonshot…）</option>'+
+       '<option value="anthropic">Anthropic（Claude）</option>'+
+     '</select></div>'+
+     '<div class="cfg-row"><label>Base URL</label><input id="cfgBase" placeholder="https://… 或 http://127.0.0.1:11434"></div>'+
+     '<div class="cfg-row"><label>API Key</label><input id="cfgKey" type="password" placeholder="留空则保留已保存的"></div>'+
+     '<div class="cfg-row"><label>模型名</label><input id="cfgModel" placeholder="如 llama3 / gpt-4o-mini / claude-3-5-sonnet-latest"></div>'+
+     '<div class="cfg-row cfg-actions"><button id="cfgSave" type="button">保存</button><button id="cfgCancel" type="button" class="ghost">取消</button><span id="cfgMsg" class="ctip"></span></div>'+
+   '</div>'+
    '<div class="chips">'+
      '<button data-q="今天有哪些任务在跑">今天哪些任务在跑？</button>'+
      '<button data-q="双十一素材发布审批通过了吗">素材发布审批通过了吗？</button>'+
@@ -1032,7 +1062,7 @@ async function loadChat(){
   }
   add('bot','你好，我是 SecTrust 协作审计台。\\n'+
     '· 审计类问题走<b>确定性规则引擎</b>：零幻觉、零外部依赖、直接读当前审计态；\\n'+
-    '· 规则没命中时兜底调 <b>LLM</b>（本地 Ollama 优先），并把审计态作为事实喂给它；\\n'+
+    '· 规则没命中时兜底调 <b>LLM</b>（你在对话框顶部选择的算力模型），并把审计态作为事实喂给它；\\n'+
     '· LLM 不可用时我会直说，绝不伪造模型回答。\\n试试下面的快捷问题 👇');
   async function send(q){
     if(!q||!q.trim())return;
@@ -1041,7 +1071,8 @@ async function loadChat(){
     const holder=add('bot','<span class="typing">思考中…</span>','');
     try{
       const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({question:q.trim(),history:chatHistory.slice(-6)})});
+        body:JSON.stringify({question:q.trim(),history:chatHistory.slice(-6),
+          model:(document.getElementById('chatModel')?document.getElementById('chatModel').value:'')})});
       const d=await r.json();
       holder.querySelector('.mtext').innerHTML=String(d.answer||d.error||'无响应').replace(/\\n/g,'<br>');
       const meta=[];
@@ -1063,20 +1094,71 @@ async function loadChat(){
   $('chatInput').addEventListener('keydown',e=>{
     if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();const i=e.target;const v=i.value;i.value='';send(v);}
   });
+  $('chatModelCfg').addEventListener('click',openCfg);
+  $('cfgSave').addEventListener('click',saveModel);
+  $('cfgCancel').addEventListener('click',cancelCfg);
   refreshChatStatus();
 }
 async function refreshChatStatus(){
   const el=$('chatEngine');if(!el)return;
   try{
-    const s=await jget('/api/chat/status');
-    const parts=[];
-    parts.push('<span class="pill live">规则引擎</span>');
-    if(s.ollama) parts.push('<span class="pill live">Ollama 可用'+(s.ollama_models&&s.ollama_models.length?('（'+s.ollama_models.length+' 模型）'):'')+'</span>');
-    else parts.push('<span class="pill">Ollama 未启动</span>');
-    if(s.openai) parts.push('<span class="pill live">OpenAI 已配置</span>');
-    el.innerHTML=parts.join(' ')+'<span class="ctip">'+esc(s.note||'')+'</span>';
-  }catch(e){el.innerHTML='<span class="ctip">引擎状态未知</span>';}
+    const s=await jget('/api/chat/models');
+    window.__modelProfiles=s.profiles||[];
+    const sel=document.getElementById('chatModel');
+    if(sel){
+      sel.innerHTML=(s.profiles||[]).map(function(p){
+        const tag=p.configured?'':'（未配置）';
+        return '<option value="'+esc(p.id)+'"'+(p.id===s.active_id?' selected':'')+'>'+esc(p.name)+' · '+esc(p.provider)+'/'+(p.model||'默认')+tag+'</option>';
+      }).join('');
+    }
+    const hint=document.getElementById('chatModelHint');
+    if(hint){
+      const active=(s.profiles||[]).find(function(p){return p.id===s.active_id;});
+      hint.textContent=active?('当前：'+active.name+(active.configured?'':'（未配置，对话将不可用）')):'未选择模型';
+    }
+  }catch(e){const h=document.getElementById('chatModelHint');if(h)h.textContent='模型列表加载失败';}
 }
+let cfgEditId=null;
+function openCfg(){
+  const panel=document.getElementById('modelCfg');if(!panel)return;
+  const sel=document.getElementById('chatModel');
+  cfgEditId=sel?sel.value:'';
+  const all=window.__modelProfiles||[];
+  const p=all.find(function(x){return x.id===cfgEditId;});
+  if(p){
+    document.getElementById('cfgName').value=p.name||'';
+    document.getElementById('cfgProvider').value=p.provider||'ollama';
+    document.getElementById('cfgBase').value=p.base_url||'';
+    document.getElementById('cfgModel').value=p.model||'';
+    document.getElementById('cfgKey').value='';
+  }else{
+    document.getElementById('cfgName').value='';
+    document.getElementById('cfgProvider').value='ollama';
+    document.getElementById('cfgBase').value='';
+    document.getElementById('cfgModel').value='';
+    document.getElementById('cfgKey').value='';
+  }
+  panel.classList.remove('hidden');
+  const m=document.getElementById('cfgMsg');if(m)m.textContent=cfgEditId?'编辑已有模型；API Key 留空则保留原值':'新增模型';
+}
+async function saveModel(){
+  const msg=document.getElementById('cfgMsg');if(msg)msg.textContent='';
+  const keyVal=document.getElementById('cfgKey').value;
+  const body={
+    name:document.getElementById('cfgName').value,
+    provider:document.getElementById('cfgProvider').value,
+    base_url:document.getElementById('cfgBase').value,
+    api_key:(cfgEditId&&!keyVal)?'****':keyVal,
+    model:document.getElementById('cfgModel').value
+  };
+  if(cfgEditId) body.id=cfgEditId;
+  const r=await postJSON('/api/chat/models',body);
+  if(!r.status||r.status>=400){if(msg)msg.textContent='保存失败：'+((r.data&&r.data.error)||r.status);return;}
+  if(msg)msg.textContent='已保存：'+((r.data&&r.data.profile&&r.data.profile.name)||'');
+  document.getElementById('cfgKey').value='';
+  refreshChatStatus();
+}
+function cancelCfg(){const p=document.getElementById('modelCfg');if(p)p.classList.add('hidden');}
 
 // ---------------- 任务中心（复用只读 API） ----------------
 let tasksTab='tasks';
@@ -1370,6 +1452,7 @@ class Handler(BaseHTTPRequestHandler):
     sessions = None
     scheduler = None
     project_root = None
+    model_profiles = None
     _chat = None
 
     def _json(self, obj, code=200):
@@ -1455,6 +1538,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(self._skills())
         if path == "/api/chat/status":
             return self._json(self._chat_service().status())
+        if path == "/api/chat/models":
+            return self._json(self.model_profiles.list_public())
         # ---- 工作台新增 ----
         if path == "/api/roles":
             return self._json({"roles": console_api.ROLES})
@@ -1690,8 +1775,10 @@ class Handler(BaseHTTPRequestHandler):
     # ---- 对话后端 ----
     def _chat_service(self):
         if getattr(Handler, "_chat", None) is None:
-            from console_chat import ChatService
-            Handler._chat = ChatService(self._chat_context)
+            from console_chat import ChatService, LlmEngine
+            Handler._chat = ChatService(
+                self._chat_context,
+                llm=LlmEngine(self.model_profiles))
         return Handler._chat
 
     def _chat_context(self):
@@ -1718,11 +1805,37 @@ class Handler(BaseHTTPRequestHandler):
             history = payload.get("history") or []
             if not isinstance(history, list):
                 history = []
+            model = payload.get("model") or None
             try:
-                result = self._chat_service().ask(question, history)
+                result = self._chat_service().ask(question, history, model=model)
             except Exception as e:  # noqa: BLE001
                 return self._json({"error": str(e), "engine": "unavailable"}, 500)
             return self._json(result)
+
+        # ---- 模型配置（写操作：需 JWT 登录）----
+        if path.startswith("/api/chat/models"):
+            tok = self.headers.get("X-Session-Token", "")
+            sess = self.sessions.verify(tok) if self.sessions else None
+            if not sess:
+                return self._json({"error": "需要登录后才能配置模型"}, 401)
+            if path == "/api/chat/models":
+                try:
+                    prof = self.model_profiles.upsert(payload)
+                except ValueError as e:
+                    return self._json({"error": str(e)}, 400)
+                return self._json({"ok": True, "profile": prof})
+            if path == "/api/chat/models/activate":
+                pid = str(payload.get("id") or "")
+                try:
+                    prof = self.model_profiles.set_active(pid)
+                except KeyError:
+                    return self._json({"error": "profile 不存在: %s" % pid}, 404)
+                return self._json({"ok": True, "profile": prof})
+            if path == "/api/chat/models/delete":
+                pid = str(payload.get("id") or "")
+                ok = self.model_profiles.delete(pid)
+                return self._json({"ok": ok})
+            return self._json({"error": "未知模型管理操作"}, 404)
 
         # ---- 登录 / 会话 ----
         if path == "/api/login":
@@ -2003,6 +2116,8 @@ def main():
     Handler.skills_dir = args.skills_dir
     Handler.project_root = os.path.dirname(os.path.abspath(__file__))
     Handler.sessions = console_api.SessionStore()
+    # 模型配置（持久化到 data/model_profiles.json，已被 .gitignore 排除）
+    Handler.model_profiles = ModelProfileStore(data_dir="data")
     # 调度器用**独立**调度库（避免与登记处同库时的表/锁竞争），
     # 但共享同一个 TaskRegistry 实例——到点登记的任务会出现在任务中心。
     try:

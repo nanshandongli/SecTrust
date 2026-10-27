@@ -77,6 +77,7 @@ py-modules = [
     "console_chat",
     "console_actions",
     "console_web",
+    "model_profiles",
     "cost",
     "demo",
     "mcp_server",

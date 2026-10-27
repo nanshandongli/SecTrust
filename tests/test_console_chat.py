@@ -58,14 +58,17 @@ def _ctx():
     }
 
 
-class _NoLlm(C.LlmEngine):
-    """强制 LLM 不可用，用于验证诚实降级路径。"""
+class _NoLlm:
+    """强制 LLM 不可用，用于验证诚实降级路径（独立于 LlmEngine 的桩）。"""
 
-    def probe(self):
-        return {"ollama": False, "openai": False, "ollama_model": None,
-                "ollama_models": []}
+    def __init__(self):
+        pass
 
-    def complete(self, question, context, history=None):
+    def status(self):
+        return {"rule_engine": True, "active_id": None, "profiles": [],
+                "note": "规则引擎始终可用；LLM 不可用时不会伪造模型回答。"}
+
+    def complete(self, question, context, history=None, model=None):
         raise RuntimeError("no_llm_available")
 
 
@@ -153,7 +156,6 @@ class TestHonestDegradation(unittest.TestCase):
     def test_status_reports_availability(self):
         s = _svc().status()
         self.assertTrue(s["rule_engine"])
-        self.assertFalse(s["llm_available"])
         self.assertIn("不会伪造", s["note"])
 
     def test_empty_question(self):

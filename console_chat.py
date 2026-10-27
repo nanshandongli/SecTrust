@@ -29,11 +29,16 @@ console_chat.py —— 协作审计台的「对话」后端（规则优先 + 本
 
 from __future__ import annotations
 
-import json
-import os
-import urllib.error
-import urllib.request
 from typing import Any, Callable, Dict, List, Optional
+
+# 复用仓库既有模型层（models 包），而不是自己写 HTTP —— 它已经覆盖
+# Ollama / OpenAI 兼容（DeepSeek/Qwen/GLM/Moonshot…）/ Anthropic / Mock，
+# 且每个 provider 在缺密钥时都抛清晰错误，正好吻合本服务的「诚实降级」边界。
+from models import ChatMessage
+from models.anthropic import AnthropicProvider
+from models.ollama import OllamaProvider
+from models.openai_like import OpenAIModelProvider
+from model_profiles import ModelProfileStore
 
 # --------------------------------------------------------------------------
 # 1) 审计态上下文（喂给 LLM 的"事实清单"）
@@ -299,87 +304,79 @@ class RuleEngine:
 
 
 # --------------------------------------------------------------------------
-# 3) LLM 兜底（本地 Ollama / OpenAI 兼容 / Anthropic）
+# 3) LLM 兜底（按用户配置的 profile 路由到 Ollama / OpenAI 兼容 / Anthropic）
 # --------------------------------------------------------------------------
-def _http_json(url: str, payload: Dict[str, Any], headers: Dict[str, str],
-               timeout: float = 30.0) -> Dict[str, Any]:
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", **headers}, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 (本地/自配端点)
-        return json.loads(r.read().decode("utf-8"))
+def _build_provider(profile):
+    """把一个 profile 翻译成本仓库 models 包的 provider 实例。"""
+    if profile.provider == "ollama":
+        return OllamaProvider(base_url=profile.base_url or "http://127.0.0.1:11434")
+    if profile.provider == "openai":
+        return OpenAIModelProvider(
+            api_key=profile.api_key,
+            base_url=profile.base_url or "https://api.openai.com/v1")
+    if profile.provider == "anthropic":
+        return AnthropicProvider(
+            api_key=profile.api_key,
+            base_url=profile.base_url or "https://api.anthropic.com")
+    raise ValueError("未知 provider: %s" % profile.provider)
 
 
 class LlmEngine:
-    """轻量 LLM 调用器：优先本地 Ollama，其次 OpenAI 兼容端点。
+    """按用户配置的 profile 调用真实算力。
 
-    不复用 models 包的原因：models 层是给 runner 用的（含 fallback 到 Mock 的语义），
-    而这里必须"调不通就明确说调不通"，绝不能静默降级成假回答。
+    与 models 包的区别：models 的 router 缺配置会静默降级到 Mock（给 runner 用），
+    而这里必须"调不通就明确说调不通"——绝不静默降级成假回答。所以本引擎
+    直接按 profile 构建 provider，configured=False 时直接抛错走诚实降级分支。
     """
 
-    def __init__(self):
-        self.ollama_base = os.environ.get("OLLAMA_BASE_URL",
-                                          "http://127.0.0.1:11434").rstrip("/")
-        self.ollama_model = os.environ.get("OLLAMA_CHAT_MODEL",
-                                           os.environ.get("DEFAULT_MODEL", "") or "")
-        self.openai_key = os.environ.get("OPENAI_API_KEY", "")
-        self.openai_base = os.environ.get("OPENAI_BASE_URL",
-                                          "https://api.openai.com/v1").rstrip("/")
-        self.openai_model = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+    def __init__(self, profiles):
+        # profiles: ModelProfileStore（依赖注入，便于测试）
+        self.profiles = profiles
 
-    # -- 可用性探测（不消耗推理配额，只探活）--
-    def probe(self) -> Dict[str, Any]:
-        info: Dict[str, Any] = {"ollama": False, "openai": False,
-                                "ollama_model": self.ollama_model or None}
-        try:
-            req = urllib.request.Request(self.ollama_base + "/api/tags")
-            with urllib.request.urlopen(req, timeout=1.5) as r:  # noqa: S310
-                data = json.loads(r.read().decode("utf-8"))
-            models = [m.get("name") for m in (data.get("models") or [])]
-            info["ollama"] = True
-            info["ollama_models"] = models[:10]
-            if not self.ollama_model and models:
-                info["ollama_model"] = models[0]
-        except Exception:  # noqa: BLE001
-            info["ollama"] = False
-        info["openai"] = bool(self.openai_key)
-        return info
+    # -- 状态（供前端展示当前可选算力）--
+    def status(self) -> Dict[str, Any]:
+        active = self.profiles.get_active()
+        return {
+            "rule_engine": True,
+            "active_id": self.profiles.get_active_id(),
+            "profiles": [p.to_public() for p in self.profiles.iter_profiles()],
+            "note": ("规则引擎始终可用（零幻觉、零外部依赖）；"
+                     "LLM 走你在对话框顶部选择的算力模型，未配置密钥时不会伪造回答。"),
+        }
 
     # -- 实际生成 --
     def complete(self, question: str, context: str,
-                 history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
-        p = self.probe()
-        messages = [{"role": "system",
-                     "content": SYSTEM_PREAMBLE + "\n\n<facts>\n" + context + "\n</facts>"}]
+                 history: Optional[List[Dict[str, str]]] = None,
+                 model: Optional[str] = None) -> Dict[str, Any]:
+        # model = profile id；为空则用当前 active
+        profile = self.profiles.get(model) if model else self.profiles.get_active()
+        if profile is None or not profile.configured:
+            raise RuntimeError("no_llm_available")
+
+        messages = [ChatMessage(
+            role="system",
+            content=SYSTEM_PREAMBLE + "\n\n<facts>\n" + context + "\n</facts>")]
         for h in (history or [])[-6:]:
             role = h.get("role")
             content = (h.get("content") or "").strip()
             if role in ("user", "assistant") and content:
-                messages.append({"role": role, "content": content})
-        messages.append({"role": "user", "content": question})
+                messages.append(ChatMessage(role=role, content=content))
+        messages.append(ChatMessage(role="user", content=question))
 
-        if p["ollama"] and p.get("ollama_model"):
-            model = str(p["ollama_model"]).split("/", 1)[-1]
-            data = _http_json(self.ollama_base + "/api/chat", {
-                "model": model, "messages": messages, "stream": False,
-            }, {}, timeout=60)
-            content = ((data.get("message") or {}).get("content")
-                       or data.get("response") or "").strip()
-            if content:
-                return {"answer": content, "model": "ollama/%s" % model,
-                        "usage": {"prompt_tokens": data.get("prompt_eval_count"),
-                                  "eval_tokens": data.get("eval_count")}}
-        if self.openai_key:
-            data = _http_json(self.openai_base + "/chat/completions", {
-                "model": self.openai_model, "messages": messages,
-                "temperature": 0.2,
-            }, {"Authorization": "Bearer %s" % self.openai_key}, timeout=60)
-            content = (((data.get("choices") or [{}])[0].get("message") or {})
-                       .get("content") or "").strip()
-            if content:
-                return {"answer": content, "model": "openai/%s" % self.openai_model,
-                        "usage": data.get("usage", {})}
-        raise RuntimeError("no_llm_available")
+        provider = _build_provider(profile)
+        opts: Dict[str, Any] = {}
+        if profile.provider == "openai":
+            opts["temperature"] = 0.2
+        if profile.provider == "anthropic":
+            opts["max_tokens"] = 1024
+
+        result = provider.complete(
+            messages, model=profile.model or None, timeout=60, **opts)
+        return {
+            "answer": result.content,
+            "model": "%s/%s" % (profile.provider, profile.model or result.model),
+            "usage": result.usage,
+        }
 
 
 # --------------------------------------------------------------------------
@@ -391,22 +388,15 @@ class ChatService:
     def __init__(self, context_provider: Callable[[], Dict[str, Any]],
                  llm: Optional[LlmEngine] = None):
         self._ctx_provider = context_provider
-        self._llm = llm or LlmEngine()
+        # 默认用一份独立 store（测试/无注入时）；Web 端会注入共享的同一实例
+        self._llm = llm or LlmEngine(ModelProfileStore())
 
     def status(self) -> Dict[str, Any]:
-        p = self._llm.probe()
-        return {
-            "rule_engine": True,
-            "llm_available": bool(p["ollama"] or p["openai"]),
-            "ollama": p["ollama"],
-            "ollama_models": p.get("ollama_models", []),
-            "openai": p["openai"],
-            "note": ("规则引擎始终可用（零幻觉、零外部依赖）；"
-                     "LLM 不可用时不会伪造模型回答。"),
-        }
+        return self._llm.status()
 
     def ask(self, question: str,
-            history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
+            history: Optional[List[Dict[str, str]]] = None,
+            model: Optional[str] = None) -> Dict[str, Any]:
         q = (question or "").strip()
         if not q:
             return {"answer": "请输入问题。", "engine": "rule", "model": None,
@@ -429,7 +419,7 @@ class ChatService:
             return hit
 
         try:
-            out = self._llm.complete(q, context, history)
+            out = self._llm.complete(q, context, history, model=model)
             return {
                 "answer": out["answer"], "engine": "llm", "model": out.get("model"),
                 "basis": ["审计态上下文（任务/审批/成本/安全）"],
