@@ -172,6 +172,19 @@ class TestFirstPrinciplesWiring(unittest.TestCase):
         self.assertIn('"/api/first-principles"', self.mobile)
         self.assertIn("runFirstPrinciples", self.mobile)
 
+    def test_desktop_entry_present(self):
+        """桌面端 APP_HTML 对话面板的第一性原理入口（防壳化：改了后端忘了改前端）。"""
+        for frag in ('id="chatModeSeg"', 'data-mode="fp"', 'id="fpResult"',
+                     '"/api/first-principles"', "runFirstPrinciples",
+                     "FP_LABEL", "badgefp", "fp-verdict", "chatMode"):
+            self.assertIn(frag, self.web, "桌面端缺少片段：%s" % frag)
+
+    def test_desktop_mode_switch_hides_chat_parts(self):
+        """切到 fp 模式必须隐藏对话流与快捷问题，避免两套内容叠在一起。"""
+        self.assertIn("setChatMode", self.web)
+        self.assertIn("isFp?'none':''", self.web)
+        self.assertIn("setChatMode('chat')", self.web)
+
 
 # --------------------------------------------------------------------------
 # 端到端：无可用模型时诚实返回 unavailable（不伪造）

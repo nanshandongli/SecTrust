@@ -121,6 +121,59 @@ const loaders = ['loadWorkspace', 'loadNewTask', 'loadRoster', 'loadAssistants',
   for (const fnName of ['runAction', 'scFire', 'scDue', 'postJSON', 'doLogin', 'restoreSession']) {
     if (typeof sandbox[fnName] !== 'function') errors.push(fnName + ': 未定义');
   }
+
+  // ---- 第一性原理分析（对话面板分段切换 → /api/first-principles 渲染）----
+  for (const f of ['id="chatModeSeg"', 'data-mode="fp"', 'id="fpResult"',
+                   '/api/first-principles', 'runFirstPrinciples', 'badgefp', 'fp-verdict']) {
+    if (!html.includes(f)) errors.push('桌面端页面缺少片段: ' + f);
+  }
+  if (typeof sandbox.runFirstPrinciples !== 'function') {
+    errors.push('runFirstPrinciples: 未定义');
+  } else {
+    const FP_PAYLOAD = {
+      topic: '为什么审批流程这么慢',
+      engine: 'llm',
+      model: 'openai/fake',
+      perspectives: [
+        { id: 'first_principles', name: '第一性原理视角', content: '回到本质重构', classification: 'first_principles', essence_score: 9, reasoning: '回到底层事实重构' },
+        { id: 'analogy_break', name: '反类比 / 破假设视角', content: '推翻隐含假设', classification: 'mixed', essence_score: 6, reasoning: '部分推翻假设' },
+        { id: 'novelty_skin', name: '标新立异（换皮）对照', content: '只是换皮', classification: 'novelty_seeking', essence_score: 2, reasoning: '只是换皮' },
+      ],
+      verdict: { best_id: 'first_principles', best_classification: 'first_principles', summary: '真正回到本质的是「第一性原理视角」', counts: { first_principles: 1, mixed: 1, novelty_seeking: 1, unknown: 0 } },
+    };
+    const realFetch = sandbox.fetch;
+    try {
+      sandbox.fetch = () => Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve(FP_PAYLOAD) });
+      await sandbox.runFirstPrinciples('为什么审批流程这么慢');
+      const html2 = $('fpResult')._html || '';
+      for (const f of ['class="fp-card"', 'badgefp first_principles', 'badgefp novelty_seeking',
+                       'badgefp mixed', 'class="fp-verdict"', '本质度 9/10', 'width:90%',
+                       '第一性原理视角', '真正回到本质']) {
+        if (html2.indexOf(f) < 0) errors.push('第一性原理渲染缺少: ' + f);
+      }
+      if (html2.indexOf('class="fp-card"') === html2.lastIndexOf('class="fp-card"')) {
+        errors.push('第一性原理：只渲染了 1 张视角卡（应为 3 张）');
+      }
+      console.log('  ok  runFirstPrinciples (%d chars)', html2.length);
+    } catch (e) {
+      errors.push('runFirstPrinciples: ' + e.message);
+    }
+    // 诚实降级：engine=unavailable 时渲染警示而非伪造卡片
+    try {
+      sandbox.fetch = () => Promise.resolve({
+        status: 200, ok: true,
+        json: () => Promise.resolve({ engine: 'unavailable', error: 'no_llm_available', perspectives: [], verdict: { summary: '当前没有可用的算力模型' } }),
+      });
+      await sandbox.runFirstPrinciples('主题');
+      const h3 = $('fpResult')._html || '';
+      if (h3.indexOf('无法分析') < 0) errors.push('第一性原理：unavailable 时未渲染诚实提示');
+      if (h3.indexOf('class="fp-card"') >= 0) errors.push('第一性原理：unavailable 时不应渲染视角卡');
+      console.log('  ok  runFirstPrinciples(unavailable 降级)');
+    } catch (e) {
+      errors.push('runFirstPrinciples(unavailable): ' + e.message);
+    }
+    sandbox.fetch = realFetch;
+  }
   console.log('');
   if (errors.length) {
     console.error('FAIL: %d 个问题', errors.length);

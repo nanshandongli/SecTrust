@@ -246,6 +246,31 @@ APP_HTML = """<!doctype html>
   .chat .in{display:flex;gap:10px;padding-top:12px;border-top:1px solid var(--line)}
   .chat .in input{flex:1;padding:10px 14px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--txt)}
   .chat .in button{background:var(--accent);color:#fff;border:none;padding:0 18px;border-radius:10px;cursor:pointer}
+  /* ---- 对话：第一性原理分析（多视角生成 + 本质判别） ---- */
+  .seg{display:inline-flex;gap:4px;margin:0 0 12px;padding:3px;background:var(--bg);
+    border:1px solid var(--line);border-radius:10px}
+  .seg button{border:none;background:transparent;color:var(--sub);cursor:pointer;
+    padding:5px 14px;border-radius:7px;font-size:12.5px}
+  .seg button:hover{color:var(--accent)}
+  .seg button.active{background:var(--accent);color:#fff}
+  .fp-wrap{flex:1;overflow-y:auto;padding:14px 0 4px}
+  .fp-card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:14px 16px;margin-bottom:12px;box-shadow:var(--shadow)}
+  .fp-card .fp-name{font-weight:600;font-size:14px;margin-bottom:2px}
+  .badgefp{display:inline-block;font-size:11px;padding:2px 9px;border-radius:999px;
+    margin-left:8px;vertical-align:middle}
+  .badgefp.first_principles{background:rgba(22,184,166,.14);color:#0f9b8e}
+  .badgefp.novelty_seeking{background:rgba(230,90,80,.14);color:#c94a3f}
+  .badgefp.mixed{background:rgba(224,168,40,.18);color:#96690a}
+  .badgefp.unknown{background:rgba(120,130,140,.16);color:#6b7480}
+  .fp-bar{height:6px;background:var(--line);border-radius:4px;overflow:hidden;
+    margin:8px 0 6px;max-width:280px}
+  .fp-bar > i{display:block;height:100%;background:var(--accent)}
+  .fp-reason{font-size:12px;color:var(--sub);line-height:1.55}
+  .fp-body{margin-top:10px;font-size:14px;line-height:1.65;white-space:pre-wrap;word-break:break-word}
+  .fp-verdict{background:rgba(59,108,255,.08);border:1px solid rgba(59,108,255,.28);
+    border-radius:12px;padding:12px 14px;font-size:13.5px;line-height:1.6}
+  .fp-empty{color:var(--sub);font-size:13px;padding:14px 2px}
   /* ---- 技能卡 ---- */
   .sk-grid{grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
   .sk{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;box-shadow:var(--shadow)}
@@ -1358,18 +1383,24 @@ function stat(n,l,cls){return '<div class="stat"><div class="n '+(cls||'')+'">'+
 
 // ---------------- 对话（规则优先 + LLM 兜底 · 真实后端） ----------------
 let chatHistory=[];
+let chatMode='chat';   // 'chat' = 普通对话；'fp' = 第一性原理分析
 async function loadChat(){
   const el=$('view-chat');
   if(el.dataset.init){el.classList.add('active');refreshChatStatus();return;}
   el.dataset.init='1';
-  el.innerHTML='<h2 class="vh">对话</h2><p class="vdesc">问审计台：任务在跑什么、审批过没过、成本花了多少、代码有没有泄露。答案会标注引擎来源。</p>'+
+  el.innerHTML='<h2 class="vh">对话</h2><p class="vdesc">问审计台：任务在跑什么、审批过没过、成本花了多少、代码有没有泄露。答案会标注引擎来源；也可切到「第一性原理分析」对同一主题做多视角生成 + 本质判别。</p>'+
+   '<div class="seg" id="chatModeSeg">'+
+     '<button type="button" data-mode="chat" class="active">💬 对话</button>'+
+     '<button type="button" data-mode="fp">🧭 第一性原理分析</button>'+
+   '</div>'+
    '<div class="chat"><div class="msgs" id="chatMsgs"></div>'+
+   '<div class="fp-wrap" id="fpResult" style="display:none"></div>'+
    '<div class="chat-engine" id="chatEngine">'+
      '<label class="msel">模型 <select id="chatModel"></select></label>'+
      '<button id="chatModelCfg" type="button">⚙ 配置模型</button>'+
      '<span id="chatModelHint" class="ctip"></span>'+
    '</div>'+
-   '<div class="chips">'+
+   '<div class="chips" id="chatChips">'+
      '<button data-q="今天有哪些任务在跑">今天哪些任务在跑？</button>'+
      '<button data-q="双十一素材发布审批通过了吗">素材发布审批通过了吗？</button>'+
      '<button data-q="这个月成本花了多少">这个月成本多少？</button>'+
@@ -1413,13 +1444,73 @@ async function loadChat(){
         '<div class="mmeta">引擎：<b>不可用</b></div>';
     }
   }
-  el.querySelectorAll('.chips button').forEach(b=>b.addEventListener('click',()=>send(b.dataset.q)));
-  $('chatSend').addEventListener('click',()=>{const i=$('chatInput');const v=i.value;i.value='';send(v);});
+  el.querySelectorAll('.chips button').forEach(b=>b.addEventListener('click',()=>{setChatMode('chat');send(b.dataset.q);}));
+  // ---- 模式切换：💬 对话 / 🧭 第一性原理分析 ----
+  function setChatMode(m){
+    chatMode=m;
+    const isFp=(m==='fp');
+    el.querySelectorAll('#chatModeSeg button').forEach(b=>b.classList.toggle('active',(b.dataset.mode||'')===m));
+    const msgs=$('chatMsgs'), box=$('fpResult'), chips=$('chatChips'), inp=$('chatInput'), btn=$('chatSend');
+    if(msgs)msgs.style.display=isFp?'none':'';
+    if(box)box.style.display=isFp?'':'none';
+    if(chips)chips.style.display=isFp?'none':'';
+    if(inp)inp.placeholder=isFp?'输入要分析的主题，例如：为什么我们的审批流程这么慢':'输入消息，回车发送…（Enter 发送 / Shift+Enter 换行）';
+    if(btn)btn.textContent=isFp?'分析':'发送';
+  }
+  el.querySelectorAll('#chatModeSeg button').forEach(b=>b.addEventListener('click',()=>setChatMode(b.dataset.mode||'chat')));
+  function dispatch(v){
+    if(chatMode==='fp'){runFirstPrinciples(v);return;}
+    send(v);
+  }
+  $('chatSend').addEventListener('click',()=>{const i=$('chatInput');const v=i.value;i.value='';dispatch(v);});
   $('chatInput').addEventListener('keydown',e=>{
-    if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();const i=e.target;const v=i.value;i.value='';send(v);}
+    if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();const i=e.target;const v=i.value;i.value='';dispatch(v);}
   });
   $('chatModelCfg').addEventListener('click',openCfg);
+  setChatMode('chat');
   refreshChatStatus();
+}
+const FP_LABEL={first_principles:'第一性原理',novelty_seeking:'标新立异',mixed:'混合',unknown:'未判别'};
+async function runFirstPrinciples(topic){
+  topic=(topic||'').trim();
+  const box=$('fpResult'); if(!topic||!box)return;
+  const btn=$('chatSend');
+  box.innerHTML='<div class="fp-empty">分析中…（多个 AI 视角生成 + 本质判别中）</div>';
+  if(btn)btn.disabled=true;
+  try{
+    const r=await fetch('/api/first-principles',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({topic:topic,
+        model:(document.getElementById('chatModel')?document.getElementById('chatModel').value:'')})});
+    const d=await r.json();
+    if(!d||d.engine==='unavailable'){
+      box.innerHTML='<div class="fp-verdict">⚠️ 无法分析：'+
+        esc((d&&d.error)||'当前没有可用的算力模型（未配置密钥或本地 Ollama 未启动）')+
+        (d&&d.verdict&&d.verdict.summary?('<div class="fp-reason" style="margin-top:6px">'+esc(d.verdict.summary)+'</div>'):'')+
+        '</div>';
+      return;
+    }
+    const ps=d.perspectives||[];
+    let h=ps.map(function(p){
+      const cls=p.classification||'unknown';
+      const score=Number(p.essence_score||0);
+      return '<div class="fp-card">'+
+        '<div class="fp-name">'+esc(p.name||'')+'<span class="badgefp '+esc(cls)+'">'+(FP_LABEL[cls]||cls)+'</span></div>'+
+        '<div class="fp-bar"><i style="width:'+(score*10)+'%"></i></div>'+
+        '<div class="fp-reason">本质度 '+score+'/10'+(p.reasoning?(' · '+esc(p.reasoning)):'')+'</div>'+
+        '<div class="fp-body">'+esc(p.content||'')+'</div>'+
+      '</div>';
+    }).join('');
+    const v=d.verdict||{}, c=v.counts||{};
+    h+='<div class="fp-verdict"><b>结论：</b>'+esc(v.summary||'')+
+      '<div class="fp-reason" style="margin-top:6px">判别分布：第一性原理 '+(c.first_principles||0)+
+      ' · 混合 '+(c.mixed||0)+' · 标新立异 '+(c.novelty_seeking||0)+' · 未判别 '+(c.unknown||0)+
+      (d.model?(' ｜ 模型：'+esc(d.model)):'')+'</div></div>';
+    box.innerHTML=h||'<div class="fp-empty">这次没有返回任何视角</div>';
+  }catch(e){
+    box.innerHTML='<div class="fp-verdict">⚠️ 分析请求失败：'+esc(String(e))+'</div>';
+  }finally{
+    if(btn)btn.disabled=false;
+  }
 }
 async function refreshChatStatus(){
   const el=$('chatEngine');if(!el)return;
