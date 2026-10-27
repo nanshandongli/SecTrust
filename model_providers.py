@@ -18,8 +18,11 @@ model_providers.py —— 预置「供应商目录」（provider catalog）。
       "openai"（OpenAI 兼容） / "anthropic" / "ollama"（本地）。
     - **合规提示**：腾讯云 Token Plan 订阅条款明令禁止用于自动化脚本/自定义应用后端，
       本产品是自动化审计流水线 —— 该提示必须随目录一起送到用户眼前，不能藏。
+    - **免费额度分组**：各厂商免费层是"有上限的 $0"，不是"无限免费"。额度数字与
+      「是否需信用卡」「数据是否用于训练」必须写进 note / compliance，不得含糊。
 
 数据来源：本仓库 v1.2 期间的联网核实结果（见 README「模型接入」章节）。
+免费额度分组的端点与限额核对于 2026-10-27（厂商文档口径，额度按月变动，以官网为准）。
 """
 
 from __future__ import annotations
@@ -27,17 +30,20 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional
 
-# 目录分组（顺序即前端展示顺序）
+# 目录分组（顺序即前端展示顺序；免费额度排最前，方便无密钥用户起步）
+GROUP_FREE = "免费额度"
 GROUP_SUBSCRIPTION = "Coding Plan（包月）"
 GROUP_PAYG = "按量计费"
 GROUP_INTL = "国际版"
 GROUP_LOCAL = "本地"
 
+BILLING_FREE = "free"
 BILLING_SUBSCRIPTION = "subscription"
 BILLING_PAYG = "payg"
 BILLING_LOCAL = "local"
 
 GROUP_ORDER = [
+    GROUP_FREE,
     GROUP_SUBSCRIPTION,
     GROUP_PAYG,
     GROUP_INTL,
@@ -69,10 +75,16 @@ class ProviderEntry:
     @property
     def billing_label(self) -> str:
         return {
+            BILLING_FREE: "免费额度",
             BILLING_SUBSCRIPTION: "包月",
             BILLING_PAYG: "按量计费",
             BILLING_LOCAL: "本地",
         }.get(self.billing, self.billing)
+
+    @property
+    def is_free_tier(self) -> bool:
+        """免费层＝额度内 $0，但**有硬上限**，UI 需据此提示。"""
+        return self.billing == BILLING_FREE
 
 
 def _e(*args, **kwargs) -> ProviderEntry:
@@ -83,6 +95,111 @@ def _e(*args, **kwargs) -> ProviderEntry:
 # 目录正文（端点均已联网核实；未核实的一律不写）
 # --------------------------------------------------------------------------
 PROVIDERS: List[ProviderEntry] = [
+    # ---------------- 免费额度（有硬上限的 $0）----------------
+    _e(
+        id="groq-free",
+        name="Groq（免费层）",
+        group=GROUP_FREE,
+        protocol="openai",
+        base_url="https://api.groq.com/openai/v1",
+        billing=BILLING_FREE,
+        models=["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"],
+        doc_url="https://console.groq.com/docs/rate-limits",
+        key_url="https://console.groq.com/keys",
+        note="免费层：30 次/分钟、1000 次/天、8K token/分钟、20 万 token/天"
+             "（以 gpt-oss-120b 计）。无需信用卡，注册即得 Key。仅开放权重模型。",
+        compliance="免费层面向开发验证，非生产 SLA；8K token/分钟 是最先撞到的天花板。",
+        featured=True,
+    ),
+    _e(
+        id="gemini-free",
+        name="Google Gemini API（AI Studio 免费层）",
+        group=GROUP_FREE,
+        protocol="openai",
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        billing=BILLING_FREE,
+        models=["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite",
+                "gemini-2.5-flash"],
+        doc_url="https://ai.google.dev/gemini-api/docs/pricing",
+        key_url="https://aistudio.google.com/apikey",
+        note="Flash 与 Flash-Lite 系列免费；2.5 Pro 有少量免费额度。"
+             "Gemini 4 Argon、图像与 Veo 模型不在免费层。端点走 OpenAI 兼容路径。",
+        compliance="Google 条款明示：免费层提交的内容可能用于改进其产品，并可能被人工"
+                    "审阅。涉密/客户数据请勿走免费层。",
+        featured=True,
+    ),
+    _e(
+        id="openrouter-free",
+        name="OpenRouter（:free 免费模型）",
+        group=GROUP_FREE,
+        protocol="openai",
+        base_url="https://openrouter.ai/api/v1",
+        billing=BILLING_FREE,
+        models=["openrouter/free", "google/gemma-4-31b-it:free",
+                "nvidia/nemotron-3-super-120b-a12b:free"],
+        doc_url="https://openrouter.ai/docs/api-reference/limits",
+        key_url="https://openrouter.ai/keys",
+        note="模型 ID 以 :free 结尾即 $0/token。限额 20 次/分钟、50 次/天；账号累计充值"
+             "满 10 credits 后升到 1000 次/天。一个 Key 试遍多家开源模型，适合选型对比。",
+        compliance="免费模型清单每周轮换；部分免费变体由会留存/训练数据的供应商托管。"
+                    "账号余额为负时，连免费模型也会返回 402。",
+        featured=True,
+    ),
+    _e(
+        id="mistral-free",
+        name="Mistral（Free mode）",
+        group=GROUP_FREE,
+        protocol="openai",
+        base_url="https://api.mistral.ai/v1",
+        billing=BILLING_FREE,
+        models=["mistral-small-latest", "mistral-large-latest", "codestral-latest"],
+        doc_url="https://docs.mistral.ai/deployment/laplateforme/overview/",
+        key_url="https://console.mistral.ai/api-keys/",
+        note="La Plateforme 的 Free mode：默认开放 API，无需信用卡。",
+        compliance="Mistral 不公开具体限额数值，需在 Admin Panel → API → Limits 查看；"
+                    "部分模型或用量可能需要绑定支付方式（文档列了 402 错误）。",
+    ),
+    _e(
+        id="nvidia-free",
+        name="NVIDIA NIM（build.nvidia.com）",
+        group=GROUP_FREE,
+        protocol="openai",
+        base_url="https://integrate.api.nvidia.com/v1",
+        billing=BILLING_FREE,
+        models=["nvidia/nemotron-3-super-120b-a12b", "nvidia/nemotron-3-ultra-550b-a55b",
+                "meta/llama-3.3-70b-instruct"],
+        doc_url="https://build.nvidia.com/",
+        key_url="https://build.nvidia.com/",
+        note="加入 NVIDIA 开发者计划（免费）后，NIM 端点可免费用于原型验证，速率按模型不同。",
+        compliance="官方定位为原型验证；生产使用需 NVIDIA AI Enterprise 授权。",
+    ),
+    _e(
+        id="cohere-trial",
+        name="Cohere（trial key）",
+        group=GROUP_FREE,
+        protocol="openai",
+        base_url="https://api.cohere.ai/compatibility/v1",
+        billing=BILLING_FREE,
+        models=["command-a-plus-05-2026"],
+        doc_url="https://docs.cohere.com/docs/rate-limits",
+        key_url="https://dashboard.cohere.com/api-keys",
+        note="注册即自动生成 trial key：每月 1000 次调用、20 次聊天/分钟，兼容 OpenAI SDK。",
+        compliance="Cohere 明确禁止 trial key 用于生产或商业用途。",
+    ),
+    _e(
+        id="sambanova-free",
+        name="SambaNova Cloud（免费层）",
+        group=GROUP_FREE,
+        protocol="openai",
+        base_url="https://api.sambanova.ai/v1",
+        billing=BILLING_FREE,
+        models=["Meta-Llama-3.3-70B-Instruct", "gpt-oss-120b", "DeepSeek-V3.2"],
+        doc_url="https://docs.sambanova.ai/cloud/docs/get-started/overview",
+        key_url="https://cloud.sambanova.ai/",
+        note="账号未绑定支付方式即为免费层：每模型 20 次/分钟、20 次/天、20 万 token/天。",
+        compliance="20 次/天只够跑通链路，不适合迭代开发或批量任务。",
+    ),
+
     # ---------------- Coding Plan（包月）----------------
     _e(
         id="tencent-token-plan",
@@ -233,10 +350,13 @@ PROVIDERS: List[ProviderEntry] = [
         protocol="openai",
         base_url="https://open.bigmodel.cn/api/paas/v4",
         billing=BILLING_PAYG,
-        models=["GLM-4.7", "GLM-5", "glm-5.1", "GLM-5-Air"],
+        models=["GLM-4.7", "GLM-5", "glm-5.1", "GLM-5-Air",
+                "GLM-4.7-Flash", "GLM-4.6V-Flash", "GLM-4.5-Flash", "GLM-4-Flash"],
         doc_url="https://docs.bigmodel.cn/cn/guide/develop/openai/introduction",
         key_url="https://open.bigmodel.cn/",
-        note="智谱按量端点（/api/paas/v4），与包月端点路径不同。",
+        note="智谱按量端点（/api/paas/v4），与包月端点路径不同。"
+             "Flash 系列（含 GLM-4.7-Flash 200K 上下文、GLM-4.6V-Flash 视觉）永久免费，"
+             "手机号注册即可，无需信用卡 —— 想零成本起步优先选 Flash 模型名。",
         compliance="按 token 计费，请设置额度告警。",
     ),
     _e(
@@ -259,10 +379,13 @@ PROVIDERS: List[ProviderEntry] = [
         protocol="openai",
         base_url="https://api.siliconflow.cn/v1",
         billing=BILLING_PAYG,
-        models=["deepseek-ai/DeepSeek-V3", "Qwen/Qwen2.5-72B-Instruct", "moonshotai/Kimi-K2"],
+        models=["deepseek-ai/DeepSeek-V3", "Qwen/Qwen2.5-72B-Instruct", "moonshotai/Kimi-K2",
+                "Qwen/Qwen3-8B", "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"],
         doc_url="https://docs.siliconflow.cn/",
         key_url="https://cloud.siliconflow.cn/",
-        note="硅基流动聚合平台，一个 Key 调多家开源模型。",
+        note="硅基流动聚合平台，一个 Key 调多家开源模型。"
+             "Qwen/Qwen3-8B、DeepSeek-R1-Distill-Qwen-7B 等小模型永久免费（约 30 RPM / 60K TPM）；"
+             "注册另送代金券。国内直连，零成本起步的稳妥选项。",
         compliance="按 token 计费，请设置额度告警。",
     ),
     _e(

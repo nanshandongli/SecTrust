@@ -21,8 +21,9 @@ class TestCatalogIntegrity(unittest.TestCase):
             self.assertTrue(p.base_url, "%s 缺 base_url" % p.id)
             self.assertIn(p.protocol, ("openai", "anthropic", "ollama"),
                           "%s 协议非法" % p.id)
-            self.assertIn(p.billing, (mp.BILLING_SUBSCRIPTION, mp.BILLING_PAYG,
-                                      mp.BILLING_LOCAL), "%s 计费属性非法" % p.id)
+            self.assertIn(p.billing, (mp.BILLING_FREE, mp.BILLING_SUBSCRIPTION,
+                                      mp.BILLING_PAYG, mp.BILLING_LOCAL),
+                          "%s 计费属性非法" % p.id)
             self.assertTrue(p.models, "%s 无模型候选" % p.id)
             self.assertTrue(p.note, "%s 无说明" % p.id)
 
@@ -60,6 +61,15 @@ class TestCatalogIntegrity(unittest.TestCase):
         used = set(p.group for p in mp.PROVIDERS)
         for g in mp.GROUP_ORDER:
             self.assertIn(g, used, "分组 %s 没有任何条目" % g)
+
+    def test_free_tier_entries_declare_their_limits(self):
+        """免费层不是"无限免费"：条目必须写清上限与数据使用，不能让用户误判。"""
+        free = [p for p in mp.PROVIDERS if p.billing == mp.BILLING_FREE]
+        self.assertTrue(free, "目录缺少免费额度条目")
+        for p in free:
+            self.assertTrue(p.is_free_tier, "%s 的 is_free_tier 未生效" % p.id)
+            self.assertTrue(p.key_url, "%s 缺申请密钥入口" % p.id)
+            self.assertTrue(p.compliance, "%s 缺额度/数据使用提示" % p.id)
 
     def test_subscription_and_payg_both_present(self):
         billings = set(p.billing for p in mp.PROVIDERS)
