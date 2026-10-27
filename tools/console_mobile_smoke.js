@@ -99,6 +99,7 @@ const frags = [
   '/api/login', '/api/overview', '/api/chat', '/api/chat/models',
   '/api/tasks/new', '/api/approvals/decide', '/api/assistant/settings',
   '/api/assistant/channels/toggle', '/api/assistant/prefs',
+  'data-mode="fp"', 'id="fp-result"', '"/api/first-principles"', 'runFirstPrinciples',
 ];
 for (const f of frags) {
   expect(html.includes(f), '移动端页面缺少片段: ' + f);

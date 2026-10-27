@@ -2309,6 +2309,29 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": str(e), "engine": "unavailable"}, 500)
             return self._json(result)
 
+        # ---- 第一性原理 vs 标新立异：多视角分析 ----
+        if path == "/api/first-principles":
+            topic = str(payload.get("topic") or "")
+            model = payload.get("model") or None
+            try:
+                from first_principles import FirstPrinciplesAnalyzer
+                analyzer = FirstPrinciplesAnalyzer(self.model_profiles)
+                result = analyzer.analyze(topic, model=model)
+            except RuntimeError as e:
+                if "no_llm_available" in str(e):
+                    return self._json({
+                        "topic": topic, "perspectives": [],
+                        "verdict": {"best_id": None, "best_classification": None,
+                                    "summary": ("当前没有可用的算力模型（未配置密钥或本地 "
+                                                "Ollama 未启动），无法生成多视角分析。"),
+                                    "counts": {}},
+                        "engine": "unavailable", "model": None,
+                        "error": "no_llm_available"}, 200)
+                return self._json({"error": str(e), "engine": "unavailable"}, 500)
+            except Exception as e:  # noqa: BLE001
+                return self._json({"error": str(e), "engine": "unavailable"}, 500)
+            return self._json(result)
+
         # ---- 模型配置（写操作：需 JWT 登录）----
         if path.startswith("/api/chat/models"):
             tok = self.headers.get("X-Session-Token", "")

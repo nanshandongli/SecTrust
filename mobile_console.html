@@ -123,6 +123,22 @@
   .chat-input{display:flex; gap:8px; align-items:flex-end; padding-top:6px;}
   .chat-input textarea{flex:1;}
 
+  .seg{display:flex; gap:6px; margin:8px 0;}
+  .seg button{flex:1; padding:8px; border:1px solid var(--line); background:var(--panel2); color:var(--text); border-radius:8px; font-size:13px;}
+  .seg button.active{background:var(--accent); color:#fff; border-color:var(--accent);}
+  .fp-card{background:var(--panel2); border:1px solid var(--line); border-radius:10px; padding:10px; margin:8px 0;}
+  .fp-card .fp-name{font-weight:600; margin-bottom:4px;}
+  .badgefp{display:inline-block; font-size:11px; padding:2px 8px; border-radius:999px; margin-left:6px; vertical-align:middle;}
+  .badgefp.first_principles{background:rgba(46,204,113,.18); color:#2ecc71;}
+  .badgefp.novelty_seeking{background:rgba(231,76,60,.18); color:#e74c3c;}
+  .badgefp.mixed{background:rgba(241,196,15,.18); color:#f1c40f;}
+  .badgefp.unknown{background:rgba(149,165,166,.18); color:#95a5a6;}
+  .fp-reason{font-size:12px; color:var(--textdim); margin:6px 0;}
+  .fp-bar{height:6px; background:var(--line); border-radius:4px; overflow:hidden; margin:4px 0;}
+  .fp-bar > i{display:block; height:100%; background:var(--accent);}
+  .fp-verdict{background:rgba(52,152,219,.12); border:1px solid rgba(52,152,219,.4); border-radius:10px; padding:10px; margin-top:10px; font-size:14px;}
+  #fp-result .empty{color:var(--textdim); text-align:center; padding:10px;}
+
   #login-err{color:var(--no); font-size:13px; min-height:18px; text-align:center;}
 </style>
 </head>
@@ -166,6 +182,7 @@
     token: localStorage.getItem("wb_token") || "",
     user: localStorage.getItem("wb_user") || "",
     tab: "overview",
+    mode: "chat",
     conv: [],
   };
 
@@ -263,10 +280,16 @@
 
   // ---------- 对话 ----------
   async function viewChat() {
+    State.mode = "chat";
     $("#view").innerHTML =
       '<div class="pad chat">' +
       '<select id="chat-model" class="field"></select>' +
+      '<div class="seg" id="chat-mode">' +
+        '<button data-mode="chat" class="active">💬 对话</button>' +
+        '<button data-mode="fp">🧭 第一性原理分析</button>' +
+      '</div>' +
       '<div id="chat-log" class="chatlog"></div>' +
+      '<div id="fp-result"></div>' +
       '<div class="chat-input"><textarea id="chat-text" class="field" placeholder="问点什么…（回车发送）" rows="2"></textarea>' +
       '<button id="chat-send" class="primary">发送</button></div></div>';
     const { data } = await api("/api/chat/models");
@@ -283,6 +306,15 @@
     $("#chat-text").addEventListener("keydown", e => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
     });
+    $$("#chat-mode button").forEach(b => b.onclick = () => {
+      State.mode = b.dataset.mode;
+      $$("#chat-mode button").forEach(x => x.classList.toggle("active", x === b));
+      const fp = State.mode === "fp";
+      $("#chat-text").placeholder = fp ? "输入要分析的主题（如：为什么我们的审批流程这么慢）" : "问点什么…（回车发送）";
+      $("#chat-send").textContent = fp ? "分析" : "发送";
+      $("#chat-log").style.display = fp ? "none" : "";
+      $("#fp-result").innerHTML = "";
+    });
     renderConv();
   }
   function renderConv() {
@@ -294,6 +326,7 @@
   async function sendChat() {
     const ta = $("#chat-text"); const text = (ta.value || "").trim(); if (!text) return;
     const model = $("#chat-model").value;
+    if (State.mode === "fp") { await runFirstPrinciples(text, model); return; }
     State.conv.push({ role: "user", content: text });
     renderConv(); ta.value = "";
     const btn = $("#chat-send"); btn.disabled = true;
@@ -304,6 +337,39 @@
     State.conv.push({ role: "assistant", content: ans +
       (data && data.engine ? "\n\n— " + esc(data.engine) + (data.model ? " · " + esc(data.model) : "") : "") });
     renderConv(); btn.disabled = false;
+  }
+
+  const FP_LABEL = { first_principles: "第一性原理", novelty_seeking: "标新立异", mixed: "混合", unknown: "未判别" };
+  async function runFirstPrinciples(text, model) {
+    const btn = $("#chat-send"); btn.disabled = true;
+    const box = $("#fp-result");
+    box.innerHTML = '<div class="empty">分析中…（多个 AI 视角生成 + 判别中）</div>';
+    const { data } = await api("/api/first-principles", {
+      method: "POST", body: { topic: text, model: model || null },
+    });
+    $("#chat-text").value = "";
+    const engine = data && data.engine;
+    if (engine === "unavailable") {
+      box.innerHTML = '<div class="fp-verdict">⚠️ 无法分析：' +
+        esc((data && data.error) || "当前没有可用的算力模型（未配置密钥或本地 Ollama 未启动）") + '</div>';
+      btn.disabled = false; return;
+    }
+    const ps = (data && data.perspectives) || [];
+    let html = ps.map(p => {
+      const cls = p.classification || "unknown";
+      const score = p.essence_score || 0;
+      return '<div class="fp-card">' +
+        '<div class="fp-name">' + esc(p.name || "") +
+          '<span class="badgefp ' + cls + '">' + (FP_LABEL[cls] || cls) + '</span></div>' +
+        '<div class="fp-bar"><i style="width:' + (score * 10) + '%"></i></div>' +
+        '<div class="fp-reason">本质度 ' + score + '/10 · ' + esc(p.reasoning || "") + '</div>' +
+        '<div class="bubble assistant" style="margin:0">' + esc(p.content || "") + '</div>' +
+      '</div>';
+    }).join("");
+    const v = (data && data.verdict) || {};
+    html += '<div class="fp-verdict"><b>结论：</b>' + esc(v.summary || "") + '</div>';
+    box.innerHTML = html;
+    btn.disabled = false;
   }
 
   // ---------- 任务 ----------
