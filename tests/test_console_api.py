@@ -353,6 +353,48 @@ class TestFrontendWiring(unittest.TestCase):
         self.assertNotRegex(self.src, r"(?i)api_key\s*=\s*['\"][A-Za-z0-9]{16,}")
         self.assertNotRegex(self.src, r"(?i)password\s*=\s*['\"][A-Za-z0-9]{8,}")
 
+    def test_mobile_route_wired(self):
+        # 手机远程控制台：/mobile 路由必须真实接上
+        self.assertIn('"/mobile"', self.src)
+        self.assertIn("_serve_mobile", self.src)
+        # 审批决策写接口（移动端「通过/拒绝」依赖它）
+        self.assertIn('"/api/approvals/decide"', self.src)
+
+
+class TestMobileConsolePage(unittest.TestCase):
+    """移动端页面（独立 SPA）的契约：结构与接口接线不能壳化。"""
+
+    @classmethod
+    def setUpClass(cls):
+        here = os.path.dirname(os.path.abspath(__file__))
+        cls.path = os.path.join(here, "..", "mobile_console.html")
+        with open(cls.path, encoding="utf-8") as f:
+            cls.html = f.read()
+
+    def test_login_form_present(self):
+        for frag in ('id="login"', 'id="login-user"', 'id="login-role"', 'id="login-btn"'):
+            self.assertIn(frag, self.html)
+
+    def test_five_tabs_present(self):
+        for label in ("概览", "对话", "任务", "审批", "助理"):
+            self.assertIn(label, self.html)
+
+    def test_view_containers_present(self):
+        for frag in ('id="view"', 'id="chat-log"', 'id="task-list"',
+                     'id="ap-list"', 'id="as-content"'):
+            self.assertIn(frag, self.html)
+
+    def test_api_paths_wired(self):
+        for ep in ("/api/login", "/api/overview", "/api/chat", "/api/chat/models",
+                   "/api/tasks/new", "/api/approvals/decide",
+                   "/api/assistant/settings", "/api/assistant/channels/toggle",
+                   "/api/assistant/prefs"):
+            self.assertIn(ep, self.html)
+
+    def test_no_external_cdn(self):
+        for bad in ("http://cdn", "https://cdn", "unpkg.com", "cdn.jsdelivr"):
+            self.assertNotIn(bad, self.html)
+
 
 if __name__ == "__main__":
     unittest.main()

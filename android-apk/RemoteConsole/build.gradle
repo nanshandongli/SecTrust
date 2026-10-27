@@ -1,0 +1,17 @@
+// 顶层构建脚本（Android Studio 会自动用其自带的 Gradle 发行版同步，无需本地预先安装 Gradle）
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.2.0'
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}

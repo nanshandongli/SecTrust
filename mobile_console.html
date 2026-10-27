@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1116">
+<title>协作审计台 · 手机控制台</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c2230; --line:#2a313c;
+    --fg:#e6edf3; --sub:#9aa7b4; --accent:#4f9dff; --ok:#3fb950; --warn:#d29922;
+    --no:#f85149; --radius:14px;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;height:100%;}
+  body{
+    background:var(--bg); color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+    font-size:15px; line-height:1.5;
+  }
+  .hidden{display:none !important;}
+
+  /* 登录 */
+  #login{
+    position:fixed; inset:0; display:flex; flex-direction:column; justify-content:center;
+    padding:0 26px; gap:14px;
+  }
+  #login .brand{font-size:22px; font-weight:700; text-align:center; margin-bottom:6px;}
+  #login .brand small{display:block; font-size:12px; color:var(--sub); font-weight:400; margin-top:6px;}
+
+  /* App 布局 */
+  #app{position:fixed; inset:0; display:flex; flex-direction:column;}
+  header{
+    flex:0 0 auto; display:flex; align-items:center; justify-content:space-between;
+    padding:calc(env(safe-area-inset-top) + 12px) 14px 12px; background:var(--panel);
+    border-bottom:1px solid var(--line);
+  }
+  .h-title{font-weight:700; font-size:16px;}
+  .h-actions{display:flex; gap:8px;}
+  header button{
+    background:var(--panel2); color:var(--fg); border:1px solid var(--line);
+    border-radius:9px; padding:6px 11px; font-size:13px;
+  }
+  main{flex:1 1 auto; overflow-y:auto; -webkit-overflow-scrolling:touch;}
+  .pad{padding:14px;}
+
+  /* 底部标签栏 */
+  .tabbar{
+    flex:0 0 auto; display:flex; border-top:1px solid var(--line); background:var(--panel);
+    padding-bottom:env(safe-area-inset-bottom);
+  }
+  .tabbar button{
+    flex:1; background:none; border:none; color:var(--sub); padding:11px 0 10px;
+    font-size:12px; display:flex; flex-direction:column; align-items:center; gap:3px;
+  }
+  .tabbar button .ic{font-size:18px; line-height:1;}
+  .tabbar button.active{color:var(--accent);}
+
+  /* 卡片 / 网格 */
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:10px;}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:14px;}
+  .card.row{display:flex; justify-content:space-between; align-items:center;}
+  .card.warn{border-color:#5a4a1a;}
+  .card .num{font-size:26px; font-weight:700;}
+  .card .lab{color:var(--sub); font-size:12px; margin-top:2px;}
+  .card .sub{color:var(--sub); font-size:12px; margin-top:4px;}
+  .hint{margin-top:12px; color:var(--warn); font-size:12px;}
+
+  .sec-title{color:var(--sub); font-size:12px; text-transform:uppercase; letter-spacing:.5px;
+    margin:16px 2px 8px;}
+
+  /* 列表项 */
+  .item{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+    padding:12px; margin-bottom:10px;}
+  .item.row{display:flex; align-items:center; justify-content:space-between;}
+  .it-title{font-weight:600; font-size:14.5px;}
+  .it-sub{color:var(--sub); font-size:12px; margin-top:3px;}
+  .it-detail{color:var(--sub); font-size:12px; margin-top:6px; word-break:break-all;}
+  .empty{color:var(--sub); text-align:center; padding:30px 0; font-size:13px;}
+
+  .badge{display:inline-block; padding:1px 8px; border-radius:20px; font-size:11px;
+    border:1px solid var(--line); color:var(--sub);}
+  .badge.pending{color:var(--warn); border-color:#5a4a1a;}
+  .badge.running{color:var(--accent); border-color:#244a73;}
+  .badge.approved,.badge.done{color:var(--ok); border-color:#1f4d2b;}
+  .badge.rejected{color:var(--no); border-color:#5a2420;}
+
+  .dot{display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px;}
+  .dot.ok{background:var(--ok);} .dot.off{background:#555;}
+
+  /* 按钮 */
+  button.primary{background:var(--accent); color:#fff; border:none; border-radius:10px;
+    padding:11px 16px; font-size:15px; font-weight:600;}
+  button.block{width:100%; margin-bottom:12px;}
+  button.ok{background:var(--ok); color:#04210d; border:none; border-radius:9px; padding:8px 14px; font-weight:600;}
+  button.no{background:var(--no); color:#2a0805; border:none; border-radius:9px; padding:8px 14px; font-weight:600;}
+  .row{display:flex; gap:10px; align-items:center; margin-top:10px;}
+  .row > button{flex:1;}
+
+  /* 表单 */
+  .field{width:100%; background:var(--panel2); border:1px solid var(--line); color:var(--fg);
+    border-radius:10px; padding:11px; font-size:15px; margin-bottom:10px;}
+  textarea.field{resize:vertical;}
+  .msg{color:var(--no); font-size:13px; min-height:18px; margin-top:6px;}
+
+  /* 开关 */
+  .switch{position:relative; display:inline-block; width:46px; height:26px; flex:0 0 auto;}
+  .switch input{opacity:0; width:0; height:0;}
+  .slider{position:absolute; cursor:pointer; inset:0; background:#333a45; border-radius:26px; transition:.2s;}
+  .slider:before{content:""; position:absolute; height:20px; width:20px; left:3px; bottom:3px;
+    background:#fff; border-radius:50%; transition:.2s;}
+  .switch input:checked + .slider{background:var(--ok);}
+  .switch input:checked + .slider:before{transform:translateX(20px);}
+
+  /* 对话 */
+  .chat{display:flex; flex-direction:column; height:100%;}
+  #chat-model{margin-bottom:10px;}
+  .chatlog{flex:1 1 auto; overflow-y:auto; padding:6px 2px 12px; min-height:120px;}
+  .bubble{max-width:82%; padding:10px 13px; border-radius:14px; margin-bottom:9px; font-size:14.5px;
+    white-space:pre-wrap; word-break:break-word;}
+  .bubble.user{background:var(--accent); color:#fff; margin-left:auto; border-bottom-right-radius:4px;}
+  .bubble.assistant{background:var(--panel2); border:1px solid var(--line); margin-right:auto; border-bottom-left-radius:4px;}
+  .chat-input{display:flex; gap:8px; align-items:flex-end; padding-top:6px;}
+  .chat-input textarea{flex:1;}
+
+  #login-err{color:var(--no); font-size:13px; min-height:18px; text-align:center;}
+</style>
+</head>
+<body>
+
+<div id="login">
+  <div class="brand">协作审计台<small>手机远程控制台 · 登录后操作电脑端产品</small></div>
+  <input id="login-user" class="field" placeholder="用户名（任意，如 mobile）">
+  <select id="login-role" class="field"></select>
+  <button class="primary block" id="login-btn">登录</button>
+  <div id="login-err"></div>
+</div>
+
+<div id="app" class="hidden">
+  <header>
+    <div class="h-title">协作审计台</div>
+    <div class="h-actions">
+      <button id="btn-refresh">刷新</button>
+      <button id="btn-logout">退出</button>
+    </div>
+  </header>
+  <main><div id="view" class="pad">加载中…</div></main>
+  <nav class="tabbar">
+    <button data-tab="overview"><span class="ic">▦</span>概览</button>
+    <button data-tab="chat"><span class="ic">💬</span>对话</button>
+    <button data-tab="tasks"><span class="ic">✚</span>任务</button>
+    <button data-tab="approvals"><span class="ic">✔</span>审批</button>
+    <button data-tab="assistants"><span class="ic">⚙</span>助理</button>
+  </nav>
+</div>
+
+<script>
+  "use strict";
+  const $ = (s, r) => (r || document).querySelector(s);
+  const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
+  const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const stc = (s) => "badge " + String(s || "").toLowerCase();
+
+  const State = {
+    token: localStorage.getItem("wb_token") || "",
+    user: localStorage.getItem("wb_user") || "",
+    tab: "overview",
+    conv: [],
+  };
+
+  async function api(path, opts) {
+    opts = opts || {};
+    const headers = { "Content-Type": "application/json" };
+    if (State.token) headers["X-Session-Token"] = State.token;
+    let data = null;
+    try {
+      const res = await fetch(path, {
+        method: opts.method || "GET", headers,
+        body: opts.body ? JSON.stringify(opts.body) : undefined,
+      });
+      try { data = await res.json(); } catch (e) { data = null; }
+      return { status: res.status, data };
+    } catch (e) {
+      return { status: 0, data: null, error: String(e) };
+    }
+  }
+
+  function setToken(t, user) {
+    State.token = t || ""; State.user = user || "";
+    if (State.token) { localStorage.setItem("wb_token", t); localStorage.setItem("wb_user", user || ""); }
+    else { localStorage.removeItem("wb_token"); localStorage.removeItem("wb_user"); }
+  }
+
+  // ---------- 登录 ----------
+  async function initLogin() {
+    const { data } = await api("/api/roles");
+    const raw = (data && data.roles) || ["auditor", "operator", "planner", "reviewer", "admin"];
+    const roles = raw.map(r => (typeof r === "string" ? r : (r.id || r.name || "")))
+                       .filter(Boolean);
+    $("#login-role").innerHTML = roles.map(r =>
+      `<option value="${esc(r)}">${esc(r)}</option>`).join("");
+  }
+  async function doLogin() {
+    const user = ($("#login-user").value || "").trim() || "mobile";
+    const role = $("#login-role").value;
+    const { status, data } = await api("/api/login", { method: "POST", body: { user, role } });
+    if (status === 200 && data && data.token) {
+      setToken(data.token, user);
+      boot();
+    } else {
+      $("#login-err").textContent = (data && data.error) || "登录失败（服务是否可达？）";
+    }
+  }
+
+  function boot() {
+    if (!State.token) { showLogin(); return; }
+    showApp();
+    setTab("overview");
+  }
+  function showLogin() { $("#login").classList.remove("hidden"); $("#app").classList.add("hidden"); initLogin(); }
+  function showApp() { $("#login").classList.add("hidden"); $("#app").classList.remove("hidden"); }
+
+  // ---------- 路由 ----------
+  const VIEWS = {
+    overview: viewOverview, chat: viewChat, tasks: viewTasks,
+    approvals: viewApprovals, assistants: viewAssistants,
+  };
+  function setTab(name) {
+    State.tab = name;
+    $$(".tabbar button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
+    (VIEWS[name] || viewOverview)();
+  }
+
+  // ---------- 概览 ----------
+  async function viewOverview() {
+    $("#view").innerHTML = '<div class="pad">加载中…</div>';
+    const { data } = await api("/api/overview");
+    const c = (data && data.counts) || {};
+    const cost = (data && data.cost_total) || 0;
+    $("#view").innerHTML =
+      '<div class="pad">' +
+      '<div class="grid2">' +
+        card(c.tasks_total || 0, "任务总数") +
+        card(c.running || 0, "运行中") +
+        card(c.pending || 0, "待审批", true) +
+        card(c.traces || 0, "审计轨迹") +
+      '</div>' +
+      '<div class="card row"><div><div class="lab">安全评分</div><div class="num">' +
+        esc(data && data.security_score != null ? data.security_score : "-") + '</div></div>' +
+        '<div style="text-align:right"><div class="lab">预估成本</div><div class="num">¥' +
+        esc(typeof cost === "number" ? cost.toFixed(2) : cost) + '</div></div></div>' +
+      '<div class="card"><div class="lab">自扫命中</div><div class="num">' +
+        esc(data && data.self_scan_hits != null ? data.self_scan_hits : "-") + '</div>' +
+        '<div class="sub">' + esc((data && data.self_scan_note) || "") + '</div></div>' +
+      (data && data.demo_mode ? '<div class="hint">演示模式：当前读取的是隔离演示数据</div>' : "") +
+      '</div>';
+  }
+  function card(num, lab, warn) {
+    return '<div class="card' + (warn ? ' warn' : '') + '"><div class="num">' + esc(num) +
+      '</div><div class="lab">' + esc(lab) + '</div></div>';
+  }
+
+  // ---------- 对话 ----------
+  async function viewChat() {
+    $("#view").innerHTML =
+      '<div class="pad chat">' +
+      '<select id="chat-model" class="field"></select>' +
+      '<div id="chat-log" class="chatlog"></div>' +
+      '<div class="chat-input"><textarea id="chat-text" class="field" placeholder="问点什么…（回车发送）" rows="2"></textarea>' +
+      '<button id="chat-send" class="primary">发送</button></div></div>';
+    const { data } = await api("/api/chat/models");
+    const models = (data && data.profiles) || data || [];
+    const sel = $("#chat-model");
+    if (models.length) {
+      sel.innerHTML = models.map(m =>
+        '<option value="' + esc(m.id) + '"' + (m.active ? " selected" : "") + '>' +
+        esc((m.provider || "") + "/" + (m.model || "")) + (m.active ? " · 默认" : "") + '</option>').join("");
+    } else {
+      sel.innerHTML = '<option value="">（未配置模型，将走本地规则）</option>';
+    }
+    $("#chat-send").onclick = sendChat;
+    $("#chat-text").addEventListener("keydown", e => {
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
+    });
+    renderConv();
+  }
+  function renderConv() {
+    const log = $("#chat-log"); if (!log) return;
+    log.innerHTML = State.conv.map(m =>
+      '<div class="bubble ' + (m.role === "user" ? "user" : "assistant") + '">' + esc(m.content) + '</div>').join("");
+    log.scrollTop = log.scrollHeight;
+  }
+  async function sendChat() {
+    const ta = $("#chat-text"); const text = (ta.value || "").trim(); if (!text) return;
+    const model = $("#chat-model").value;
+    State.conv.push({ role: "user", content: text });
+    renderConv(); ta.value = "";
+    const btn = $("#chat-send"); btn.disabled = true;
+    const { data } = await api("/api/chat", {
+      method: "POST", body: { question: text, history: State.conv.slice(0, -1), model: model || null },
+    });
+    const ans = (data && data.answer) || (data && data.error) || "（无响应）";
+    State.conv.push({ role: "assistant", content: ans +
+      (data && data.engine ? "\n\n— " + esc(data.engine) + (data.model ? " · " + esc(data.model) : "") : "") });
+    renderConv(); btn.disabled = false;
+  }
+
+  // ---------- 任务 ----------
+  async function viewTasks() {
+    $("#view").innerHTML =
+      '<div class="pad"><button class="primary block" id="task-new-btn">+ 新建任务</button>' +
+      '<div id="task-list">加载中…</div></div>';
+    $("#task-new-btn").onclick = showTaskForm;
+    await loadTasks();
+  }
+  async function loadTasks() {
+    const { data } = await api("/api/tasks?limit=500");
+    const tasks = (data && data.tasks) || data || [];
+    $("#task-list").innerHTML = tasks.length ? tasks.map(t =>
+      '<div class="item"><div class="it-title">' + esc(t.title || t.task_id || "") + '</div>' +
+      '<div class="it-sub">' + esc(t.role || "") + ' · <span class="' + stc(t.status) + '">' +
+      esc(t.status || "") + '</span> · ' + esc(t.priority || "") + '</div></div>').join("")
+      : '<div class="empty">暂无任务</div>';
+  }
+  function showTaskForm() {
+    $("#task-list").innerHTML =
+      '<div class="form">' +
+      '<input id="t-title" class="field" placeholder="任务标题 *">' +
+      '<input id="t-role" class="field" placeholder="角色（如 planner）">' +
+      '<input id="t-tpl" class="field" placeholder="模板（可选）">' +
+      '<select id="t-pri" class="field"><option value="normal">优先级 normal</option>' +
+      '<option value="high">high</option><option value="low">low</option></select>' +
+      '<textarea id="t-note" class="field" placeholder="备注（可选）" rows="2"></textarea>' +
+      '<div class="row"><button class="primary" id="t-submit">提交</button>' +
+      '<button id="t-cancel">取消</button></div>' +
+      '<div id="t-msg" class="msg"></div></div>';
+    $("#t-cancel").onclick = loadTasks;
+    $("#t-submit").onclick = submitTask;
+  }
+  async function submitTask() {
+    const body = {
+      title: ($("#t-title").value || "").trim(),
+      role: ($("#t-role").value || "").trim(),
+      template: ($("#t-tpl").value || "").trim(),
+      priority: $("#t-pri").value,
+      note: ($("#t-note").value || "").trim(),
+      depends_on: [],
+    };
+    if (!body.title) { $("#t-msg").textContent = "标题必填"; return; }
+    const { status, data } = await api("/api/tasks/new", { method: "POST", body });
+    if (status === 200 && data && data.ok) {
+      $("#t-msg").textContent = "已创建：" + esc(data.task_id || "");
+      await loadTasks();
+    } else {
+      $("#t-msg").textContent = (data && data.error) || "创建失败";
+    }
+  }
+
+  // ---------- 审批 ----------
+  async function viewApprovals() {
+    $("#view").innerHTML = '<div class="pad"><div id="ap-list">加载中…</div></div>';
+    await loadApprovals();
+  }
+  async function loadApprovals() {
+    const { data } = await api("/api/approvals?limit=300");
+    const list = (data && data.approvals) || data || [];
+    $("#ap-list").innerHTML = list.length ? list.map(a => {
+      const pending = a.status === "pending";
+      return '<div class="item"><div class="it-title">' + esc(a.action || "") +
+        ' <span class="' + stc(a.status) + '">' + esc(a.status || "") + '</span></div>' +
+        '<div class="it-sub">' + esc(a.approval_id || "") + ' · 任务 ' + esc(a.task_id || "-") + '</div>' +
+        '<div class="it-detail">' + esc((a.detail || "").slice(0, 140)) + '</div>' +
+        (pending
+          ? '<div class="row"><button class="ok" data-aid="' + esc(a.approval_id) + '">通过</button>' +
+            '<button class="no" data-aid="' + esc(a.approval_id) + '">拒绝</button></div>'
+          : '<div class="it-sub">' + esc(a.decided_by || "") + ' · ' + esc(a.decided_at || "") + '</div>');
+    }).join("") : '<div class="empty">暂无审批</div>';
+    $$("#ap-list .ok").forEach(b => b.onclick = () => decide(b.dataset.aid, "approve"));
+    $$("#ap-list .no").forEach(b => b.onclick = () => decide(b.dataset.aid, "reject"));
+  }
+  async function decide(aid, decision) {
+    const { status, data } = await api("/api/approvals/decide",
+      { method: "POST", body: { approval_id: aid, decision } });
+    if (status === 200 && data && data.ok) { await loadApprovals(); }
+    else { alert((data && data.error) || "操作失败（需先登录）"); }
+  }
+
+  // ---------- 助理 ----------
+  async function viewAssistants() {
+    $("#view").innerHTML = '<div class="pad"><div id="as-content">加载中…</div></div>';
+    await loadAssistants();
+  }
+  async function loadAssistants() {
+    const [s, c] = await Promise.all([api("/api/assistant/settings"), api("/api/connectors")]);
+    const settings = s.data || {};
+    const channels = settings.channels || [];
+    const prefs = settings.prefs || {};
+    const conn = c.data || {};
+    const custom = conn.custom || [];
+    $("#as-content").innerHTML =
+      '<div class="sec-title">上下文记忆</div>' +
+      '<div class="item row"><div><div class="it-title">多轮上下文</div>' +
+      '<div class="it-sub">关闭后每次提问独立（省 token）</div></div>' +
+      '<label class="switch"><input type="checkbox" id="as-ctx"' + (prefs.context_memory ? " checked" : "") +
+      '><span class="slider"></span></label></div>' +
+      '<div class="sec-title">远程通道</div>' +
+      (channels.length ? channels.map(ch =>
+        '<div class="item row"><div><div class="it-title">' + esc(ch.name || ch.id || "") + '</div>' +
+        '<div class="it-sub">' + (ch.enabled ? '<span class="dot ok"></span>已启用' : '<span class="dot off"></span>未启用') +
+        '</div></div><label class="switch"><input type="checkbox" data-ch="' + esc(ch.id) +
+        '" class="ch-toggle"' + (ch.enabled ? " checked" : "") + '><span class="slider"></span></label></div>').join("")
+        : '<div class="empty">无远程通道</div>') +
+      '<div class="sec-title">连接器</div>' +
+      (custom.length ? custom.map(x => '<div class="item"><div class="it-title">' + esc(x.name || "") + '</div></div>').join("")
+        : '<div class="empty">无自定义连接器</div>');
+    const ctx = $("#as-ctx");
+    if (ctx) ctx.onchange = async e => {
+      await api("/api/assistant/prefs", { method: "POST", body: { context_memory: e.target.checked } });
+    };
+    $$(".ch-toggle").forEach(b => b.onchange = async e => {
+      await api("/api/assistant/channels/toggle",
+        { method: "POST", body: { id: e.target.dataset.ch, enabled: e.target.checked } });
+    });
+  }
+
+  // ---------- 绑定 ----------
+  $("#login-btn").onclick = doLogin;
+  $("#btn-logout").onclick = () => { setToken(""); showLogin(); };
+  $("#btn-refresh").onclick = () => setTab(State.tab);
+  $$(".tabbar button").forEach(b => b.onclick = () => setTab(b.dataset.tab));
+
+  boot();
+</script>
+</body>
+</html>

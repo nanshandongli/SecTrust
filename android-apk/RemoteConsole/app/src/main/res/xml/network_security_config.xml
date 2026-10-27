@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- 远程控制台走局域网 HTTP（明文），允许所有域名的 cleartext，方便输入任意电脑 IP -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

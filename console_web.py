@@ -1911,6 +1911,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _serve_mobile(self):
+        """提供手机端远程控制台（独立的移动优先 SPA，无构建步骤）。"""
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "mobile_console.html")
+        if not os.path.exists(p):
+            return self._json({"error": "mobile console not found"}, 404)
+        with open(p, "r", encoding="utf-8") as fh:
+            html = fh.read()
+        self._html(html)
+
     def _html(self, html):
         data = html.encode("utf-8")
         self.send_response(200)
@@ -1938,6 +1948,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/" or path == "/index.html":
             self._html(getattr(Handler, "app_html", None) or APP_HTML)
             return
+        if path in ("/mobile", "/mobile/", "/mobile/index.html"):
+            return self._serve_mobile()
         if path == "/api/overview":
             return self._json(self._overview())
         if path == "/api/tasks":
@@ -2463,6 +2475,25 @@ class Handler(BaseHTTPRequestHandler):
             days = int(days) if isinstance(days, int) else 30
             res = self._run_action(action, operator=operator, days=days)
             return self._json(res, 200 if res.get("ok") else 500)
+
+        # ---- 审批决策（写操作：需登录，安全相关）----
+        if path == "/api/approvals/decide":
+            tok = self.headers.get("X-Session-Token", "")
+            sess = self.sessions.verify(tok) if self.sessions else None
+            if not sess:
+                return self._json({"error": "需要登录后才能审批"}, 401)
+            aid = str(payload.get("approval_id") or "")
+            decision = str(payload.get("decision") or "")
+            if decision not in ("approve", "reject"):
+                return self._json({"error": "decision 必须是 approve/reject"}, 400)
+            by = str(sess.get("user") or "mobile")
+            try:
+                ok = self.approval.decide(aid, decision, by=by)
+            except Exception as e:  # noqa: BLE001
+                return self._json({"error": str(e)}, 400)
+            if not ok:
+                return self._json({"error": "审批不存在或已决策"}, 409)
+            return self._json({"ok": True, "approval_id": aid, "decision": decision})
 
         return self._json({"error": "not found", "path": path}, 404)
 
