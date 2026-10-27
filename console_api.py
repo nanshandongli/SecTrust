@@ -265,9 +265,10 @@ def _skillhub_search(keyword: str, limit: int = 8,
             data = json.loads(r.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, ValueError) as e:
         return {"ok": False, "error": "SkillHub 不可达：%s" % e, "results": []}
-    items = data.get("data") or data.get("items") or data.get("list") or []
+    items = data.get("data") or data.get("items") or data.get("list") or {}
     if isinstance(items, dict):
-        items = items.get("list") or items.get("items") or []
+        items = (items.get("skills") or items.get("list") or items.get("items")
+                 or [])
     out = []
     for it in items[:limit]:
         if not isinstance(it, dict):
@@ -278,8 +279,77 @@ def _skillhub_search(keyword: str, limit: int = 8,
             "desc": (it.get("description") or it.get("summary") or "")[:200],
             "author": it.get("author") or it.get("owner") or "",
             "downloads": it.get("downloads") or it.get("stars") or 0,
+            "category": it.get("category") or "",
         })
     return {"ok": True, "results": out}
+
+
+def skillhub_featured(limit: int = 12, timeout: float = 8.0) -> Dict[str, Any]:
+    """SkillHub 推荐位：空关键词真实调公开 API，按更新取前 N 条。
+
+    API 不可达时如实返回 ok=False，**不编造推荐列表**。
+    """
+    r = _skillhub_search("", limit=limit, timeout=timeout)
+    if not r.get("ok"):
+        return {"ok": False, "error": r.get("error") or "SkillHub 不可达",
+                "results": []}
+    return {"ok": True, "results": r["results"]}
+
+
+# ---------------- 自定义连接器（真实存储，非占位） ----------------
+def _custom_connectors_path(project_root: str) -> str:
+    return os.path.join(project_root, "data", "custom_connectors.json")
+
+
+def list_custom_connectors(project_root: str) -> List[Dict[str, Any]]:
+    path = _custom_connectors_path(project_root)
+    if not os.path.exists(path):
+        return []
+    try:
+        data = json.loads(open(path, encoding="utf-8").read())
+        return data.get("connectors") if isinstance(data, dict) else []
+    except (OSError, ValueError):
+        return []
+
+
+def add_custom_connector(project_root: str, entry: Dict[str, Any],
+                         ) -> Dict[str, Any]:
+    """登记自定义连接器（本地技能源目录）。
+
+    校验：名称必填；类型仅支持 dir；路径必须存在且为目录。落盘
+    data/custom_connectors.json，技能面板会把目录下的技能扫出来。
+    """
+    name = (entry.get("name") or "").strip()
+    src = (entry.get("path") or "").strip()
+    if not name:
+        return {"ok": False, "error": "名称必填"}
+    if len(name) > 60:
+        return {"ok": False, "error": "名称过长（≤60 字符）"}
+    if not src:
+        return {"ok": False, "error": "路径必填"}
+    if not os.path.isdir(src):
+        return {"ok": False, "error": "路径不存在或不是目录：%s" % src}
+    store = list_custom_connectors(project_root)
+    if any(c.get("name") == name for c in store):
+        return {"ok": False, "error": "同名连接器已存在：%s" % name}
+    store.append({"name": name, "desc": (entry.get("desc") or "").strip()[:200],
+                  "type": "dir", "path": src})
+    path = _custom_connectors_path(project_root)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"connectors": store}, f, ensure_ascii=False, indent=2)
+    return {"ok": True, "connectors": store}
+
+
+def remove_custom_connector(project_root: str, name: str) -> Dict[str, Any]:
+    store = list_custom_connectors(project_root)
+    kept = [c for c in store if c.get("name") != name]
+    if len(kept) == len(store):
+        return {"ok": False, "error": "未找到连接器：%s" % name}
+    path = _custom_connectors_path(project_root)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"connectors": kept}, f, ensure_ascii=False, indent=2)
+    return {"ok": True, "connectors": kept}
 
 
 def _skillhub_install(slug: str, target_dir: str,
@@ -306,7 +376,8 @@ def _skillhub_install(slug: str, target_dir: str,
             "note": "已安装到 %s，重启后可在助理/技能面板看到。" % target_dir}
 
 
-def connector_status(skills_dir: str) -> Dict[str, Any]:
+def connector_status(skills_dir: str,
+                     project_root: Optional[str] = None) -> Dict[str, Any]:
     """连接器总览：SkillHub 连通性 + 本地连接器 + 已装技能数。"""
     cli = shutil.which("skillhub")
     skillhub_ok = False
@@ -330,9 +401,11 @@ def connector_status(skills_dir: str) -> Dict[str, Any]:
         "skillhub": {"available": skillhub_ok, "note": skillhub_note,
                      "cli": cli or None},
         "local_connectors": local_connectors,
+        "custom_connectors": (list_custom_connectors(project_root)
+                              if project_root else []),
         "skills_dir": skills_dir,
         "note": "SkillHub 为社区技能市场（公开只读 API + 官方 CLI 安装）；"
-                "本地连接器用于技能源同步。",
+                "本地连接器用于技能源同步；自定义连接器为用户登记的本地技能源目录。",
     }
 
 

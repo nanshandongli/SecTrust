@@ -251,6 +251,30 @@ APP_HTML = """<!doctype html>
   .sk .nm{font-weight:600;font-size:14px}
   .sk .src{font-size:11px;color:var(--accent2);margin:2px 0 6px}
   .sk .ds{font-size:12.5px;color:var(--sub);line-height:1.5}
+  /* ---- 连接器画廊（WorkBuddy 式卡片网格） ---- */
+  .conn-top{display:flex;align-items:center;gap:10px;margin:4px 0 16px;flex-wrap:wrap}
+  .conn-top .search{flex:1;min-width:220px;display:flex;gap:8px}
+  .conn-top input{flex:1;padding:9px 14px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--txt)}
+  .conn-sec{font-weight:600;font-size:14px;margin:18px 0 10px;display:flex;align-items:center;gap:8px}
+  .conn-sec .cnt{font-size:12px;color:var(--sub);font-weight:400}
+  .conn-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}
+  .conn-card{position:relative;background:var(--card);border:1px solid var(--line);border-radius:14px;
+    padding:16px 14px 14px;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:8px;min-height:118px}
+  .conn-card:hover{border-color:var(--accent)}
+  .conn-badge{width:40px;height:40px;border-radius:12px;color:#fff;display:flex;align-items:center;
+    justify-content:center;font-size:17px;font-weight:700;flex:0 0 auto}
+  .conn-card .nm{font-weight:600;font-size:14px;display:flex;align-items:center;gap:6px;padding-right:26px}
+  .conn-card .ds{font-size:12px;color:var(--sub);line-height:1.5;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .conn-card .ft{margin-top:auto;display:flex;align-items:center;gap:6px;font-size:11px;color:var(--sub)}
+  .conn-plus{position:absolute;top:10px;right:10px;width:26px;height:26px;border-radius:50%;
+    border:1px solid var(--line);background:var(--bg);color:var(--txt);font-size:16px;line-height:1;
+    cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
+  .conn-plus:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .conn-check{position:absolute;top:10px;right:10px;color:var(--ok);font-size:16px;font-weight:700}
+  .conn-tag{display:inline-block;padding:1px 8px;border-radius:9px;font-size:11px;
+    background:var(--bg2,var(--bg));border:1px solid var(--line)}
+  .conn-tag.m{color:var(--ok);border-color:var(--ok)}
   /* ---- 安全清单 ---- */
   .check{display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}
   .check .dot{width:18px;height:18px;border-radius:50%;flex:0 0 auto;margin-top:1px;
@@ -555,6 +579,20 @@ APP_HTML = """<!doctype html>
   </div>
 </div>
 
+<!-- 自定义连接器弹窗（登记本地技能源目录） -->
+<div class="mmask hidden" id="connModal">
+  <div class="mmodal">
+    <div class="mhead"><span class="mt">自定义连接器</span><button class="mx" onclick="closeConnCustom()" type="button">✕</button></div>
+    <div class="mbody">
+      <div class="mrow"><label>名称</label><input id="ccName" placeholder="例如：我的技能库"></div>
+      <div class="mrow"><label>描述</label><input id="ccDesc" placeholder="一句话说明（可选）"></div>
+      <div class="mrow"><label>目录路径</label><input id="ccPath" placeholder="例如：D:\\skills 或 /home/me/skills"></div>
+      <div class="mwarn" id="ccMsg"></div>
+    </div>
+    <div class="mfoot"><button class="ghost" onclick="closeConnCustom()" type="button">取消</button><button onclick="saveConnCustom()" type="button">保存</button></div>
+  </div>
+</div>
+
 <script>
 const $ = id => document.getElementById(id);
 const fmt = t => t ? new Date(t*1000).toLocaleString('zh-CN') : '-';
@@ -579,6 +617,7 @@ async function postJSON(u, body){
   const cancel=$('mmCancel');if(cancel)cancel.addEventListener('click',closeModelModal);
   const save=$('mmSave');if(save)save.addEventListener('click',saveModel);
   const mask=$('modelModal');if(mask)mask.addEventListener('click',function(e){if(e.target===mask)closeModelModal();});
+  const cmask=$('connModal');if(cmask)cmask.addEventListener('click',function(e){if(e.target===cmask)closeConnCustom();});
 })();
 
 /* ---------------- 全局搜索（任务 / 轨迹 / 审批 / 技能） ---------------- */
@@ -867,7 +906,7 @@ function addDep(tid){
 }
 async function submitNewTask(){
   $('ntErr').textContent='';$('ntOk').textContent='';
-  const deps=$('ntDeps').value.split(/[,，\s]+/).filter(Boolean);
+  const deps=$('ntDeps').value.split(/[,，\\s]+/).filter(Boolean);
   const body={title:$('ntTitle').value,role:$('ntRole').value,template:$('ntTemplate').value,
     priority:$('ntPriority').value,note:$('ntNote').value,depends_on:deps,
     operator:SESSION?SESSION.user:'operator'};
@@ -933,42 +972,104 @@ async function loadAssistants(){
     '</div>';
 }
 
-// ================= 技能连接器 =================
+// ================= 技能连接器（WorkBuddy 式卡片画廊） =================
+const CONN_HUES=[210,160,28,268,0,190,330,55,122,240];
+function connHue(name){let h=0;const s=name||'?';for(let i=0;i<s.length;i++)h=(h*31+s.charCodeAt(i))%997;return CONN_HUES[h%CONN_HUES.length];}
+function connBadge(name){
+  const s=name||'?';
+  return '<div class="conn-badge" style="background:hsl('+connHue(s)+',52%,44%)">'+esc(s.charAt(0).toUpperCase())+'</div>';
+}
+function connCard(o){
+  let corner='';
+  if(o.installed)corner='<span class="conn-check" title="已就绪">✓</span>';
+  else if(o.plusSlug)corner='<button class="conn-plus" title="安装" onclick="connInstall(&quot;'+esc(o.plusSlug)+'&quot;)">+</button>';
+  const tag=o.tag?'<span class="conn-tag '+(o.tagCls||'')+'">'+esc(o.tag)+'</span>':'';
+  const foot=o.foot||'';
+  return '<div class="conn-card">'+corner+connBadge(o.name)+
+    '<div class="nm">'+esc(o.name)+'</div>'+
+    '<div class="ds">'+esc(o.desc||'')+'</div>'+
+    '<div class="ft">'+tag+foot+'</div></div>';
+}
+function connEmpty(gridId,txt){const g=$(gridId);if(g)g.innerHTML='<div class="empty">'+esc(txt)+'</div>';}
 async function loadConnectors(){
   const el=$('view-connectors');
   const d=await jget('/api/connectors');
-  el.innerHTML='<h2 class="vh">技能连接器</h2><p class="vdesc">'+esc(d.note||'')+'</p>'+
-    '<div class="grid stats">'+
-      stat(d.skillhub&&d.skillhub.available?'可用':'不可用','SkillHub',(d.skillhub&&d.skillhub.available)?'ok':'warn')+
-      stat((d.local_connectors||[]).length,'本地连接器')+stat('~/.workbuddy/skills','安装目标')+
+  window.__connData=d;
+  const sk=await jget('/api/skills');
+  window.__connSkills=sk||[];
+  el.innerHTML='<h2 class="vh">技能连接器</h2>'+
+    '<div class="conn-top">'+
+      '<div class="search"><input id="connQ" placeholder="搜索 SkillHub 社区技能，如：安全测试 / 周报 / 数据分析">'+
+      '<button class="btn" onclick="connSearch()">搜索</button></div>'+
+      '<button class="btn ghost" onclick="openConnCustom()">+ 自定义连接器</button>'+
     '</div>'+
-    '<div class="panel"><h3>SkillHub 连接</h3>'+
-      '<div class="check"><div class="dot" style="background:'+(d.skillhub&&d.skillhub.available?'var(--ok)':'var(--warn)')+'">'+(d.skillhub&&d.skillhub.available?'✓':'!')+'</div>'+
-        '<div><div class="t">官方 CLI：'+esc((d.skillhub&&d.skillhub.note)||'未知')+'</div>'+
-        '<div class="d">路径：'+esc((d.skillhub&&d.skillhub.cli)||'未找到')+'</div></div></div>'+
-      '<div class="fld" style="margin-top:14px"><label>搜索社区技能</label>'+
-        '<div class="row"><input id="connQ" placeholder="关键词，如：周报 / 安全测试 / 数据分析" style="flex:1">'+
-        '<button class="btn" onclick="connSearch()">搜索</button></div></div>'+
-      '<div id="connResults"></div>'+
-    '</div>'+
-    '<div class="panel"><h3>本地连接器</h3>'+
-      ((d.local_connectors||[]).length?d.local_connectors.map(c=>'<div class="litem"><div class="grow"><div class="nm">'+esc(c.name)+'</div>'+
-        '<div class="mt">'+esc(c.desc||'')+'</div></div><span class="pill live">已内置</span></div>').join('')
-        :'<div class="empty">未检测到本地连接器</div>')+
-    '</div>';
+    '<div class="conn-sec">内置连接器 <span class="cnt">'+((d.local_connectors||[]).length)+' 项</span></div>'+
+    '<div class="conn-grid" id="connBuiltIn"></div>'+
+    '<div class="conn-sec">已安装技能 <span class="cnt">'+((sk||[]).length)+' 项 · 安装目标 <code class="k">~/.workbuddy/skills</code></span></div>'+
+    '<div class="conn-grid" id="connInstalled"></div>'+
+    '<div class="conn-sec">自定义连接器 <span class="cnt">'+((d.custom_connectors||[]).length)+' 项</span></div>'+
+    '<div class="conn-grid" id="connCustom"></div>'+
+    '<div class="conn-sec">SkillHub 推荐 <span class="cnt">来自真实社区市场，不可达时如实提示</span></div>'+
+    '<div class="conn-grid" id="connFeatured"><div class="empty">加载中…</div></div>'+
+    '<div class="conn-sec">搜索结果 <span class="cnt" id="connSearchCnt"></span></div>'+
+    '<div class="conn-grid" id="connResults"><div class="empty">输入关键词后搜索社区技能</div></div>'+
+    '<p class="vdesc" style="margin-top:16px">'+esc(d.note||'')+'</p>';
+  renderConnBuiltIn();renderConnInstalled();renderConnCustom();loadConnFeatured();
+  const q=$('connQ');if(q)q.addEventListener('keydown',function(e){if(e.key==='Enter')connSearch();});
+}
+function renderConnBuiltIn(){
+  const d=window.__connData||{};
+  const list=d.local_connectors||[];
+  if(!list.length){connEmpty('connBuiltIn','未检测到内置连接器');return;}
+  $('connBuiltIn').innerHTML=list.map(function(c){
+    return connCard({name:c.name,desc:c.desc,tag:'已内置',tagCls:'m',installed:true});
+  }).join('');
+}
+function renderConnInstalled(){
+  const sk=window.__connSkills||[];
+  if(!sk.length){connEmpty('connInstalled','暂无已安装技能；可去 SkillHub 推荐或搜索里点 + 安装');return;}
+  $('connInstalled').innerHTML=sk.map(function(k){
+    return connCard({name:k.name,desc:k.description||k.desc||'',
+      tag:(k.source==='custom'?'自定义':(k.source==='skillhub'?'SkillHub':'本地')),
+      installed:true});
+  }).join('');
+}
+function renderConnCustom(){
+  const d=window.__connData||{};
+  const list=d.custom_connectors||[];
+  if(!list.length){connEmpty('connCustom','未登记自定义连接器；点右上「+ 自定义连接器」登记本地技能源目录');return;}
+  $('connCustom').innerHTML=list.map(function(c){
+    return connCard({name:c.name,desc:c.desc||'',tag:'本地技能源',
+      foot:'<span class="k" style="font-size:11px;word-break:break-all">'+esc(c.path||'')+'</span>'+
+        ' <a href="javascript:void 0" onclick="removeConnCustom(&quot;'+esc(c.name)+'&quot;)" style="color:var(--warn)">移除</a>'});
+  }).join('');
+}
+async function loadConnFeatured(){
+  const g=$('connFeatured');if(!g)return;
+  try{
+    const r=await jget('/api/connectors/skillhub/featured');
+    if(!r.ok){g.innerHTML='<div class="warnbar">'+esc(r.error||'SkillHub 不可达')+'（推荐位需要联网）</div>';return;}
+    if(!r.results.length){g.innerHTML='<div class="empty">SkillHub 暂无推荐</div>';return;}
+    g.innerHTML=r.results.map(function(s){
+      return connCard({name:s.name||s.slug,desc:s.desc,tag:s.category||'社区',
+        plusSlug:s.slug,foot:s.author?'<span>by '+esc(s.author)+'</span>':''});
+    }).join('');
+  }catch(e){g.innerHTML='<div class="warnbar">推荐加载失败：'+esc(String(e))+'</div>';}
 }
 async function connSearch(){
-  const q=$('connQ').value.trim();
-  const box=$('connResults');
-  if(!q){box.innerHTML='<div class="empty">输入关键词后搜索</div>';return;}
+  const q=($('connQ')?$('connQ').value.trim():'');
+  const box=$('connResults');const cnt=$('connSearchCnt');
+  if(!q){box.innerHTML='<div class="empty">输入关键词后搜索社区技能</div>';if(cnt)cnt.textContent='';return;}
   box.innerHTML='<div class="empty">搜索中…</div>';
   try{
     const r=await jget('/api/connectors/skillhub/search?q='+encodeURIComponent(q));
     if(!r.ok){box.innerHTML='<div class="warnbar">'+esc(r.error||'搜索失败')+'</div>';return;}
-    if(!r.results.length){box.innerHTML='<div class="empty">没有匹配 “'+esc(q)+'” 的技能</div>';return;}
-    box.innerHTML=r.results.map(s=>'<div class="litem"><div class="grow"><div class="nm">'+esc(s.name)+' <span class="tag">'+esc(s.slug)+'</span></div>'+
-      '<div class="mt">'+esc(s.desc||'')+(s.author?(' · '+esc(s.author)):'')+'</div></div>'+
-      '<div class="ops"><button class="btn" onclick="connInstall(&quot;'+esc(s.slug)+'&quot;)">安装</button></div></div>').join('');
+    if(!r.results.length){box.innerHTML='<div class="empty">没有匹配 “'+esc(q)+'” 的技能</div>';if(cnt)cnt.textContent='0 项';return;}
+    if(cnt)cnt.textContent=r.results.length+' 项';
+    box.innerHTML=r.results.map(function(s){
+      return connCard({name:s.name||s.slug,desc:s.desc,tag:s.category||'社区',
+        plusSlug:s.slug,foot:s.author?'<span>by '+esc(s.author)+'</span>':''});
+    }).join('');
   }catch(e){box.innerHTML='<div class="warnbar">搜索失败：'+esc(String(e))+'</div>';}
 }
 async function connInstall(slug){
@@ -976,17 +1077,39 @@ async function connInstall(slug){
   const box=$('connResults');
   box.insertAdjacentHTML('afterbegin','<div class="warnbar" id="connInstalling">正在安装 '+esc(slug)+'…</div>');
   try{
-    const r=await fetch('/api/connectors/skillhub/install',{method:'POST',
-      headers:{'Content-Type':'application/json'},body:JSON.stringify({slug:slug})});
-    const d=await r.json();
+    const r=await postJSON('/api/connectors/skillhub/install',{slug:slug});
+    const d=r.data;
     const n=document.getElementById('connInstalling');
     if(n)n.remove();
+    if(r.status===401){box.insertAdjacentHTML('afterbegin','<div class="warnbar">'+esc(d.error||'需要登录')+'</div>');return;}
     if(d.ok)box.insertAdjacentHTML('afterbegin','<div class="warnbar" style="background:#e8f5e9;color:#2e7d32;border-color:#c8e6c9">安装成功：'+esc(slug)+'。'+esc(d.note||'')+'</div>');
     else box.insertAdjacentHTML('afterbegin','<div class="warnbar">安装失败：'+esc(d.error||'未知错误')+'</div>');
   }catch(e){
     const n=document.getElementById('connInstalling');if(n)n.remove();
     box.insertAdjacentHTML('afterbegin','<div class="warnbar">安装请求失败：'+esc(String(e))+'</div>');
   }
+}
+// ---- 自定义连接器（本地技能源目录） ----
+function openConnCustom(){
+  const mask=$('connModal');if(!mask)return;
+  $('ccName').value='';$('ccDesc').value='';$('ccPath').value='';
+  const m=$('ccMsg');if(m)m.textContent='登记一个本地目录，目录下的技能（含 SKILL.md 的子目录）会出现在「已安装技能」里。';
+  mask.classList.remove('hidden');
+}
+function closeConnCustom(){const m=$('connModal');if(m)m.classList.add('hidden');}
+async function saveConnCustom(){
+  const msg=$('ccMsg');
+  const r=await postJSON('/api/connectors/custom',{
+    name:$('ccName').value.trim(),desc:$('ccDesc').value.trim(),path:$('ccPath').value.trim()});
+  if(r.status===401){if(msg)msg.textContent=r.data.error||'需要登录';return;}
+  if(!r.data.ok){if(msg)msg.textContent=r.data.error||'保存失败';return;}
+  closeConnCustom();loadConnectors();
+}
+async function removeConnCustom(name){
+  if(!confirm('移除自定义连接器「'+name+'」？（不会删除目录里的文件）'))return;
+  const r=await postJSON('/api/connectors/custom/delete',{name:name});
+  if(!r.data.ok){alert(r.data.error||'移除失败');return;}
+  loadConnectors();
 }
 
 // ================= 定时任务 =================
@@ -1764,7 +1887,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/assistants":
             return self._json(self._assistants())
         if path == "/api/connectors":
-            return self._json(console_api.connector_status(self.skills_dir))
+            return self._json(console_api.connector_status(
+                self.skills_dir, project_root=self.project_root))
+        if path == "/api/connectors/skillhub/featured":
+            return self._json(console_api.skillhub_featured())
         if path == "/api/connectors/skillhub/search":
             q = qs.get("q", [""])[0]
             return self._json(console_api._skillhub_search(q))
@@ -1951,6 +2077,30 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             out.append({"name": name, "slug": slug, "source": source,
                         "description": desc})
+        # 自定义连接器登记的本地技能源目录
+        for c in console_api.list_custom_connectors(self.project_root):
+            base = c.get("path") or ""
+            if not base or not os.path.isdir(base):
+                continue
+            for d in sorted(glob.glob(os.path.join(base, "*"))):
+                if not os.path.isdir(d) or not os.path.exists(
+                        os.path.join(d, "SKILL.md")):
+                    continue
+                name = os.path.basename(d)
+                desc = ""
+                try:
+                    txt = open(os.path.join(d, "SKILL.md"),
+                               encoding="utf-8", errors="replace").read(4000)
+                    for line in txt.splitlines():
+                        line = line.strip().lstrip("#").strip()
+                        if line:
+                            desc = line[:120]
+                            break
+                except OSError:
+                    pass
+                out.append({"name": name, "slug": name,
+                            "source": "custom", "origin": c.get("name") or "",
+                            "description": desc})
         return out
 
     def log_message(self, *args):
@@ -2078,11 +2228,29 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(res, 200 if res.get("ok") else 400)
 
         # ---- SkillHub 安装 ----
+        # ---- 连接器写操作（需登录）----
+        tok = self.headers.get("X-Session-Token", "")
+        sess = self.sessions.verify(tok) if self.sessions else None
+        if path in ("/api/connectors/skillhub/install",
+                    "/api/connectors/custom", "/api/connectors/custom/delete"):
+            if not sess:
+                return self._json({"error": "需要登录后才能管理连接器"}, 401)
         if path == "/api/connectors/skillhub/install":
             slug = str(payload.get("slug") or "").strip()
             if not slug:
                 return self._json({"ok": False, "error": "缺少 slug"}, 400)
             res = console_api._skillhub_install(slug, self.skills_dir)
+            return self._json(res)
+        if path == "/api/connectors/custom":
+            res = console_api.add_custom_connector(self.project_root, payload)
+            if not res.get("ok"):
+                return self._json(res, 400)
+            return self._json(res)
+        if path == "/api/connectors/custom/delete":
+            name = str(payload.get("name") or "").strip()
+            res = console_api.remove_custom_connector(self.project_root, name)
+            if not res.get("ok"):
+                return self._json(res, 404)
             return self._json(res)
 
         # ---- 定时任务增删 ----
