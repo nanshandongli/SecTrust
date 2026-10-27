@@ -220,10 +220,13 @@ class AssistantSettings:
                 body = {"msg_type": "text",
                         "content": {"text": "%s\n%s" % (title, text)}}
                 if sec:
+                    # 飞书签名：string_to_sign = "timestamp\nsecret"，以它为 HMAC key、
+                    # 空消息做 SHA256，再 base64。**必须 decode 成 str**——b64encode 返回
+                    # bytes，bytes 进 json.dumps 会抛 TypeError（曾导致带签名的飞书通道崩溃）。
                     ts = str(int(time.time()))
                     sign_str = "%s\n%s" % (ts, sec)
                     sign = base64.b64encode(hmac.new(
-                        sign_str.encode(), b"", hashlib.sha256).digest())
+                        sign_str.encode(), b"", hashlib.sha256).digest()).decode("utf-8")
                     body["timestamp"] = ts
                     body["sign"] = sign
             else:  # generic_webhook

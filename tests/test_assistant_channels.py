@@ -8,6 +8,9 @@
   - 偏好（context_memory）默认开启、只能改白名单键。
 """
 
+import base64
+import hashlib
+import hmac
 import json
 import os
 import sys
@@ -140,6 +143,33 @@ class TestSend(unittest.TestCase):
         self.assertTrue(res["ok"], res)
         self.assertEqual(TestSend.last_body["event"], "sectrust.notify")
         self.assertEqual(TestSend.last_body["title"], "标题")
+
+    def test_send_feishu_body_shape(self):
+        TestSend.last_body = None
+        res = self.st.send("feishu_bot", "标题", "内容",
+                           webhook="http://127.0.0.1:%d/hook" % self.port)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(TestSend.last_body["msg_type"], "text")
+        self.assertEqual(TestSend.last_body["content"]["text"], "标题\n内容")
+        self.assertNotIn("sign", TestSend.last_body)
+
+    def test_send_feishu_with_secret_serializable_and_correct(self):
+        """回归：base64 结果必须 decode 成 str，否则 json.dumps 抛 TypeError。
+
+        同时校验签名算法本身：HMAC key = "timestamp\\nsecret"，空消息，SHA256 → base64。
+        """
+        TestSend.last_body = None
+        res = self.st.send("feishu_bot", "标题", "内容",
+                           webhook="http://127.0.0.1:%d/hook" % self.port,
+                           secret="SECtest")
+        self.assertTrue(res["ok"], res)   # 未 decode 时这里会是 TypeError 而非 ok:False
+        body = TestSend.last_body
+        self.assertIsInstance(body["sign"], str)
+        self.assertIsInstance(body["timestamp"], str)
+        expect = base64.b64encode(hmac.new(
+            ("%s\n%s" % (body["timestamp"], "SECtest")).encode(),
+            b"", hashlib.sha256).digest()).decode("utf-8")
+        self.assertEqual(body["sign"], expect)
 
     def test_send_platform_error_surfaced(self):
         class ErrH(BaseHTTPRequestHandler):
