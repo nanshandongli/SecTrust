@@ -39,6 +39,7 @@ from task_center_web import dag_view
 import console_api
 import console_actions
 from model_profiles import ModelProfileStore
+from assistant_channels import AssistantSettings
 import model_providers
 
 
@@ -272,9 +273,26 @@ APP_HTML = """<!doctype html>
     cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
   .conn-plus:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
   .conn-check{position:absolute;top:10px;right:10px;color:var(--ok);font-size:16px;font-weight:700}
+  /* ---- 助理远程通道 ---- */
+  .conn-btn{position:absolute;top:10px;right:10px;border:1px solid var(--line);
+    background:var(--bg);color:var(--txt);border-radius:14px;padding:3px 12px;
+    font-size:12px;cursor:pointer}
+  .conn-btn:hover{border-color:var(--accent);color:var(--accent)}
+  .conn-btn.on{background:var(--ok);border-color:var(--ok);color:#fff}
+  .conn-btn.mid{border-color:var(--warn);color:var(--warn)}
+  /* ---- 开关（上下文管理等） ---- */
+  .switch{position:relative;display:inline-block;width:42px;height:22px;flex:none}
+  .switch input{opacity:0;width:0;height:0}
+  .switch .slider{position:absolute;inset:0;background:var(--line);border-radius:22px;
+    transition:background .15s;cursor:pointer}
+  .switch .slider::before{content:'';position:absolute;width:16px;height:16px;
+    border-radius:50%;background:#fff;top:3px;left:3px;transition:transform .15s}
+  .switch input:checked+.slider{background:var(--ok)}
+  .switch input:checked+.slider::before{transform:translateX(20px)}
   .conn-tag{display:inline-block;padding:1px 8px;border-radius:9px;font-size:11px;
     background:var(--bg2,var(--bg));border:1px solid var(--line)}
   .conn-tag.m{color:var(--ok);border-color:var(--ok)}
+  .conn-tag.ok{color:#fff;background:var(--ok);border-color:var(--ok)}
   /* ---- 安全清单 ---- */
   .check{display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}
   .check .dot{width:18px;height:18px;border-radius:50%;flex:0 0 auto;margin-top:1px;
@@ -578,6 +596,16 @@ APP_HTML = """<!doctype html>
     <div class="mfoot"><button class="ghost" id="mmCancel" type="button">取消</button><button id="mmSave" type="button">保存</button></div>
   </div>
 </div>
+<div class="mmask hidden" id="chanModal">
+  <div class="mmodal">
+    <div class="mhead"><span class="mt" id="chanTitle">连接通道</span><button class="mx" id="chanX" type="button">✕</button></div>
+    <div class="mbody" id="chanBody"></div>
+    <div class="mfoot"><span id="chanMsg" class="ctip" style="flex:1"></span>
+      <button class="ghost" id="chanTest" type="button">测试</button>
+      <button class="ghost" id="chanCancel" type="button">取消</button>
+      <button id="chanSave" type="button">保存</button></div>
+  </div>
+</div>
 
 <!-- 自定义连接器弹窗（登记本地技能源目录） -->
 <div class="mmask hidden" id="connModal">
@@ -617,6 +645,12 @@ async function postJSON(u, body){
   const cancel=$('mmCancel');if(cancel)cancel.addEventListener('click',closeModelModal);
   const save=$('mmSave');if(save)save.addEventListener('click',saveModel);
   const mask=$('modelModal');if(mask)mask.addEventListener('click',function(e){if(e.target===mask)closeModelModal();});
+  // 助理远程通道弹窗
+  const cx=$('chanX');if(cx)cx.addEventListener('click',closeChan);
+  const cc=$('chanCancel');if(cc)cc.addEventListener('click',closeChan);
+  const ct=$('chanTest');if(ct)ct.addEventListener('click',testChan);
+  const cs=$('chanSave');if(cs)cs.addEventListener('click',saveChan);
+  const cm=$('chanModal');if(cm)cm.addEventListener('click',function(e){if(e.target===cm)closeChan();});
   const cmask=$('connModal');if(cmask)cmask.addEventListener('click',function(e){if(e.target===cmask)closeConnCustom();});
 })();
 
@@ -952,7 +986,8 @@ function rosterTask(roleId,roleName){
 // ================= 助理 =================
 async function loadAssistants(){
   const el=$('view-assistants');
-  const d=await jget('/api/assistants');
+  const [d,st]=await Promise.all([jget('/api/assistants'),jget('/api/assistant/settings')]);
+  window.__assistantSettings=st;
   const c=d.counts||{};
   el.innerHTML='<h2 class="vh">助理</h2><p class="vdesc">'+esc(d.note||'')+'</p>'+
     '<div class="grid stats">'+stat(c.total||0,'助理总数','accent')+stat(c.experts||0,'内置专家')+stat(c.skills||0,'已装技能')+'</div>'+
@@ -969,7 +1004,88 @@ async function loadAssistants(){
         '<div class="an">'+esc(a.name)+'</div></div>'+
         '<div class="ak">'+esc(a.kind)+'</div>'+
         '<div class="ad">'+esc(a.desc||'（无描述）')+'</div></div>').join('')+'</div>'+
+    '</div>'+
+    '<div class="panel"><h3>远程通道 <span class="tag" style="margin-left:6px">推送审计提醒与任务结果</span></h3>'+
+      '<div class="conn-grid" id="chanGrid"></div>'+
+      '<div class="ctip" style="margin-top:10px">'+esc(st.note||'')+'</div>'+
+    '</div>'+
+    '<div class="panel"><h3>上下文管理</h3>'+
+      '<div class="litem"><div class="grow"><div class="nm">携带对话历史</div>'+
+        '<div class="mt">启用后，助理对话会携带最近几轮历史作为上下文；关闭后每次提问独立处理，可明显降低 token 消耗。</div></div>'+
+        '<label class="switch"><input type="checkbox" id="ctxMem" '+(st.prefs&&st.prefs.context_memory!==false?'checked':'')+' onchange="toggleCtx(this)"><span class="slider"></span></label>'+
+      '</div>'+
     '</div>';
+  renderChanGrid(st.channels||[]);
+}
+
+// ---------------- 助理远程通道（真实 webhook 通道） ----------------
+function renderChanGrid(list){
+  const g=$('chanGrid');if(!g)return;
+  if(!list.length){g.innerHTML='<div class="empty">暂无可用通道</div>';return;}
+  g.innerHTML=list.map(c=>{
+    const st=c.enabled?'已连接':(c.configured?'已停用':'连接');
+    const cls=c.enabled?'conn-plus on':(c.configured?'conn-plus mid':'conn-plus');
+    return '<div class="conn-card">'+
+      '<button class="conn-btn '+cls+'" onclick="openChan(&quot;'+esc(c.id)+'&quot;)">'+st+'</button>'+
+      '<div class="conn-badge" style="background:hsl('+c.hue+',52%,44%)">'+esc(c.letter)+'</div>'+
+      '<div class="nm">'+esc(c.name)+'</div>'+
+      '<div class="ds">'+esc(c.desc)+'</div>'+
+      '<div class="ft">'+(c.enabled?'<span class="conn-tag ok">推送中</span>':'')+
+        (c.configured&&!c.enabled?'<span class="conn-tag">未启用</span>':'')+'</div></div>';
+  }).join('');
+}
+function openChan(id){
+  const st=window.__assistantSettings;if(!st)return;
+  const c=(st.channels||[]).find(x=>x.id===id);if(!c)return;
+  $('chanTitle').textContent='连接通道 · '+c.name;
+  const body=$('chanBody');
+  body.innerHTML=c.fields.map(f=>
+    '<div class="mrow"><label>'+esc(f.label)+'</label><div class="mfield">'+
+    '<input id="chan_'+esc(f.key)+'" type="'+esc(f.type)+'" placeholder="'+esc(f.placeholder||'')+'">'+
+    '</div></div>').join('')+
+    '<div class="mrow"><label>启用</label><div class="mfield">'+
+    '<label class="switch"><input type="checkbox" id="chanEnabled" '+(c.enabled?'checked':'')+'><span class="slider"></span></label>'+
+    '</div></div>'+
+    (c.configured?'<div class="ctip">当前 Webhook：<code class="k">'+esc(c.webhook_masked)+'</code>'+(c.has_secret?'（已配置加签密钥）':'')+'</div>':'')+
+    '<div class="ctip">'+esc(c.note||'')+'</div>';
+  body.dataset.chanId=c.id;
+  window.__chanCur=c;
+  $('chanMsg').textContent='';
+  $('chanModal').classList.remove('hidden');
+}
+function closeChan(){$('chanModal').classList.add('hidden');}
+async function saveChan(){
+  const c=window.__chanCur;if(!c)return;
+  const msg=$('chanMsg');msg.textContent='';
+  const body={id:c.id,enabled:$('chanEnabled').checked};
+  c.fields.forEach(f=>{
+    let v=($('chan_'+f.key).value||'').trim();
+    if(f.key==='secret'){ if(!v&&c.has_secret)v='****'; }
+    else if(f.key==='webhook'){ if(!v&&c.configured)v='****'; }
+    body[f.key]=v;
+  });
+  const r=await postJSON('/api/assistant/channels/config',body);
+  if(!r.ok){msg.textContent='保存失败：'+(r.error||'未知错误');return;}
+  msg.textContent='已保存';
+  await refreshAssistantSettings();closeChan();
+}
+async function testChan(){
+  const c=window.__chanCur;if(!c)return;
+  const msg=$('chanMsg');msg.textContent='测试中…';
+  const body={id:c.id};
+  c.fields.forEach(f=>{body[f.key]=($('chan_'+f.key).value||'').trim();});
+  const r=await postJSON('/api/assistant/channels/test',body);
+  msg.textContent=r.ok?'✓ 已送达，请到群里确认':('✗ '+(r.error||'发送失败'));
+}
+async function toggleCtx(el){
+  const r=await postJSON('/api/assistant/prefs',{context_memory:el.checked});
+  if(!r.ok){el.checked=!el.checked;alert('切换失败：'+(r.error||'未知错误'));}
+}
+async function refreshAssistantSettings(){
+  const st=await jget('/api/assistant/settings');
+  window.__assistantSettings=st;
+  renderChanGrid(st.channels||[]);
+  const cb=$('ctxMem');if(cb&&st.prefs)cb.checked=st.prefs.context_memory!==false;
 }
 
 // ================= 技能连接器（WorkBuddy 式卡片画廊） =================
@@ -1784,6 +1900,7 @@ class Handler(BaseHTTPRequestHandler):
     scheduler = None
     project_root = None
     model_profiles = None
+    assistant_settings = None
     _chat = None
 
     def _json(self, obj, code=200):
@@ -1886,6 +2003,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(self._roster())
         if path == "/api/assistants":
             return self._json(self._assistants())
+        if path == "/api/assistant/settings":
+            if self.assistant_settings is None:
+                return self._json({"channels": [], "prefs": {"context_memory": True},
+                                   "note": "助理设置未初始化"})
+            return self._json(self.assistant_settings.to_public())
         if path == "/api/connectors":
             return self._json(console_api.connector_status(
                 self.skills_dir, project_root=self.project_root))
@@ -2165,6 +2287,9 @@ class Handler(BaseHTTPRequestHandler):
             history = payload.get("history") or []
             if not isinstance(history, list):
                 history = []
+            # 上下文管理（助理设置）：关闭后剥离历史轮次，每次提问独立（省 token）
+            if self.assistant_settings is not None and not self.assistant_settings.prefs().get("context_memory", True):
+                history = []
             model = payload.get("model") or None
             try:
                 result = self._chat_service().ask(question, history, model=model)
@@ -2232,9 +2357,45 @@ class Handler(BaseHTTPRequestHandler):
         tok = self.headers.get("X-Session-Token", "")
         sess = self.sessions.verify(tok) if self.sessions else None
         if path in ("/api/connectors/skillhub/install",
-                    "/api/connectors/custom", "/api/connectors/custom/delete"):
+                    "/api/connectors/custom", "/api/connectors/custom/delete",
+                    "/api/assistant/channels/config", "/api/assistant/channels/toggle",
+                    "/api/assistant/channels/test", "/api/assistant/prefs"):
             if not sess:
-                return self._json({"error": "需要登录后才能管理连接器"}, 401)
+                return self._json({"error": "需要登录后才能修改助理设置"}, 401)
+        # ---- 助理远程通道 + 偏好（写操作需登录）----
+        if path in ("/api/assistant/channels/config", "/api/assistant/channels/toggle",
+                    "/api/assistant/channels/test", "/api/assistant/prefs"):
+            if self.assistant_settings is None:
+                return self._json({"error": "助理设置未初始化"}, 500)
+            aset = self.assistant_settings
+            if path == "/api/assistant/channels/config":
+                try:
+                    aset.configure(str(payload.get("id") or ""),
+                                   webhook=str(payload.get("webhook") or ""),
+                                   secret=str(payload.get("secret") or ""),
+                                   enabled=payload.get("enabled"))
+                except ValueError as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+                return self._json({"ok": True})
+            if path == "/api/assistant/channels/toggle":
+                try:
+                    aset.set_enabled(str(payload.get("id") or ""),
+                                     bool(payload.get("enabled")))
+                except ValueError as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+                return self._json({"ok": True})
+            if path == "/api/assistant/channels/test":
+                res = aset.test(str(payload.get("id") or ""),
+                                webhook=str(payload.get("webhook") or ""),
+                                secret=str(payload.get("secret") or ""))
+                return self._json(res, 200 if res.get("ok") else 400)
+            if path == "/api/assistant/prefs":
+                try:
+                    for k, v in (payload or {}).items():
+                        aset.set_pref(str(k), v)
+                except ValueError as e:
+                    return self._json({"ok": False, "error": str(e)}, 400)
+                return self._json({"ok": True, "prefs": aset.prefs()})
         if path == "/api/connectors/skillhub/install":
             slug = str(payload.get("slug") or "").strip()
             if not slug:
@@ -2496,6 +2657,7 @@ def main():
     Handler.sessions = console_api.SessionStore()
     # 模型配置（持久化到 data/model_profiles.json，已被 .gitignore 排除）
     Handler.model_profiles = ModelProfileStore(data_dir="data")
+    Handler.assistant_settings = AssistantSettings(data_dir="data")
     # 调度器用**独立**调度库（避免与登记处同库时的表/锁竞争），
     # 但共享同一个 TaskRegistry 实例——到点登记的任务会出现在任务中心。
     try:

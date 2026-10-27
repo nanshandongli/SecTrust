@@ -22,7 +22,7 @@ def main():
               "/api/connectors", "/api/connectors/skillhub/featured",
               "/api/schedule", "/api/library", "/api/security",
               "/api/skills", "/api/chat/status", "/api/chat/models",
-              "/api/chat/providers", "/api/dag",
+              "/api/chat/providers", "/api/assistant/settings", "/api/dag",
               "/api/runners", "/api/actions", "/api/schedule/due"]
     for p in simple:
         try:
