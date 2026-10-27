@@ -39,6 +39,7 @@ from task_center_web import dag_view
 import console_api
 import console_actions
 from model_profiles import ModelProfileStore
+import model_providers
 
 
 # --------------------------------------------------------------------------
@@ -313,6 +314,67 @@ APP_HTML = """<!doctype html>
   .cfg-actions{margin-top:2px}
   .cfg-actions button{padding:6px 16px;border:none;border-radius:8px;cursor:pointer;background:var(--accent);color:#fff;font-size:13px}
   .cfg-actions .ghost{background:var(--line);color:var(--txt)}
+  /* ---- 添加模型弹窗（WorkBuddy 式供应商目录）---- */
+  .mmask{position:fixed;inset:0;background:rgba(15,20,30,.45);display:flex;align-items:center;
+    justify-content:center;z-index:60;padding:24px}
+  .mmask.hidden{display:none}
+  .mmodal{width:min(560px,100%);max-height:88vh;overflow:auto;background:var(--bg);
+    border:1px solid var(--line);border-radius:14px;box-shadow:0 18px 60px rgba(0,0,0,.28)}
+  .mmodal .mhead{display:flex;align-items:center;justify-content:space-between;
+    padding:14px 16px;border-bottom:1px solid var(--line)}
+  .mmodal .mhead .mt{font-weight:600;font-size:14px}
+  .mmodal .mhead .mx{border:none;background:transparent;color:var(--sub);font-size:18px;cursor:pointer}
+  .mmodal .mbody{padding:14px 16px;display:flex;flex-direction:column;gap:11px}
+  .mmodal .mfoot{display:flex;justify-content:flex-end;gap:9px;padding:12px 16px;
+    border-top:1px solid var(--line)}
+  .mmodal .mfoot button{padding:7px 18px;border:none;border-radius:8px;cursor:pointer;
+    background:var(--accent);color:#fff;font-size:13px}
+  .mmodal .mfoot .ghost{background:var(--line);color:var(--txt)}
+  .mrow{display:flex;align-items:flex-start;gap:10px}
+  .mrow>label{width:74px;flex:none;color:var(--sub);font-size:12px;padding-top:8px}
+  .mrow .mfield{flex:1;min-width:0}
+  .mrow input,.mrow select{width:100%;box-sizing:border-box;padding:8px 10px;
+    border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--txt);font-size:13px}
+  /* 供应商选择器：点击展开带搜索的分组清单 */
+  .provpick{width:100%;text-align:left;padding:8px 10px;border:1px solid var(--line);
+    border-radius:8px;background:var(--bg);color:var(--txt);font-size:13px;cursor:pointer;
+    display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .provpick:hover{border-color:var(--accent)}
+  .provpick .pv-sub{color:var(--sub);font-size:11px}
+  .provmenu{position:relative;margin-top:6px;border:1px solid var(--line);border-radius:10px;
+    background:var(--bg);overflow:hidden}
+  .provmenu.hidden{display:none}
+  .provmenu .psearch{width:100%;box-sizing:border-box;border:none;border-bottom:1px solid var(--line);
+    padding:9px 11px;background:var(--bg);color:var(--txt);font-size:13px;outline:none}
+  .provlist{max-height:260px;overflow:auto;padding:4px 0}
+  .provlist .pgrp{padding:7px 12px 4px;color:var(--sub);font-size:11px;letter-spacing:.4px}
+  .provlist .pitem{display:flex;align-items:center;justify-content:space-between;gap:10px;
+    padding:8px 12px;cursor:pointer;font-size:13px}
+  .provlist .pitem:hover{background:var(--panel)}
+  .provlist .pitem.sel{background:var(--panel)}
+  .provlist .pitem .pl{display:flex;flex-direction:column;gap:2px;min-width:0}
+  .provlist .pitem .pl .pn{font-size:13px}
+  .provlist .pitem .pl .pd{color:var(--sub);font-size:11px}
+  .provlist .pitem .pcheck{color:#16a34a;font-size:15px;flex:none;font-weight:700}
+  .provlist .pempty{padding:14px 12px;color:var(--sub);font-size:12px;text-align:center}
+  .mtag{display:inline-block;padding:1px 6px;border-radius:5px;font-size:10.5px;
+    border:1px solid var(--line);color:var(--sub);margin-left:6px}
+  .mtag.sub{border-color:#16a34a;color:#16a34a}
+  .mnote{font-size:11.5px;color:var(--sub);line-height:1.55}
+  .mwarn{font-size:11.5px;color:#b45309;line-height:1.55}
+  .mwarn:empty,.mnote:empty{display:none}
+  .mlink{font-size:11.5px;color:var(--accent);text-decoration:none}
+  /* 设置页 · 模型分区 */
+  .mlist{display:flex;flex-direction:column;gap:8px;margin-top:4px}
+  .mlist .mrow2{display:flex;align-items:center;justify-content:space-between;gap:10px;
+    padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:var(--bg)}
+  .mlist .mrow2 .mi{font-size:13px}
+  .mlist .mrow2 .mi .mi-sub{color:var(--sub);font-size:11px;margin-top:2px}
+  .mlist .mrow2 .mact{display:flex;gap:6px;flex:none}
+  .mlist .mrow2 .mact button{padding:5px 11px;font-size:12px;border:1px solid var(--line);
+    border-radius:7px;background:var(--bg);color:var(--txt);cursor:pointer}
+  .mlist .mrow2 .mact button.danger{color:#c0392b}
+  .mlist .mrow2 .mact button.on{border-color:var(--accent);color:var(--accent)}
   /* ---- 特色面板：明细块 ---- */
   .kv{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px}
   .kv .item{background:var(--bg);border:1px solid var(--line);border-radius:9px;padding:10px 12px}
@@ -470,6 +532,29 @@ APP_HTML = """<!doctype html>
   </div>
 </div>
 
+<!-- 添加模型弹窗（WorkBuddy 式：供应商目录 + 搜索 + 分组 + 勾选） -->
+<div class="mmask hidden" id="modelModal">
+  <div class="mmodal">
+    <div class="mhead"><span class="mt" id="mmTitle">添加模型</span><button class="mx" id="mmX" type="button">✕</button></div>
+    <div class="mbody">
+      <div class="mrow"><label>供应商</label><div class="mfield">
+        <button class="provpick" id="mmPick" type="button"><span id="mmPickName">选择供应商…</span><span class="pv-sub">▾</span></button>
+        <div class="provmenu hidden" id="mmMenu">
+          <input class="psearch" id="mmSearch" placeholder="搜索供应商 / 模型…">
+          <div class="provlist" id="mmList"></div>
+        </div>
+      </div></div>
+      <div class="mrow"><label>名称</label><div class="mfield"><input id="mmName" placeholder="例如：我的 DeepSeek"></div></div>
+      <div class="mrow"><label>Base URL</label><div class="mfield"><input id="mmBase" placeholder="选择供应商后自动填入"><div class="mlink" id="mmDoc"></div></div></div>
+      <div class="mrow"><label>API Key</label><div class="mfield"><input id="mmKey" type="password" placeholder="留空则保留已保存的密钥"></div></div>
+      <div class="mrow"><label>模型名</label><div class="mfield"><input id="mmModel" list="mmModelList" placeholder="选择供应商后可选候选模型"><datalist id="mmModelList"></datalist></div></div>
+      <div class="mnote" id="mmNote"></div>
+      <div class="mwarn" id="mmWarn"></div>
+    </div>
+    <div class="mfoot"><button class="ghost" id="mmCancel" type="button">取消</button><button id="mmSave" type="button">保存</button></div>
+  </div>
+</div>
+
 <script>
 const $ = id => document.getElementById(id);
 const fmt = t => t ? new Date(t*1000).toLocaleString('zh-CN') : '-';
@@ -483,6 +568,18 @@ async function postJSON(u, body){
   const r=await fetch(u,{method:'POST',headers:headers,body:JSON.stringify(body||{})});
   return {status:r.status, data:await r.json()};
 }
+
+/* ---------------- 添加模型弹窗 · 全局事件（弹窗在 body 顶层，任何面板都能开） ---------------- */
+(function(){
+  const pick=$('mmPick');if(pick)pick.addEventListener('click',function(){
+    const m=$('mmMenu');if(m)m.classList.toggle('hidden');
+  });
+  const search=$('mmSearch');if(search)search.addEventListener('input',function(){renderProvList(search.value);});
+  const x=$('mmX');if(x)x.addEventListener('click',closeModelModal);
+  const cancel=$('mmCancel');if(cancel)cancel.addEventListener('click',closeModelModal);
+  const save=$('mmSave');if(save)save.addEventListener('click',saveModel);
+  const mask=$('modelModal');if(mask)mask.addEventListener('click',function(e){if(e.target===mask)closeModelModal();});
+})();
 
 /* ---------------- 全局搜索（任务 / 轨迹 / 审批 / 技能） ---------------- */
 let searchTimer=null;
@@ -1033,18 +1130,6 @@ async function loadChat(){
      '<button id="chatModelCfg" type="button">⚙ 配置模型</button>'+
      '<span id="chatModelHint" class="ctip"></span>'+
    '</div>'+
-   '<div id="modelCfg" class="model-cfg hidden">'+
-     '<div class="cfg-row"><label>名称</label><input id="cfgName" placeholder="例如：我的 DeepSeek"></div>'+
-     '<div class="cfg-row"><label>类型</label><select id="cfgProvider">'+
-       '<option value="ollama">本地 Ollama（无需密钥）</option>'+
-       '<option value="openai">OpenAI 兼容（DeepSeek / Qwen / GLM / Moonshot…）</option>'+
-       '<option value="anthropic">Anthropic（Claude）</option>'+
-     '</select></div>'+
-     '<div class="cfg-row"><label>Base URL</label><input id="cfgBase" placeholder="https://… 或 http://127.0.0.1:11434"></div>'+
-     '<div class="cfg-row"><label>API Key</label><input id="cfgKey" type="password" placeholder="留空则保留已保存的"></div>'+
-     '<div class="cfg-row"><label>模型名</label><input id="cfgModel" placeholder="如 llama3 / gpt-4o-mini / claude-3-5-sonnet-latest"></div>'+
-     '<div class="cfg-row cfg-actions"><button id="cfgSave" type="button">保存</button><button id="cfgCancel" type="button" class="ghost">取消</button><span id="cfgMsg" class="ctip"></span></div>'+
-   '</div>'+
    '<div class="chips">'+
      '<button data-q="今天有哪些任务在跑">今天哪些任务在跑？</button>'+
      '<button data-q="双十一素材发布审批通过了吗">素材发布审批通过了吗？</button>'+
@@ -1095,8 +1180,6 @@ async function loadChat(){
     if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();const i=e.target;const v=i.value;i.value='';send(v);}
   });
   $('chatModelCfg').addEventListener('click',openCfg);
-  $('cfgSave').addEventListener('click',saveModel);
-  $('cfgCancel').addEventListener('click',cancelCfg);
   refreshChatStatus();
 }
 async function refreshChatStatus(){
@@ -1118,47 +1201,135 @@ async function refreshChatStatus(){
     }
   }catch(e){const h=document.getElementById('chatModelHint');if(h)h.textContent='模型列表加载失败';}
 }
-let cfgEditId=null;
-function openCfg(){
-  const panel=document.getElementById('modelCfg');if(!panel)return;
-  const sel=document.getElementById('chatModel');
-  cfgEditId=sel?sel.value:'';
-  const all=window.__modelProfiles||[];
-  const p=all.find(function(x){return x.id===cfgEditId;});
-  if(p){
-    document.getElementById('cfgName').value=p.name||'';
-    document.getElementById('cfgProvider').value=p.provider||'ollama';
-    document.getElementById('cfgBase').value=p.base_url||'';
-    document.getElementById('cfgModel').value=p.model||'';
-    document.getElementById('cfgKey').value='';
-  }else{
-    document.getElementById('cfgName').value='';
-    document.getElementById('cfgProvider').value='ollama';
-    document.getElementById('cfgBase').value='';
-    document.getElementById('cfgModel').value='';
-    document.getElementById('cfgKey').value='';
+/* ---------------- 添加模型（WorkBuddy 式：供应商目录 + 搜索 + 分组 + 勾选） ---------------- */
+let mmCatalog={providers:[],groups:[],notice:''};
+let mmEditId=null;      // null=新增，否则为被编辑的 profile id
+let mmSel=null;         // 当前选中的目录条目
+async function loadCatalog(){
+  if(mmCatalog.providers.length)return mmCatalog;
+  try{
+    const c=await jget('/api/chat/providers');
+    mmCatalog.providers=c.providers||[];mmCatalog.groups=c.groups||[];mmCatalog.notice=c.notice||'';
+  }catch(e){mmCatalog.providers=[];}
+  return mmCatalog;
+}
+function provGroups(){
+  const gs=mmCatalog.groups.slice();
+  mmCatalog.providers.forEach(function(p){if(gs.indexOf(p.group)<0)gs.push(p.group);});
+  return gs;
+}
+function renderProvList(q){
+  const list=document.getElementById('mmList');if(!list)return;
+  const key=(q||'').trim().toLowerCase();
+  let html='';
+  provGroups().forEach(function(g){
+    const items=mmCatalog.providers.filter(function(p){
+      if(p.group!==g)return false;
+      if(!key)return true;
+      const hay=(p.name+' '+p.protocol+' '+p.billing_label+' '+(p.models||[]).join(' ')).toLowerCase();
+      return hay.indexOf(key)>=0;
+    });
+    if(!items.length)return;
+    html+='<div class="pgrp">'+esc(g)+'</div>';
+    items.forEach(function(p){
+      const on=mmSel&&mmSel.id===p.id;
+      html+='<div class="pitem'+(on?' sel':'')+'" data-pid="'+esc(p.id)+'">'+
+        '<div class="pl"><div class="pn">'+esc(p.name)+
+          '<span class="mtag'+(p.billing==='subscription'?' sub':'')+'">'+esc(p.billing_label)+'</span>'+
+          '<span class="mtag">'+esc(p.protocol)+'</span></div>'+
+        '<div class="pd">'+esc(p.base_url)+'</div></div>'+
+        '<div class="pcheck">'+(on?'✓':'')+'</div></div>';
+    });
+  });
+  if(!html)html='<div class="pempty">没有匹配的供应商</div>';
+  list.innerHTML=html;
+  list.querySelectorAll('.pitem').forEach(function(it){
+    it.addEventListener('click',function(){selectProvider(it.dataset.pid);});
+  });
+}
+function selectProvider(pid){
+  const p=mmCatalog.providers.find(function(x){return x.id===pid;});
+  if(!p)return;
+  mmSel=p;
+  document.getElementById('mmPickName').textContent=p.name+' · '+p.billing_label;
+  document.getElementById('mmBase').value=p.base_url;
+  const dl=document.getElementById('mmModelList');
+  if(dl)dl.innerHTML=(p.models||[]).map(function(m){return '<option value="'+esc(m)+'"></option>';}).join('');
+  const note=document.getElementById('mmNote');
+  if(note)note.textContent=(p.note||'')+(p.billing==='subscription'?'（包月端点：请使用对应套餐的 Key，填成按量端点会按 token 扣费）':'');
+  const warn=document.getElementById('mmWarn');
+  if(warn)warn.textContent=p.compliance||'';
+  const doc=document.getElementById('mmDoc');
+  if(doc){
+    if(p.doc_url){doc.innerHTML='<a class="mlink" href="'+esc(p.doc_url)+'" target="_blank">查看文档 →</a>';}
+    else{doc.innerHTML='';}
   }
-  panel.classList.remove('hidden');
-  const m=document.getElementById('cfgMsg');if(m)m.textContent=cfgEditId?'编辑已有模型；API Key 留空则保留原值':'新增模型';
+  const nameEl=document.getElementById('mmName');
+  if(nameEl&&!nameEl.value.trim())nameEl.value=p.name;
+  const menu=document.getElementById('mmMenu');if(menu)menu.classList.add('hidden');
+  renderProvList(document.getElementById('mmSearch')?document.getElementById('mmSearch').value:'');
+}
+async function openModelModal(pid){
+  mmEditId=pid||null;
+  const mask=document.getElementById('modelModal');if(!mask)return;
+  mask.classList.remove('hidden');
+  document.getElementById('mmTitle').textContent=pid?'编辑模型':'添加模型';
+  document.getElementById('mmName').value='';
+  document.getElementById('mmBase').value='';
+  document.getElementById('mmKey').value='';
+  document.getElementById('mmModel').value='';
+  document.getElementById('mmPickName').textContent='选择供应商…';
+  document.getElementById('mmNote').textContent='';
+  document.getElementById('mmWarn').textContent='';
+  document.getElementById('mmDoc').innerHTML='';
+  const dl=document.getElementById('mmModelList');if(dl)dl.innerHTML='';
+  mmSel=null;
+  await loadCatalog();
+  renderProvList('');
+  if(pid){
+    const p=(window.__modelProfiles||[]).find(function(x){return x.id===pid;});
+    if(p){
+      document.getElementById('mmName').value=p.name||'';
+      document.getElementById('mmBase').value=p.base_url||'';
+      document.getElementById('mmModel').value=p.model||'';
+      const hit=mmCatalog.providers.find(function(x){return x.base_url===p.base_url;});
+      if(hit){mmSel=hit;document.getElementById('mmPickName').textContent=hit.name+' · '+hit.billing_label;
+        const dl2=document.getElementById('mmModelList');
+        if(dl2)dl2.innerHTML=(hit.models||[]).map(function(m){return '<option value="'+esc(m)+'"></option>';}).join('');
+        const n2=document.getElementById('mmNote');if(n2)n2.textContent=hit.note||'';
+        const w2=document.getElementById('mmWarn');if(w2)w2.textContent=hit.compliance||'';
+        const d2=document.getElementById('mmDoc');
+        if(d2&&hit.doc_url)d2.innerHTML='<a class="mlink" href="'+esc(hit.doc_url)+'" target="_blank">查看文档 →</a>';
+        renderProvList('');
+      }
+    }
+  }
+  const menu=document.getElementById('mmMenu');if(menu)menu.classList.remove('hidden');
+}
+function closeModelModal(){
+  const mask=document.getElementById('modelModal');if(mask)mask.classList.add('hidden');
+  mmEditId=null;mmSel=null;
 }
 async function saveModel(){
-  const msg=document.getElementById('cfgMsg');if(msg)msg.textContent='';
-  const keyVal=document.getElementById('cfgKey').value;
+  const base=document.getElementById('mmBase').value.trim();
+  if(!base){alert('请先选择供应商，或手填 Base URL');return;}
+  const keyVal=document.getElementById('mmKey').value;
+  const provider=mmSel?mmSel.protocol:'openai';
   const body={
-    name:document.getElementById('cfgName').value,
-    provider:document.getElementById('cfgProvider').value,
-    base_url:document.getElementById('cfgBase').value,
-    api_key:(cfgEditId&&!keyVal)?'****':keyVal,
-    model:document.getElementById('cfgModel').value
+    name:document.getElementById('mmName').value.trim()||(mmSel?mmSel.name:'自定义模型'),
+    provider:provider,
+    base_url:base,
+    api_key:(mmEditId&&!keyVal)?'****':keyVal,
+    model:document.getElementById('mmModel').value.trim()
   };
-  if(cfgEditId) body.id=cfgEditId;
+  if(mmEditId)body.id=mmEditId;
   const r=await postJSON('/api/chat/models',body);
-  if(!r.status||r.status>=400){if(msg)msg.textContent='保存失败：'+((r.data&&r.data.error)||r.status);return;}
-  if(msg)msg.textContent='已保存：'+((r.data&&r.data.profile&&r.data.profile.name)||'');
-  document.getElementById('cfgKey').value='';
-  refreshChatStatus();
+  if(!r.status||r.status>=400){alert('保存失败：'+((r.data&&r.data.error)||r.status));return;}
+  closeModelModal();
+  await refreshChatStatus();
+  if(typeof loadSettings==='function'){const s=document.getElementById('view-settings');if(s&&s.classList.contains('active'))loadSettings();}
 }
-function cancelCfg(){const p=document.getElementById('modelCfg');if(p)p.classList.add('hidden');}
+function openCfg(){openModelModal(document.getElementById('chatModel')?document.getElementById('chatModel').value:'');}
 
 // ---------------- 任务中心（复用只读 API） ----------------
 let tasksTab='tasks';
@@ -1398,7 +1569,27 @@ async function loadSkills(){
 async function loadSettings(){
   const el=$('view-settings');
   const ov=await jget('/api/overview');
-  el.innerHTML='<h2 class="vh">设置</h2><p class="vdesc">产品偏好与数据源。</p>'+
+  const mm=await jget('/api/chat/models');
+  const cat=await jget('/api/chat/providers');
+  const profiles=mm.profiles||[];
+  el.innerHTML='<h2 class="vh">设置</h2><p class="vdesc">产品偏好、模型接入与数据源。</p>'+
+    '<div class="panel"><h3>模型</h3>'+
+      '<div class="row" style="align-items:center"><button class="btn" id="btnAddModel">+ 添加模型</button>'+
+      '<span class="ctip">从预置供应商目录勾选接入；Base URL 自动填好，不用手抄。</span></div>'+
+      '<div class="mlist" id="modelList">'+
+      (profiles.length?profiles.map(function(p){
+        const act=p.active;
+        return '<div class="mrow2"><div class="mi">'+esc(p.name)+
+          (act?' <span class="pill live">当前</span>':'')+
+          '<div class="mi-sub">'+esc(p.provider)+' · '+esc(p.base_url||'-')+' · 模型 '+
+          esc(p.model||'（默认）')+(p.configured?'':' · <span style="color:#b45309">未配置密钥，对话不可用</span>')+'</div></div>'+
+          '<div class="mact">'+
+          (act?'':'<button data-act="active" data-id="'+esc(p.id)+'">设为当前</button>')+
+          '<button data-act="edit" data-id="'+esc(p.id)+'">编辑</button>'+
+          '<button data-act="del" data-id="'+esc(p.id)+'" class="danger">删除</button>'+
+          '</div></div>';
+      }).join(''):'<div class="empty">尚未配置任何模型</div>')+'</div>'+
+      '<div class="ctip" style="margin-top:10px">'+esc(cat.notice||'')+'</div></div>'+
     '<div class="panel"><h3>主题</h3><div class="row"><button class="btn ghost" onclick="document.getElementById(&quot;themeBtn&quot;).click()">切换浅色 / 深色</button><span style="color:var(--sub)">当前：'+esc(document.documentElement.getAttribute('data-theme')||'light')+'</span></div></div>'+
     '<div class="panel"><h3>数据源（只读）</h3><div class="row" style="color:var(--sub)">'+
       '<span>登记处：<code class="k">'+esc(ov.db_registry||'')+'</code></span>'+
@@ -1408,14 +1599,31 @@ async function loadSettings(){
     (ov.demo_mode?'<div class="panel"><h3>演示数据</h3><button class="btn" onclick="reseed()">重新生成演示数据</button></div>':'')+
     '<div class="panel"><h3>对话引擎</h3><div id="setChat" style="color:var(--sub)">加载中…</div>'+
       '<div class="ctip" style="margin-top:8px">规则引擎始终可用（确定性、零幻觉）；'+
-      'LLM 兜底优先本地 Ollama（<code class="k">OLLAMA_BASE_URL</code>，默认 http://127.0.0.1:11434），'+
-      '其次 OpenAI 兼容端点（<code class="k">OPENAI_API_KEY</code>）。两者都不可用时会明确告知，绝不伪造模型回答。</div></div>'+
-    '<div class="panel"><h3>关于</h3><div class="row" style="color:var(--sub)">协作审计台 SecTrust Console · v0.9 · 零依赖 stdlib http.server · 仿 WorkBuddy 界面</div></div>';
+      'LLM 兜底走你在上方「模型」里选的算力后端，未配置密钥时会明确告知，绝不伪造模型回答。</div></div>'+
+    '<div class="panel"><h3>关于</h3><div class="row" style="color:var(--sub)">协作审计台 SecTrust Console · v1.2 · 零依赖 stdlib http.server · 仿 WorkBuddy 界面</div></div>';
   const st=await jget('/api/chat/status');
+  const act=(st.profiles||[]).find(function(p){return p.id===st.active_id;});
   $('setChat').innerHTML='<div class="row"><span class="pill live">规则引擎</span>'+
-    (st.ollama?('<span class="pill live">Ollama 可用：'+esc((st.ollama_models||[]).join(', ')||'已连接')+'</span>')
-              :('<span class="pill">Ollama 未启动</span>'))+
-    (st.openai?'<span class="pill live">OpenAI 已配置</span>':'<span class="pill">OpenAI 未配置</span>')+'</div>';
+    (act?('<span class="pill'+(act.configured?' live':'')+'">LLM：'+esc(act.name)+'（'+esc(act.provider)+'）'+(act.configured?'':' · 未配置密钥')+'</span>')
+         :'<span class="pill">LLM 未配置</span>')+'</div>';
+  const add=$('btnAddModel');if(add)add.addEventListener('click',function(){openModelModal('');});
+  el.querySelectorAll('#modelList button[data-act]').forEach(function(b){
+    b.addEventListener('click',async function(){
+      const id=b.dataset.id;
+      if(b.dataset.act==='edit'){openModelModal(id);return;}
+      if(b.dataset.act==='active'){
+        const r=await postJSON('/api/chat/models/activate',{id:id});
+        if(r.status>=400){alert('设置失败：'+((r.data&&r.data.error)||r.status));return;}
+        loadSettings();refreshChatStatus();return;
+      }
+      if(b.dataset.act==='del'){
+        if(!confirm('确认删除该模型配置？'))return;
+        const r=await postJSON('/api/chat/models/delete',{id:id});
+        if(r.status>=400){alert('删除失败：'+((r.data&&r.data.error)||r.status));return;}
+        loadSettings();refreshChatStatus();return;
+      }
+    });
+  });
 }
 async function reseed(){
   await jget('/api/seed');location.reload();
@@ -1540,6 +1748,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(self._chat_service().status())
         if path == "/api/chat/models":
             return self._json(self.model_profiles.list_public())
+        if path == "/api/chat/providers":
+            return self._json(model_providers.catalog())
         # ---- 工作台新增 ----
         if path == "/api/roles":
             return self._json({"roles": console_api.ROLES})

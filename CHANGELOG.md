@@ -5,6 +5,41 @@
 
 ---
 
+## [1.2.0] — 未发布
+
+### 新增
+- **供应商目录 + WorkBuddy 式「添加模型」弹窗（`model_providers.py`）**——把上一版
+  「手填 base_url 的配置表单」升级为**预置供应商目录 + 搜索 + 分组 + 勾选**的模型接入器：
+  1. **供应商目录（`model_providers.py`，21 条目 / 4 分组）**：Coding Plan（包月）、
+     按量计费、国际版、本地 Ollama。每条含**已核实的真实 base_url**、协议类型、模型候选、
+     文档链接、key 申请入口、计费属性与合规提示。⚠️ **包月与按量严格分行**——同厂商两种
+     计费方案是**两个不同端点**（如智谱 `/api/coding/paas/v4` vs `/api/paas/v4`），
+     Base URL 必须与所购方案的 Key 配套，填错轻则 401、重则**按 token 扣费**。
+  2. **合规提示不藏**：腾讯云 Token Plan 订阅条款明令禁止用于自动化脚本/自定义应用后端
+     批量调用——本产品正是自动化审计流水线，该提示随目录条目一并呈现给用户。
+  3. **后端端点**：`GET /api/chat/providers` 返回目录（分组顺序 + 协议 + 计费属性 + 模型候选）；
+     `model_providers.validate_entry()` 校验前端提交（协议与目录一致性、URL 合法性）。
+  4. **前端弹窗（复刻 WorkBuddy 交互）**：`设置 → 模型` 新增分区（已配置模型列表 +
+     「添加模型」按钮 + 设为当前/编辑/删除）；弹窗含**供应商下拉（可搜索的分组清单 +
+     绿色对勾选中态）**、Base URL 自动填、模型候选 datalist、API Key（留空保留原值）、
+     文档链接、合规与计费提示、取消/保存。旧行内配置面板已移除（避免两套入口并存）。
+  5. **对话面板同步**：顶部「⚙ 配置模型」改为打开同一弹窗；对话引擎区继续显示当前
+     模型与「未配置」标记。
+- **测试**：`tests/test_model_providers.py` 16 项（端点真实性/无占位符、包月与按量不共用
+  端点、分组完整、腾讯云合规提示存在性、目录 API 形状与校验分支）；
+  `tests/test_console_model_catalog.py` 7 项（`GET /api/chat/providers` 真实端点返回 +
+  无密钥字段 + 前端骨架/钩子断言 + 旧行内面板已清除）；
+  `tools/console_model_picker_smoke.js` 新增**弹窗渲染冒烟**（17 项断言：分组渲染、
+  搜索过滤、勾选后 Base URL 自动填、模型候选填充、合规提示、绿色对勾唯一）。
+- 全量回归 **899 项全过**（2 env skip）；16 面板渲染冒烟 PASS；e2e 覆盖
+  登录→新增→编辑（掩码保留 key）→激活→删除。
+
+### 变更
+- `pyproject.toml` 申报新根模块 `model_providers`（`test_release_packaging` 会抓）。
+- `tools/dump_console_api.py` 补 `/api/chat/providers` 端点（覆盖新代码路径）。
+
+---
+
 ## [0.9.0] — 未发布
 
 ### 新增

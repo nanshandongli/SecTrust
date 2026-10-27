@@ -78,6 +78,7 @@ py-modules = [
     "console_actions",
     "console_web",
     "model_profiles",
+    "model_providers",
     "cost",
     "demo",
     "mcp_server",
