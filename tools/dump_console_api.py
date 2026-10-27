@@ -20,8 +20,8 @@ def main():
     data = {}
     simple = ["/api/overview", "/api/roles", "/api/roster", "/api/assistants",
               "/api/connectors", "/api/schedule", "/api/library", "/api/security",
-              "/api/skills", "/api/chat/status", "/api/dag", "/api/runners",
-              "/api/actions", "/api/schedule/due"]
+              "/api/skills", "/api/chat/status", "/api/chat/models", "/api/dag",
+              "/api/runners", "/api/actions", "/api/schedule/due"]
     for p in simple:
         try:
             data[p] = get(base, p)
