@@ -23,39 +23,58 @@ import console_api as A
 # --------------------------------------------------------------------------
 class TestSessionStore(unittest.TestCase):
 
-    def test_login_returns_token_and_notice(self):
-        s = A.SessionStore()
+    def _store(self):
+        import tempfile
+        return A.SessionStore(data_dir=tempfile.mkdtemp())
+
+    def test_login_returns_jwt_and_notice(self):
+        s = self._store()
         r = s.login("operator", "auditor")
-        self.assertTrue(r["token"].startswith("sess-"))
+        # 真实可校验 JWT：三段式（header.payload.signature）
+        self.assertEqual(r["token"].count("."), 2)
+        self.assertEqual(r["token_type"], "JWT")
         self.assertEqual(r["user"], "operator")
         self.assertEqual(r["role"], "auditor")
-        # 诚实边界：必须明说这不是安全边界
-        self.assertIn("不构成安全边界", r["notice"])
+        # 诚实边界：必须明说无密码校验、且不构成对抗第三方的认证边界
         self.assertIn("无密码校验", r["notice"])
+        self.assertIn("认证边界", r["notice"])
 
     def test_verify_roundtrip(self):
-        s = A.SessionStore()
+        s = self._store()
         tok = s.login("alice", "writer")["token"]
         sess = s.verify(tok)
         self.assertIsNotNone(sess)
         self.assertEqual(sess["user"], "alice")
+        self.assertEqual(sess["role"], "writer")
+        self.assertEqual(sess["scope"], "console:writer")
 
     def test_verify_rejects_bad_token(self):
-        s = A.SessionStore()
+        s = self._store()
         self.assertIsNone(s.verify("nope"))
         self.assertIsNone(s.verify(""))
+        self.assertIsNone(s.verify("a.b.c"))  # 三段但签名错 / 非 JWT
+
+    def test_verify_rejects_tampered_payload(self):
+        s = self._store()
+        tok = s.login("alice", "writer")["token"]
+        h, p, sig = tok.split(".")
+        import base64, json
+        pad = "=" * (-len(p) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(p + pad))
+        payload["sub"] = "mallory"  # 篡改主体
+        np_ = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
+        self.assertIsNone(s.verify(h + "." + np_ + "." + sig))
 
     def test_logout_invalidates(self):
-        s = A.SessionStore()
+        s = self._store()
         tok = s.login("bob", "designer")["token"]
         self.assertTrue(s.logout(tok))
         self.assertIsNone(s.verify(tok))
 
     def test_expired_session_rejected(self):
-        s = A.SessionStore(ttl=0)  # 立即过期
+        s = self._store()
+        s.ttl = -1  # 过期令牌：exp == now-1 < now，立即被拒
         tok = s.login("carol", "analyst")["token"]
-        import time as _t
-        _t.sleep(0.01)
         self.assertIsNone(s.verify(tok))
 
     def test_invalid_user_rejected(self):

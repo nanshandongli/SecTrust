@@ -44,3 +44,9 @@ mcp_client_config.claude_desktop.json
 
 # 审计三件套演示产物（合成数据 + 内嵌字体 PDF，体积大，可复跑生成，不提交）
 reports/audit_suite_demo/
+
+# 审计动作运行时归档（每次自扫/快照/结案重新生成）
+reports/console_actions/
+
+# WorkBuddy 应用产物
+.wbapp_*.genie

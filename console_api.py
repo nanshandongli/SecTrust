@@ -15,7 +15,8 @@ console_api.py —— 协作审计台「工作台」后端 API 层
 设计原则（对齐 docs/honest_boundary_paradigm.md）：
   - **写操作全部显式**：只有"新建任务"和"定时任务增删"是写；其余一律只读。
   - **不伪造**：SkillHub 不可达就说不可达；助理清单来自真实已装技能，不编造。
-  - **不越权**：本地免密登录是**单机演示级**身份，不声称任何真实鉴权强度，
+  - **不越权**：登录签发**可校验签名的 JWT**（aud 绑定、带过期与角色 scope），
+    但**无密码校验**——只证明令牌由本服务签发，不构成对抗第三方的认证边界，
     并在 login 响应里显式声明这一边界。
   - **零第三方依赖**：只用标准库 + 本仓库既有模块。
 """
@@ -25,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import time
@@ -33,10 +35,40 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
+from security import oauth
+
 # --------------------------------------------------------------------------
 # 常量
 # --------------------------------------------------------------------------
 SESSION_TTL = 8 * 3600  # 本地会话 8 小时
+DEFAULT_JWT_SECRET_DIR = "data"
+
+
+def load_jwt_secret(data_dir: str = DEFAULT_JWT_SECRET_DIR) -> str:
+    """取得（不存在则持久化生成）JWT 签名密钥。
+
+    必须持久化：否则进程重启后旧令牌验签失败（signing key 变了）。
+    密钥文件落在 data/（gitignored），仅本服务持有。
+    """
+    os.makedirs(data_dir, exist_ok=True)
+    p = os.path.join(data_dir, "console_jwt_secret")
+    if os.path.exists(p):
+        try:
+            with open(p, "r", encoding="utf-8") as fh:
+                v = fh.read().strip()
+            if v:
+                return v
+        except OSError:
+            pass
+    secret = secrets.token_hex(32)
+    try:
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(secret)
+        os.chmod(p, 0o600)
+    except OSError:
+        pass
+    return secret
+
 
 # WorkBuddy 式角色（可作为审计员/助理的"岗位"）
 ROLES = [
@@ -57,15 +89,28 @@ ROLES = [
 # 1) 登录与会话
 # --------------------------------------------------------------------------
 class SessionStore:
-    """本地会话：令牌 → {user, role, created, last_seen}。
+    """登录与会话：签发并校验**真实可验证的 HS256 JWT**。
 
-    诚实边界：这是**单机演示级**身份识别，不做密码校验、不防伪造令牌。
-    它的作用是让界面有"登录"形态与角色上下文，不是安全边界。
+    诚实边界（与演示级身份一致，但把"令牌强度"升级了）：
+      - 令牌是**带 aud / scopes / exp 的签名 JWT**：验签靠密码学，不是查字典；
+        没有签名密钥就无法伪造，重启后仍有效（密钥持久化在 data/console_jwt_secret）。
+      - **仍然没有密码校验**：它证明「令牌由本服务签发」，不能证明
+        「操作者就是声称的那个人」——这一点在 login 响应里显式声明。
+      - 因此它是「可校验的演示级身份」：适合单机/内网演示与界面角色上下文，
+        不构成对抗恶意第三方的认证边界（生产应接真实 IdP / OAuth 授权服务器）。
     """
 
-    def __init__(self, ttl: int = SESSION_TTL):
+    def __init__(self, ttl: int = SESSION_TTL, jwt_secret: str = None,
+                 data_dir: str = DEFAULT_JWT_SECRET_DIR, resource: str = ""):
         self.ttl = ttl
-        self._sessions: Dict[str, Dict[str, Any]] = {}
+        self.jwt_secret = jwt_secret or load_jwt_secret(data_dir)
+        self.resource = oauth.resource_url(default=resource or "http://127.0.0.1:8099")
+        # 仅用于「在岗名单」展示（roster）：token → 元数据；验证不依赖它
+        self._online: Dict[str, Dict[str, Any]] = {}
+        # 内存吊销黑名单：logout 后令 token 立即失效（轻量，进程级）。
+        # JWT 仍是**无状态验签**，黑名单只是叠加一层「主动登出」语义，
+        # 不破坏无状态本质——重启后黑名单清空，但旧 token 仍受 exp 约束。
+        self._revoked: set = set()
 
     def login(self, user: str, role: str = "auditor") -> Dict[str, Any]:
         user = (user or "").strip() or "operator"
@@ -73,38 +118,55 @@ class SessionStore:
             raise ValueError("用户名只允许字母/数字/中文/._-，长度 1~32")
         if not any(r["id"] == role for r in ROLES):
             raise ValueError("未知角色：%s" % role)
-        token = "sess-%d-%s" % (int(time.time()), os.urandom(6).hex())
-        self._sessions[token] = {
+        token = oauth.issue_token(
+            client_id=user, secret=self.jwt_secret,
+            scopes=["console:%s" % role], expires_in=self.ttl,
+            extra={"role": role, "aud": self.resource})
+        self._online[token] = {
             "user": user, "role": role,
             "created": time.time(), "last_seen": time.time(),
         }
         return {"token": token, "user": user, "role": role,
                 "expires_in": self.ttl,
-                "notice": "本地演示级身份：无密码校验、令牌不防伪造，"
-                          "不构成安全边界；仅用于界面角色上下文。"}
+                "token_type": "JWT", "aud": self.resource,
+                "notice": "已签发可校验签名的 JWT（aud 绑定本资源、带过期与角色 scope）；"
+                          "但**无密码校验**，令牌只证明由本服务签发，"
+                          "不构成对抗第三方的认证边界。"}
 
     def verify(self, token: str) -> Optional[Dict[str, Any]]:
-        s = self._sessions.get(token or "")
-        if not s:
+        """密码学验签 + aud 绑定 + 过期 + 黑名单检查。失败返回 None。"""
+        if not token:
             return None
-        if time.time() - s["last_seen"] > self.ttl:
-            self._sessions.pop(token, None)
+        if token in self._revoked:
             return None
-        s["last_seen"] = time.time()
-        return dict(s)
+        payload = oauth.verify_token(token, self.jwt_secret)
+        if not payload:
+            return None
+        if payload.get("aud") != self.resource:
+            return None
+        return {"user": payload.get("sub"), "role": payload.get("role"),
+                "scope": payload.get("scope", ""), "exp": payload.get("exp")}
 
     def logout(self, token: str) -> bool:
-        return self._sessions.pop(token or "", None) is not None
+        hit = self._online.pop(token or "", None) is not None
+        if token:
+            self._revoked.add(token)
+        return hit
 
     def list_users(self) -> List[Dict[str, Any]]:
         """在岗会话（审计名单的一部分：谁在线、什么角色）。"""
+        now = time.time()
         out = []
-        for tok, s in self._sessions.items():
-            if time.time() - s["last_seen"] > self.ttl:
+        expired = []
+        for tok, s in self._online.items():
+            if now - s["last_seen"] > self.ttl:
+                expired.append(tok)
                 continue
             out.append({"token_suffix": tok[-6:], "user": s["user"],
                         "role": s["role"],
-                        "idle_seconds": int(time.time() - s["last_seen"])})
+                        "idle_seconds": int(now - s["last_seen"])})
+        for tok in expired:
+            self._online.pop(tok, None)
         return out
 
 
@@ -281,11 +343,11 @@ def job_payload_template() -> Dict[str, Any]:
     """可用的定时任务模板（预置几类常用巡检）。"""
     return {
         "presets": [
-            {"id": "daily_self_scan", "name": "每日密钥自扫",
+            {"id": "daily_self_scan", "name": "每日密钥自扫", "action": "self_scan",
              "cron": "0 3 * * *", "desc": "每天 03:00 扫描真实业务源码并出具泄露报告"},
-            {"id": "hourly_cost", "name": "每小时成本巡检",
+            {"id": "hourly_cost", "name": "每小时成本巡检", "action": "cost_snapshot",
              "cron": "0 * * * *", "desc": "每小时汇总成本并标记离群点"},
-            {"id": "weekly_closure", "name": "每周结案报告",
+            {"id": "weekly_closure", "name": "每周结案报告", "action": "closure_report",
              "cron": "0 9 * * 1", "desc": "每周一 09:00 生成上周任务结案报告"},
         ],
         "cron_help": "标准 5 段 cron：分 时 日 月 周（周 0=周日）。"
@@ -295,9 +357,16 @@ def job_payload_template() -> Dict[str, Any]:
 
 def add_job(scheduler: Any, job_id: str, name: str, cron: Optional[str],
             interval: Optional[float], payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    payload = dict(payload or {})
+    # 预置模板自动带 action：到点才知道要"实跑"什么（self_scan / cost_snapshot …）
+    if "action" not in payload:
+        for p in job_payload_template().get("presets", []):
+            if p["id"] == job_id and p.get("action"):
+                payload["action"] = p["action"]
+                break
     try:
         job = scheduler.add_job(job_id, cron=cron, interval=interval,
-                                 payload=payload or {}, name=name or job_id)
+                                 payload=payload, name=name or job_id)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": str(e)}
     return {"ok": True, "job": job}
@@ -311,31 +380,39 @@ def library_index(project_root: str) -> Dict[str, Any]:
     entries: List[Dict[str, Any]] = []
 
     # 6.1 产物目录（结案报告、压测报告、演示页）
+    #     递归子目录：审计动作的归档落在 reports/console_actions/<action>_<ts>/，
+    #     若只列顶层文件，这些「刚归档的产物」就不会出现在资料库里。
+    _DOC_EXT = (".md", ".json", ".html", ".pdf", ".sarif", ".csv", ".txt")
     for sub, kind, label in (("reports", "报告", "演示与证据页"),
                               ("data", "产物", "结案报告与压测产物"),
                               ("docs", "文档", "设计与范式文档")):
         d = os.path.join(project_root, sub)
         if not os.path.isdir(d):
             continue
-        for fn in sorted(os.listdir(d))[:60]:
-            fp = os.path.join(d, fn)
-            if not os.path.isfile(fp):
-                continue
-            if not fn.lower().endswith((".md", ".json", ".html", ".pdf", ".sarif",
-                                        ".csv", ".txt")):
-                continue
-            try:
-                st = os.stat(fp)
-            except OSError:
-                continue
-            entries.append({
-                "name": fn, "kind": kind, "group": label,
-                "path": os.path.join(sub, fn).replace("\\", "/"),
-                "size": st.st_size,
-                "mtime": st.st_mtime,
-                "ext": os.path.splitext(fn)[1].lstrip(".").lower(),
-            })
+        for dirpath, dirnames, filenames in os.walk(d):
+            # 跳过隐藏目录与缓存目录
+            dirnames[:] = [x for x in dirnames
+                           if not x.startswith(".") and x not in ("__pycache__",)]
+            for fn in sorted(filenames):
+                fp = os.path.join(dirpath, fn)
+                if not os.path.isfile(fp):
+                    continue
+                if not fn.lower().endswith(_DOC_EXT):
+                    continue
+                try:
+                    st = os.stat(fp)
+                except OSError:
+                    continue
+                rel = os.path.relpath(fp, project_root)
+                entries.append({
+                    "name": fn, "kind": kind, "group": label,
+                    "path": rel.replace("\\", "/"),
+                    "size": st.st_size,
+                    "mtime": st.st_mtime,
+                    "ext": os.path.splitext(fn)[1].lstrip(".").lower(),
+                })
     entries.sort(key=lambda e: e["mtime"], reverse=True)
+    entries = entries[:200]   # 只保留最近 200 项，避免产物目录膨胀拖慢索引
 
     assets_stats: Dict[str, Any] = {}
     versions: List[Dict[str, Any]] = []

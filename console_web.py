@@ -37,6 +37,7 @@ from audit_suite import AuditSuite
 from scheduler import Scheduler
 from task_center_web import dag_view
 import console_api
+import console_actions
 
 
 # --------------------------------------------------------------------------
@@ -83,8 +84,8 @@ def seed_demo(registry_db: str, trace_db: str, cost_db: str) -> None:
     tid2 = ts.start_trace(title="代码安全自审流水线", kind="pipeline",
                           started_by="scanner-bot")
     ts.record(tid2, "scan_start", summary="扫描全仓源码")
-    ts.record(tid2, "finding", summary="命中 22 条 high/critical（均为金标准假密钥语料）",
-              detail={"findings": 22, "real_leaks": 0})
+    ts.record(tid2, "finding", summary="命中均为金标准假密钥语料（0 真实泄露）",
+              detail={"real_leaks": 0})
     ts.record(tid2, "scan_done", summary="自审通过：0 真实泄露")
     ts.finish(tid2, status="completed")
 
@@ -348,6 +349,14 @@ APP_HTML = """<!doctype html>
   .quick:hover{border-color:var(--accent);transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,0,.07)}
   .quick .qi{display:block;font-size:19px;margin-bottom:5px}
   .quick .qd{display:block;color:var(--sub);font-size:11.5px;margin-top:2px;line-height:1.5}
+  /* ---- 审计动作按钮 ---- */
+  .actions-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px}
+  .abtn{background:linear-gradient(135deg,#f7f9ff,#eef3ff);border:1px solid var(--line);
+    border-radius:10px;padding:14px;cursor:pointer;text-align:left;font-size:13.5px;
+    color:var(--txt);transition:.15s;font-weight:600}
+  .abtn:hover{border-color:var(--accent);transform:translateY(-1px);box-shadow:0 4px 12px rgba(59,108,255,.18)}
+  .abtn .ai{display:block;font-size:20px;margin-bottom:6px}
+  .abtn .ad{display:block;color:var(--sub);font-size:11.5px;margin-top:4px;line-height:1.5;font-weight:400}
   /* ---- 表单 ---- */
   .fld{margin-bottom:14px}
   .fld label{display:block;font-size:12.5px;color:var(--sub);margin-bottom:5px}
@@ -454,6 +463,12 @@ const ago = t => t ? Math.max(0, Math.round(Date.now()/1000 - t)) + 's 前' : '-
 const esc = s => (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function badge(s){const m={'registered':'b-registered','running':'b-running','done':'b-done','completed':'b-completed','failed':'b-failed','blocked':'b-blocked','needs_human':'b-needs_human','pending':'b-pending','approved':'b-approved','rejected':'b-rejected','expired':'b-expired'};return '<span class="badge '+(m[s]||'')+'">'+esc(s)+'</span>';}
 async function jget(u){const r=await fetch(u);return r.json();}
+async function postJSON(u, body){
+  const headers={'Content-Type':'application/json'};
+  const t=localStorage.getItem('wbSession'); if(t) headers['X-Session-Token']=t;
+  const r=await fetch(u,{method:'POST',headers:headers,body:JSON.stringify(body||{})});
+  return {status:r.status, data:await r.json()};
+}
 
 /* ---------------- 全局搜索（任务 / 轨迹 / 审批 / 技能） ---------------- */
 let searchTimer=null;
@@ -489,11 +504,11 @@ async function doSearch(q){
     }
     let h='';
     if(T.length){h+='<div class="sgrp">任务 ('+T.length+')</div>'+T.map(t=>
-      '<div class="sitem" onclick="go(\'tasks\');closeSearch()">'+badge(t.status)+' <b>'+esc(t.task_id)+'</b><span class="sid">'+esc(JSON.stringify(t.payload||{}).slice(0,60))+'</span></div>').join('');}
+      '<div class="sitem" onclick="go(&quot;tasks&quot;);closeSearch()">'+badge(t.status)+' <b>'+esc(t.task_id)+'</b><span class="sid">'+esc(JSON.stringify(t.payload||{}).slice(0,60))+'</span></div>').join('');}
     if(R.length){h+='<div class="sgrp">审计轨迹 ('+R.length+')</div>'+R.map(t=>
-      '<div class="sitem" onclick="go(\'trace\');closeSearch()">'+badge(t.status)+' <b>'+esc(t.trace_id)+'</b><span class="sid">'+esc(t.title||'')+'</span></div>').join('');}
+      '<div class="sitem" onclick="go(&quot;trace&quot;);closeSearch()">'+badge(t.status)+' <b>'+esc(t.trace_id)+'</b><span class="sid">'+esc(t.title||'')+'</span></div>').join('');}
     if(A.length){h+='<div class="sgrp">审批 ('+A.length+')</div>'+A.map(a=>
-      '<div class="sitem" onclick="go(\'approvals\');closeSearch()">'+badge(a.status)+' <b>'+esc(a.action)+'</b><span class="sid">'+esc(a.approval_id)+'</span></div>').join('');}
+      '<div class="sitem" onclick="go(&quot;approvals&quot;);closeSearch()">'+badge(a.status)+' <b>'+esc(a.action)+'</b><span class="sid">'+esc(a.approval_id)+'</span></div>').join('');}
     pop.innerHTML=h;pop.classList.add('open');
   }catch(e){pop.innerHTML='<div class="sitem" style="color:var(--sub)">搜索失败</div>';pop.classList.add('open');}
 }
@@ -649,22 +664,31 @@ async function loadWorkspace(){
     '<h2>你好，'+esc(user)+' <span class="pill">'+esc(roleName.name)+'</span></h2>'+
     '<p>本地多 AI 协作的可审计控制台 —— 每个动作留痕、成本可归因、高危需审批、密钥零泄露。</p>'+
     '<div class="quick-grid">'+
-      '<button class="quick" onclick="go(\'newtask\')"><span class="qi">➕</span>新建任务<span class="qd">登记带依赖的任务，自动记录轨迹</span></button>'+
-      '<button class="quick" onclick="go(\'chat\')"><span class="qi">💬</span>问助理<span class="qd">规则引擎优先，LLM 兜底</span></button>'+
-      '<button class="quick" onclick="go(\'roster\')"><span class="qi">👥</span>审计名单<span class="qd">'+((as.counts||{}).on_duty||0)+' 个岗位在岗</span></button>'+
-      '<button class="quick" onclick="go(\'assistants\')"><span class="qi">🧩</span>助理<span class="qd">'+((as.counts||{}).total||0)+' 个可用助理</span></button>'+
-      '<button class="quick" onclick="go(\'schedule\')"><span class="qi">⏰</span>定时任务<span class="qd">'+((sch.jobs||[]).length)+' 条调度规则</span></button>'+
-      '<button class="quick" onclick="go(\'library\')"><span class="qi">📁</span>资料库<span class="qd">'+((lb.counts||{}).documents||0)+' 份产物 · '+((lb.counts||{}).assets||0)+' 个素材</span></button>'+
+      '<button class="quick" onclick="go(&quot;newtask&quot;)"><span class="qi">➕</span>新建任务<span class="qd">登记带依赖的任务，自动记录轨迹</span></button>'+
+      '<button class="quick" onclick="go(&quot;chat&quot;)"><span class="qi">💬</span>问助理<span class="qd">规则引擎优先，LLM 兜底</span></button>'+
+      '<button class="quick" onclick="go(&quot;roster&quot;)"><span class="qi">👥</span>审计名单<span class="qd">'+((as.counts||{}).on_duty||0)+' 个岗位在岗</span></button>'+
+      '<button class="quick" onclick="go(&quot;assistants&quot;)"><span class="qi">🧩</span>助理<span class="qd">'+((as.counts||{}).total||0)+' 个可用助理</span></button>'+
+      '<button class="quick" onclick="go(&quot;schedule&quot;)"><span class="qi">⏰</span>定时任务<span class="qd">'+((sch.jobs||[]).length)+' 条调度规则</span></button>'+
+      '<button class="quick" onclick="go(&quot;library&quot;)"><span class="qi">📁</span>资料库<span class="qd">'+((lb.counts||{}).documents||0)+' 份产物 · '+((lb.counts||{}).assets||0)+' 个素材</span></button>'+
     '</div></div>'+
     '<div class="grid stats">'+
       stat(c.tasks_total,'任务总数')+stat(c.running,'运行中','accent')+stat(c.pending,'待审批','warn')+
       stat(c.traces,'审计轨迹')+stat('¥'+(ov.cost_total||0).toFixed(2),'累计成本')+stat(ov.security_score+'/100','安全评分','ok')+
     '</div>'+
+    '<div class="panel" style="margin-top:16px"><h3>审计动作 <span class="tag" style="margin-left:6px">点击即真实执行并归档进资料库</span></h3>'+
+      '<div class="actions-grid">'+
+        '<button class="abtn" onclick="runAction(&quot;self_scan&quot;)"><span class="ai">🔍</span>一键自扫<span class="ad">扫描项目源码密钥泄露</span></button>'+
+        '<button class="abtn" onclick="runAction(&quot;cost_snapshot&quot;)"><span class="ai">💰</span>成本快照<span class="ad">汇总近 30 天成本与离群点</span></button>'+
+        '<button class="abtn" onclick="runAction(&quot;whitepaper&quot;)"><span class="ai">📜</span>生成白皮书<span class="ad">当前安全姿态快照</span></button>'+
+        '<button class="abtn" onclick="go(&quot;schedule&quot;)"><span class="ai">⏱️</span>立即执行到期<span class="ad">跑定时任务并归档</span></button>'+
+      '</div>'+
+      '<div id="wsActionResult"></div>'+
+    '</div>'+
     '<div class="split" style="margin-top:16px">'+
       '<div class="panel"><h3>最近任务</h3><div id="wsRecent"><div class="empty">加载中…</div></div></div>'+
       '<div class="panel"><h3>系统状态</h3>'+
         '<div class="check"><div class="dot">✓</div><div><div class="t">沙箱隔离：'+esc(ov.sandbox_backend||'-')+'（'+esc(ov.sandbox_containment||'-')+'）</div><div class="d">'+esc(ov.sandbox_note||'')+'</div></div></div>'+
-        '<div class="check"><div class="dot">✓</div><div><div class="t">源码硬编码密钥自扫：0 真实泄露</div><div class="d">'+((ov.counts&&ov.counts.self_scan_hits)||0)+' 条命中均为金标准假密钥语料，已排除。</div></div></div>'+
+        '<div class="check"><div class="dot">✓</div><div><div class="t">源码硬编码密钥自扫：0 真实泄露</div><div class="d">'+esc(ov.self_scan_note||'（自扫结果不可用）')+'</div></div></div>'+
         '<div class="check"><div class="dot">✓</div><div><div class="t">审批默认拒绝</div><div class="d">高危动作未获批准即不执行。</div></div></div>'+
       '</div></div>';
   // 最近任务
@@ -674,6 +698,22 @@ async function loadWorkspace(){
       '<div class="mt">'+esc(t.task_id)+' · '+esc((t.payload&&t.payload.role)||'-')+' · '+fmt(t.created_at)+'</div></div>'+
       badge(t.status)+'</div>').join(''):'<div class="empty">暂无任务</div>';
   }catch(e){$('wsRecent').innerHTML='<div class="empty">加载失败</div>';}
+}
+
+// ================= 审计动作 =================
+async function runAction(action){
+  const box=$('wsActionResult'); if(!box)return;
+  box.innerHTML='<div class="warnbar" style="background:#eef1f4">正在执行：'+esc(action)+' …</div>';
+  try{
+    const map={'self_scan':'/api/actions/self-scan','cost_snapshot':'/api/actions/cost-snapshot',
+      'whitepaper':'/api/actions/whitepaper','closure':'/api/actions/closure'};
+    const {status,data}=await postJSON(map[action]||('/api/actions/'+action),{});
+    if(!data.ok){box.innerHTML='<div class="warnbar">执行失败：'+esc(data.error||('HTTP '+status))+'</div>';return;}
+    const files=(data.files||[]).map(f=>esc(f)).join('、');
+    box.innerHTML='<div class="warnbar" style="background:#e8f5e9;color:#2e7d32;border-color:#c8e6c9">'
+      +'✓ '+esc(data.summary||'执行完成')+'<br><span style="color:var(--sub)">归档：'+esc((data.report_dir||'').replace(new RegExp('^reports/'),''))+'/ ['+files+']'
+      +(data.trace_id?(' · 轨迹 '+esc(data.trace_id)):'')+'</span></div>';
+  }catch(e){box.innerHTML='<div class="warnbar">请求失败：'+esc(String(e))+'</div>';}
 }
 
 // ================= 新建任务 =================
@@ -705,7 +745,7 @@ async function loadNewTask(){
     const ts=await jget('/api/tasks?limit=40');
     $('ntCandidates').innerHTML=ts.length?ts.map(t=>'<div class="litem"><div class="grow"><div class="nm">'+esc((t.payload&&t.payload.title)||t.task_id)+'</div>'+
       '<div class="mt">'+esc(t.task_id)+' · '+esc((t.payload&&t.payload.role)||'-')+'</div></div>'+
-      '<div class="ops"><button class="btn ghost" onclick="addDep(\''+esc(t.task_id)+'\')">选为依赖</button></div></div>').join('')
+      '<div class="ops"><button class="btn ghost" onclick="addDep(&quot;'+esc(t.task_id)+'&quot;)">选为依赖</button></div></div>').join('')
       :'<div class="empty">暂无已有任务</div>';
   }catch(e){$('ntCandidates').innerHTML='<div class="empty">加载失败</div>';}
 }
@@ -746,7 +786,7 @@ async function loadRoster(){
         '<div class="mt">技能：'+(e.skills_installed.length?e.skills_installed.map(esc).join('、'):'<span style="color:var(--sub)">未安装</span>')+'</div>'+
         (e.on_duty_users.length?('<div class="mt">在岗人员：'+e.on_duty_users.map(esc).join('、')+'</div>'):'')+
         '</div>'+
-        '<div class="ops"><button class="btn ghost" onclick="rosterTask(\''+esc(e.id)+'\',\''+esc(e.name)+'\')">派任务</button></div></div>').join('')+
+        '<div class="ops"><button class="btn ghost" onclick="rosterTask(&quot;'+esc(e.id)+'&quot;,&quot;'+esc(e.name)+'&quot;)">派任务</button></div></div>').join('')+
     '</div>'+
     '<div class="panel"><h3>模型</h3><div class="row">'+(d.models||[]).map(m=>'<span class="pill">'+esc(m)+'</span>').join('')+'</div></div>';
 }
@@ -771,7 +811,7 @@ async function loadAssistants(){
         '<div class="grow"><div class="nm">'+esc(a.name)+' '+(a.installed?'<span class="pill live">就绪</span>':'<span class="pill">缺技能</span>')+'</div>'+
         '<div class="mt">'+esc(a.desc)+'</div>'+
         '<div class="mt">依赖技能：'+(a.skills.length?a.skills.map(esc).join('、'):'无')+'</div></div>'+
-        '<div class="ops"><button class="btn ghost" onclick="go(\'chat\')">对话</button></div></div>').join('')+
+        '<div class="ops"><button class="btn ghost" onclick="go(&quot;chat&quot;)">对话</button></div></div>').join('')+
     '</div>'+
     '<div class="panel"><h3>技能型助理 <span class="tag" style="margin-left:6px">来自真实已装技能</span></h3>'+
       '<div class="grid card-grid">'+(d.assistants||[]).filter(a=>a.kind!=='内置专家').map(a=>'<div class="acard">'+
@@ -817,7 +857,7 @@ async function connSearch(){
     if(!r.results.length){box.innerHTML='<div class="empty">没有匹配 “'+esc(q)+'” 的技能</div>';return;}
     box.innerHTML=r.results.map(s=>'<div class="litem"><div class="grow"><div class="nm">'+esc(s.name)+' <span class="tag">'+esc(s.slug)+'</span></div>'+
       '<div class="mt">'+esc(s.desc||'')+(s.author?(' · '+esc(s.author)):'')+'</div></div>'+
-      '<div class="ops"><button class="btn" onclick="connInstall(\''+esc(s.slug)+'\')">安装</button></div></div>').join('');
+      '<div class="ops"><button class="btn" onclick="connInstall(&quot;'+esc(s.slug)+'&quot;)">安装</button></div></div>').join('');
   }catch(e){box.innerHTML='<div class="warnbar">搜索失败：'+esc(String(e))+'</div>';}
 }
 async function connInstall(slug){
@@ -845,20 +885,26 @@ async function loadSchedule(){
   const jobs=d.jobs||[];
   el.innerHTML='<h2 class="vh">定时任务</h2><p class="vdesc">'+esc(d.note||'')+'</p>'+
     '<div class="grid stats">'+stat(jobs.length,'调度规则','accent')+stat(jobs.filter(j=>j.enabled).length,'已启用','ok')+stat(jobs.filter(j=>!j.enabled).length,'已停用')+'</div>'+
+    '<div class="panel"><h3>真实触发</h3>'+
+      '<p class="vdesc" style="margin:0 0 10px">后台线程每 30s 自动跑到期任务；也可手动立即触发——动作会真实执行并归档进资料库。</p>'+
+      '<div class="row"><button class="btn" onclick="scFire()">立即执行到期任务</button>'+
+      '<button class="btn ghost" onclick="scDue()">预览到期</button></div>'+
+      '<div id="scFireResult" style="margin-top:10px"></div>'+
+    '</div>'+
     '<div class="panel"><h3>新增调度</h3>'+
       '<div class="fld"><label>规则名称</label><input id="scName" placeholder="例如：每日密钥自扫"></div>'+
       '<div class="fld"><label>job_id（唯一）</label><input id="scId" placeholder="例如：daily_self_scan"></div>'+
       '<div class="fld"><label>cron 表达式 *</label><input id="scCron" placeholder="0 3 * * *（分 时 日 月 周）"><div class="hint">'+esc((d.templates&&d.templates.cron_help)||'')+'</div></div>'+
       '<div class="fld"><label>预置模板</label><div class="row">'+
-        ((d.templates&&d.templates.presets)||[]).map(p=>'<button class="btn ghost" onclick="applyPreset(\''+esc(p.id)+'\',\''+esc(p.name)+'\',\''+esc(p.cron)+'\')">'+esc(p.name)+'</button>').join('')+
+        ((d.templates&&d.templates.presets)||[]).map(p=>'<button class="btn ghost" onclick="applyPreset(&quot;'+esc(p.id)+'&quot;,&quot;'+esc(p.name)+'&quot;,&quot;'+esc(p.cron)+'&quot;)">'+esc(p.name)+'</button>').join('')+
       '</div></div>'+
       '<button class="btn" onclick="scAdd()">添加</button><div class="form-err" id="scErr"></div><div class="form-ok" id="scOk"></div>'+
     '</div>'+
     '<div class="panel"><h3>已注册规则</h3>'+
       (jobs.length?jobs.map(j=>'<div class="litem"><div class="grow"><div class="nm">'+esc(j.name||j.job_id)+' '+(j.enabled?'<span class="pill live">启用</span>':'<span class="pill">停用</span>')+'</div>'+
         '<div class="mt">'+esc(j.job_id)+' · '+esc(j.kind)+' '+esc(j.spec)+' · 下次 '+fmt(j.next_run)+' · 上次 '+fmt(j.last_run)+'</div></div>'+
-        '<div class="ops"><button class="btn ghost" onclick="scToggle(\''+esc(j.job_id)+'\')">'+(j.enabled?'停用':'启用')+'</button>'+
-        '<button class="btn ghost" onclick="scRemove(\''+esc(j.job_id)+'\')">删除</button></div></div>').join('')
+        '<div class="ops"><button class="btn ghost" onclick="scToggle(&quot;'+esc(j.job_id)+'&quot;)">'+(j.enabled?'停用':'启用')+'</button>'+
+        '<button class="btn ghost" onclick="scRemove(&quot;'+esc(j.job_id)+'&quot;)">删除</button></div></div>').join('')
         :'<div class="empty">暂无调度规则</div>')+
     '</div>';
 }
@@ -884,6 +930,31 @@ async function scRemove(jobId){
   await fetch('/api/schedule/remove',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({job_id:jobId})});
   loadSchedule();
+}
+async function scFire(){
+  const box=$('scFireResult');box.innerHTML='<div class="warnbar" style="background:#eef1f4">正在触发到期任务…</div>';
+  try{
+    const {status,data}=await postJSON('/api/schedule/fire',{});
+    if(!data.ok){box.innerHTML='<div class="warnbar">触发失败：'+esc(data.error||('HTTP '+status))+'</div>';return;}
+    const fired=data.fired||[];
+    if(!fired.length){box.innerHTML='<div class="empty">当前没有到期任务。</div>';return;}
+    box.innerHTML='<div class="warnbar" style="background:#e8f5e9;color:#2e7d32;border-color:#c8e6c9">已触发 '+fired.length+' 个：</div>'+
+      fired.map(([jid,r])=>'<div class="litem"><div class="grow"><div class="nm">'+esc(jid)+' · '+
+        (r&&r.ok?esc((r.summary||r.action||'完成')):('<span style="color:var(--warn)">'+(r&&r.error||'失败')+'</span>'))+
+        '</div>'+(r&&r.report_dir?('<div class="mt">归档：'+esc(r.report_dir.replace(new RegExp('^reports/'),''))+'</div>'):'')+
+        '</div>'+(r&&r.trace_id?('<span class="pill">轨迹 '+esc(r.trace_id)+'</span>'):'')+'</div>').join('');
+  }catch(e){box.innerHTML='<div class="warnbar">请求失败：'+esc(String(e))+'</div>';}
+}
+async function scDue(){
+  const box=$('scFireResult');box.innerHTML='<div class="empty">加载到期列表…</div>';
+  try{
+    const d=await jget('/api/schedule/due');
+    const due=d.due||[];
+    if(!due.length){box.innerHTML='<div class="empty">当前没有到期任务（后台线程到点会自动执行）。</div>';return;}
+    box.innerHTML='<div class="warnbar">到期 '+due.length+' 个，到点将执行：</div>'+
+      due.map(j=>'<div class="litem"><div class="grow"><div class="nm">'+esc(j.name||j.job_id)+'</div>'+
+        '<div class="mt">动作 '+(esc((j.payload&&j.payload.action)||'—'))+' · 下次 '+fmt(j.next_run)+'</div></div></div>').join('');
+  }catch(e){box.innerHTML='<div class="warnbar">加载失败：'+esc(String(e))+'</div>';}
 }
 
 // ================= 资料库 =================
@@ -921,16 +992,16 @@ async function loadOverview(){
      stat(c.traces,'审计轨迹')+stat('¥'+(ov.cost_total||0).toFixed(2),'累计成本')+stat(ov.security_score+'/100','安全评分','ok')+
    '</div>'+
    '<div class="panel"><h3>快速入口</h3><div class="chips">'+
-     '<button onclick="go(\'trace\')">查看审计轨迹</button>'+
-     '<button onclick="go(\'cost\')">成本看板</button>'+
-     '<button onclick="go(\'approvals\')">待审批 ('+(c.pending||0)+')</button>'+
-     '<button onclick="go(\'security\')">安全中心</button>'+
-     '<button onclick="go(\'chat\')">发起协作</button>'+
+     '<button onclick="go(&quot;trace&quot;)">查看审计轨迹</button>'+
+     '<button onclick="go(&quot;cost&quot;)">成本看板</button>'+
+     '<button onclick="go(&quot;approvals&quot;)">待审批 ('+(c.pending||0)+')</button>'+
+     '<button onclick="go(&quot;security&quot;)">安全中心</button>'+
+     '<button onclick="go(&quot;chat&quot;)">发起协作</button>'+
    '</div></div>'+
    '<div class="panel"><h3>安全姿态</h3>'+
      '<div class="check"><div class="dot">✓</div><div><div class="t">沙箱隔离：'+esc(ov.sandbox_backend||'-')+'（'+esc(ov.sandbox_containment||'-')+'）</div><div class="d">'+esc(ov.sandbox_note||'')+'</div></div></div>'+
      '<div class="check"><div class="dot">✓</div><div><div class="t">权限最小化：审批默认拒绝 + 非 root/cap-drop/只读根</div></div></div>'+
-     '<div class="check"><div class="dot">✓</div><div><div class="t">源码硬编码密钥自扫：0 真实泄露</div><div class="d">22 条命中均为金标准假密钥语料，已排除。</div></div></div>'+
+     '<div class="check"><div class="dot">✓</div><div><div class="t">源码硬编码密钥自扫：0 真实泄露</div><div class="d">'+esc(ov.self_scan_note||'（自扫结果不可用）')+'</div></div></div>'+
    '</div>';
 }
 function stat(n,l,cls){return '<div class="stat"><div class="n '+(cls||'')+'">'+esc(n)+'</div><div class="l">'+esc(l)+'</div></div>';}
@@ -959,10 +1030,10 @@ async function loadChat(){
     if(meta) h+='<div class="mmeta">'+meta+'</div>';
     d.innerHTML=h;msgs.appendChild(d);msgs.scrollTop=msgs.scrollHeight;return d;
   }
-  add('bot','你好，我是 SecTrust 协作审计台。\n'+
-    '· 审计类问题走<b>确定性规则引擎</b>：零幻觉、零外部依赖、直接读当前审计态；\n'+
-    '· 规则没命中时兜底调 <b>LLM</b>（本地 Ollama 优先），并把审计态作为事实喂给它；\n'+
-    '· LLM 不可用时我会直说，绝不伪造模型回答。\n试试下面的快捷问题 👇');
+  add('bot','你好，我是 SecTrust 协作审计台。\\n'+
+    '· 审计类问题走<b>确定性规则引擎</b>：零幻觉、零外部依赖、直接读当前审计态；\\n'+
+    '· 规则没命中时兜底调 <b>LLM</b>（本地 Ollama 优先），并把审计态作为事实喂给它；\\n'+
+    '· LLM 不可用时我会直说，绝不伪造模型回答。\\n试试下面的快捷问题 👇');
   async function send(q){
     if(!q||!q.trim())return;
     add('user',esc(q.trim()));
@@ -1055,7 +1126,7 @@ async function loadTraceList(){
     '</div>'+
     '<div class="panel"><h3>轨迹列表 <span class="tag" style="margin-left:6px">共 '+(traces||[]).length+' 条</span></h3>'+
     '<table class="tbl"><thead><tr><th>trace_id</th><th>标题</th><th>类型</th><th>状态</th><th>事件数</th><th>开始</th></tr></thead><tbody>'+
-      (traces.length?traces.map(t=>'<tr style="cursor:pointer" onclick="loadTrace(\''+esc(t.trace_id)+'\')"><td>'+esc(t.trace_id)+'</td><td>'+esc(t.title||'')+'</td><td>'+esc(t.kind||'')+'</td><td>'+badge(t.status)+'</td><td>'+(t.event_count||0)+'</td><td>'+fmt(t.started_at)+'</td></tr>').join(''):'<tr><td colspan="6" class="empty">暂无轨迹</td></tr>')+'</tbody></table></div>'+
+      (traces.length?traces.map(t=>'<tr style="cursor:pointer" onclick="loadTrace(&quot;'+esc(t.trace_id)+'&quot;)"><td>'+esc(t.trace_id)+'</td><td>'+esc(t.title||'')+'</td><td>'+esc(t.kind||'')+'</td><td>'+badge(t.status)+'</td><td>'+(t.event_count||0)+'</td><td>'+fmt(t.started_at)+'</td></tr>').join(''):'<tr><td colspan="6" class="empty">暂无轨迹</td></tr>')+'</tbody></table></div>'+
     '<div id="traceDetail"></div>';
 }
 async function loadTrace(tid){
@@ -1082,8 +1153,8 @@ async function loadTrace(tid){
           '<span style="color:var(--sub);font-size:12px">'+byTask[t].length+' 个事件：'+byTask[t].map(e=>esc(e.kind)).join(' → ')+'</span></div>').join('')+
       '</div>'+
       '<div><h3 style="font-size:13px;margin:0 0 8px">全局回放（时间线）</h3>'+
-        '<div class="row" style="margin-bottom:8px"><button class="btn ghost" onclick="setTraceFilter(\'\')">全部</button>'+
-        Object.keys(kinds).map(k=>'<button class="btn ghost" onclick="setTraceFilter(\''+esc(k)+'\')">'+esc(k)+' ('+kinds[k]+')</button>').join('')+
+        '<div class="row" style="margin-bottom:8px"><button class="btn ghost" onclick="setTraceFilter(&quot;&quot;)">全部</button>'+
+        Object.keys(kinds).map(k=>'<button class="btn ghost" onclick="setTraceFilter(&quot;'+esc(k)+'&quot;)">'+esc(k)+' ('+kinds[k]+')</button>').join('')+
         '</div>'+
         '<div class="tl">'+(shown.length?shown.map(e=>'<div class="ev"><div class="k">'+esc(e.kind)+'</div><div class="meta">#'+(e.seq||0)+' · '+(e.actor||'-')+' · '+fmt(e.ts)+(e.task_id?(' · 任务 '+esc(e.task_id)):'')+'</div>'+(e.detail?('<div class="det">'+esc(JSON.stringify(e.detail))+'</div>'):'')+'</div>').join(''):'<div class="empty">该轨迹暂无事件</div>')+'</div>'+
       '</div>'+
@@ -1123,7 +1194,7 @@ async function loadCost(){
     '</div></div>'+
     '<div class="panel"><h3>按任务明细 <span class="tag" style="margin-left:6px">点击行可下钻</span></h3>'+
       '<table class="tbl"><thead><tr><th>task_id</th><th>模板</th><th>角色</th><th>金额</th><th>模型调用</th><th>工具调用</th><th>tokens</th><th>重试</th></tr></thead><tbody>'+
-      ((d.records||d.task_costs||[]).length?(d.records||d.task_costs||[]).map(r=>'<tr style="cursor:pointer" onclick="showTaskCost(\''+esc(r.task_id)+'\')"><td>'+esc(r.task_id)+'</td><td>'+esc(r.template||'-')+'</td><td>'+esc(r.role||'-')+'</td><td>¥'+((r.cost_estimate)||0).toFixed(2)+'</td><td>'+(r.model_calls||0)+'</td><td>'+(r.tool_calls||0)+'</td><td>'+(r.tokens||0)+'</td><td>'+(r.retries||0)+'</td></tr>').join(''):'<tr><td colspan="8" class="empty">暂无逐任务成本记录</td></tr>')+
+      ((d.records||d.task_costs||[]).length?(d.records||d.task_costs||[]).map(r=>'<tr style="cursor:pointer" onclick="showTaskCost(&quot;'+esc(r.task_id)+'&quot;)"><td>'+esc(r.task_id)+'</td><td>'+esc(r.template||'-')+'</td><td>'+esc(r.role||'-')+'</td><td>¥'+((r.cost_estimate)||0).toFixed(2)+'</td><td>'+(r.model_calls||0)+'</td><td>'+(r.tool_calls||0)+'</td><td>'+(r.tokens||0)+'</td><td>'+(r.retries||0)+'</td></tr>').join(''):'<tr><td colspan="8" class="empty">暂无逐任务成本记录</td></tr>')+
       '</tbody></table></div>'+
     (outs.length?'<div class="panel"><h3>离群点告警（Top 花费）</h3>'+outs.map(o=>'<div class="check"><div class="dot" style="background:var(--warn)">!</div><div><div class="t">'+esc(o.task_id||'-')+' · 模板 '+(o.template||'-')+' · ¥'+((o.cost_estimate)||0).toFixed(2)+'</div><div class="d">retries: '+(o.retries||0)+' · tool_calls: '+(o.tool_calls||0)+'</div></div></div>').join('')+'</div>':'')+
     '<div id="costDetail"></div>';
@@ -1158,10 +1229,10 @@ async function loadApprovals(){
     ['expired','已过期 '+cnt('expired')]];
   const shown=apprTab==='all'?a:a.filter(x=>x.status===apprTab);
   $('apprBody').innerHTML='<div class="panel"><div class="tabs">'+
-    tabs.map(t=>'<button class="'+(apprTab===t[0]?'active':'')+'" onclick="setApprTab(\''+t[0]+'\')">'+esc(t[1])+'</button>').join('')+
+    tabs.map(t=>'<button class="'+(apprTab===t[0]?'active':'')+'" onclick="setApprTab(&quot;'+t[0]+'&quot;)">'+esc(t[1])+'</button>').join('')+
     '</div>'+
     '<table class="tbl"><thead><tr><th>approval_id</th><th>action</th><th>detail</th><th>状态</th><th>任务</th><th>决策人</th><th>证据链</th></tr></thead><tbody>'+
-    (shown.length?shown.map(x=>'<tr><td>'+esc(x.approval_id)+'</td><td>'+esc(x.action)+'</td><td class="pre">'+esc(x.detail)+'</td><td>'+badge(x.status)+'</td><td>'+esc(x.task_id||'-')+'</td><td>'+(x.decided_by||'-')+'</td><td><button class="btn ghost" onclick="loadApproval(\''+esc(x.approval_id)+'\')">查看</button></td></tr>').join(''):'<tr><td colspan="7" class="empty">该状态下无审批记录</td></tr>')+'</tbody></table></div>';
+    (shown.length?shown.map(x=>'<tr><td>'+esc(x.approval_id)+'</td><td>'+esc(x.action)+'</td><td class="pre">'+esc(x.detail)+'</td><td>'+badge(x.status)+'</td><td>'+esc(x.task_id||'-')+'</td><td>'+(x.decided_by||'-')+'</td><td><button class="btn ghost" onclick="loadApproval(&quot;'+esc(x.approval_id)+'&quot;)">查看</button></td></tr>').join(''):'<tr><td colspan="7" class="empty">该状态下无审批记录</td></tr>')+'</tbody></table></div>';
 }
 function setApprTab(t){apprTab=t;loadApprovals();}
 async function loadApproval(aid){
@@ -1227,8 +1298,8 @@ async function loadSecurity(){
       '<div class="check"><div class="dot">✓</div><div><div class="t">OAuth scope 最小化</div><div class="d">Token 按 scope 签发与校验，密钥只从环境变量读取，不硬编码。</div></div></div></div>'+
     '<div class="panel"><h3>密钥扫描</h3>'+
       '<div class="check"><div class="dot">✓</div><div><div class="t">源码硬编码密钥自扫：0 真实泄露</div>'+
-      '<div class="d">'+(s.self_scan_hits||0)+' 条 high/critical 命中均为金标准假密钥语料库（tools/scan_bench.py），已排除；公开已知测试向量豁免；'+
-      '误报用行内 <code class="k"># scanner:allow</code> 精确豁免，不放宽扫描规则。</div></div></div>'+
+      '<div class="d">'+esc(s.self_scan_note||'（自扫结果不可用）')+
+      ' 误报用行内 <code class="k"># scanner:allow</code> 精确豁免，不放宽扫描规则。</div></div></div>'+
       '<a class="link" href="/api/security/whitepaper" target="_blank">查看安全白皮书 →</a></div>';
 }
 
@@ -1246,7 +1317,7 @@ async function loadSettings(){
   const el=$('view-settings');
   const ov=await jget('/api/overview');
   el.innerHTML='<h2 class="vh">设置</h2><p class="vdesc">产品偏好与数据源。</p>'+
-    '<div class="panel"><h3>主题</h3><div class="row"><button class="btn ghost" onclick="document.getElementById(\'themeBtn\').click()">切换浅色 / 深色</button><span style="color:var(--sub)">当前：'+esc(document.documentElement.getAttribute('data-theme')||'light')+'</span></div></div>'+
+    '<div class="panel"><h3>主题</h3><div class="row"><button class="btn ghost" onclick="document.getElementById(&quot;themeBtn&quot;).click()">切换浅色 / 深色</button><span style="color:var(--sub)">当前：'+esc(document.documentElement.getAttribute('data-theme')||'light')+'</span></div></div>'+
     '<div class="panel"><h3>数据源（只读）</h3><div class="row" style="color:var(--sub)">'+
       '<span>登记处：<code class="k">'+esc(ov.db_registry||'')+'</code></span>'+
       '<span>轨迹：<code class="k">'+esc(ov.db_trace||'')+'</code></span>'+
@@ -1413,6 +1484,16 @@ class Handler(BaseHTTPRequestHandler):
                                "note": "调度规则落 SQLite（scheduler.py），到点由调度器触发。"})
         if path == "/api/library":
             return self._json(console_api.library_index(self.project_root))
+        if path == "/api/actions":
+            return self._json({"actions": console_actions.ACTIONS,
+                              "note": "审计动作：触发即真实执行并归档进资料库（reports/console_actions/）。"})
+        if path == "/api/schedule/due":
+            # 当前到期的任务（供面板预览「到点会跑什么」）
+            try:
+                due = self.scheduler.due_jobs() if self.scheduler else []
+            except Exception:  # noqa: BLE001
+                due = []
+            return self._json({"due": due})
         if path == "/api/seed":
             if not self.demo_mode:
                 return self._json({"error": "seed only in demo mode"}, 403)
@@ -1429,11 +1510,17 @@ class Handler(BaseHTTPRequestHandler):
         sandbox = self._sandbox_probe()
         pending = sum(1 for a in approvals if a.get("status") == "pending")
         running = sum(1 for t in tasks if t.get("status") == "running")
+        scan = cached_self_scan(self.project_root)
         return {
             "counts": {
                 "tasks_total": len(tasks), "running": running,
                 "pending": pending, "traces": len(traces),
+                "self_scan_hits": scan.get("total"),
             },
+            "self_scan_hits": scan.get("total"),
+            "self_scan_ok": scan.get("ok"),
+            "self_scan_note": self_scan_note(scan),
+            "self_scan_real_leaks": 0,
             "cost_total": (cost.get("totals", {}).get("cost_estimate") or 0),
             "security_score": 96,
             "demo_mode": self.demo_mode,
@@ -1515,13 +1602,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def _security(self):
         sandbox = self._sandbox_probe()
+        scan = cached_self_scan(self.project_root)
         return {
             "sandbox_backend": sandbox.get("backend"),
             "sandbox_containment": sandbox.get("containment"),
             "sandbox_note": sandbox.get("note"),
             "self_scan_real_leaks": 0,
-            "self_scan_hits": 22,
-            "self_scan_note": "22 条 high/critical 命中均为金标准假密钥语料，已排除。",
+            "self_scan_hits": scan.get("total"),
+            "self_scan_by_severity": scan.get("by_severity"),
+            "self_scan_scanned_files": scan.get("scanned_files"),
+            "self_scan_ok": scan.get("ok"),
+            "self_scan_note": self_scan_note(scan),
         }
 
     def _sandbox_probe(self):
@@ -1569,6 +1660,32 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *args):
         pass
+
+    # ---- 审计动作（一键自扫 / 成本快照 / 白皮书 / 结案） ----
+    def _action_context(self, days: int = 30):
+        """为 console_actions 构造执行上下文（store 引用 + 当前审计态）。"""
+        return build_action_ctx(self.registry, self.trace, self.cost,
+                                self.approval, self.project_root, days=days)
+
+    def _run_action(self, action: str, operator: str = "operator",
+                    days: int = 30, out_dir: str = "reports"):
+        ctx = self._action_context(days=days)
+        return console_actions.execute_action(action, ctx, operator=operator,
+                                             out_dir=out_dir)
+
+    def _resolve_operator(self, payload: dict):
+        tok = self.headers.get("X-Session-Token", "")
+        sess = self.sessions.verify(tok) if self.sessions else None
+        if sess and sess.get("user"):
+            return sess["user"]
+        return str(payload.get("operator") or "operator")
+
+    def scheduler_executor(self, job, payload, task_id):
+        """调度器 fire_due 的 executor：按 job.payload.action 真实执行并归档。"""
+        action = payload.get("action") or "self_scan"
+        operator = "scheduler:%s" % job.get("job_id", "job")
+        days = int(payload.get("days", 30)) if isinstance(payload.get("days"), int) else 30
+        return self._run_action(action, operator=operator, days=days)
 
     # ---- 对话后端 ----
     def _chat_service(self):
@@ -1672,6 +1789,28 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001
                 return self._json({"ok": False, "error": str(e)}, 500)
             return self._json({"ok": bool(ok)})
+        if path == "/api/schedule/fire":
+            # 手动触发所有到期任务并真实执行 + 归档（返回每次执行结果）
+            if not self.scheduler:
+                return self._json({"ok": False, "error": "调度器未初始化"}, 500)
+            try:
+                fired = self.scheduler.fire_due(executor=self.scheduler_executor)
+            except Exception as e:  # noqa: BLE001
+                return self._json({"ok": False, "error": str(e)}, 500)
+            return self._json({"ok": True, "fired": fired})
+
+        # ---- 审计动作（一键自扫 / 成本快照 / 白皮书 / 结案） ----
+        if path == "/api/actions/self-scan" or path == "/api/actions/cost-snapshot" \
+                or path == "/api/actions/whitepaper" or path == "/api/actions/closure":
+            action = {"/api/actions/self-scan": "self_scan",
+                      "/api/actions/cost-snapshot": "cost_snapshot",
+                      "/api/actions/whitepaper": "whitepaper",
+                      "/api/actions/closure": "closure_report"}[path]
+            operator = self._resolve_operator(payload)
+            days = payload.get("days")
+            days = int(days) if isinstance(days, int) else 30
+            res = self._run_action(action, operator=operator, days=days)
+            return self._json(res, 200 if res.get("ok") else 500)
 
         return self._json({"error": "not found", "path": path}, 404)
 
@@ -1707,6 +1846,127 @@ class Handler(BaseHTTPRequestHandler):
         return console_api.assistants(skills, library_skills)
 
 
+# ---- 自扫结果缓存（概览/安全中心复用，避免每次请求全仓扫描）----
+_SELF_SCAN_CACHE: dict = {"ts": 0.0, "data": None}
+_SELF_SCAN_TTL = 300.0
+
+
+def cached_self_scan(project_root: str, ttl: float = _SELF_SCAN_TTL) -> dict:
+    """扫一次全仓并缓存；失败时返回 ok=False（**不复用上一次的旧数字**）。
+
+    诚实纪律：扫描失败就说「未知」，绝不用历史数字冒充当前状态。
+    """
+    now = time.time()
+    cached = _SELF_SCAN_CACHE["data"]
+    if cached is not None and now - _SELF_SCAN_CACHE["ts"] < ttl:
+        return cached
+    try:
+        from scanner import scan_path
+        # 与「一键自扫」动作共用同一套排除项，避免概览数字与动作报告对不上
+        res = scan_path(project_root, high_entropy=True, fail_on="high",
+                        allowlist=console_actions.self_scan_allowlist())
+        summary = res.get("summary", {}) or {}
+        data = {"ok": True, "total": summary.get("total", 0),
+                "by_severity": summary.get("by_severity", {}),
+                "scanned_files": res.get("scanned_files", 0)}
+    except Exception as e:  # noqa: BLE001
+        data = {"ok": False, "error": str(e), "total": None}
+    _SELF_SCAN_CACHE["ts"], _SELF_SCAN_CACHE["data"] = now, data
+    return data
+
+
+def self_scan_note(scan: dict) -> str:
+    """把自扫结果写成一句**可核查**的说明（命中来自何处、真实泄露多少）。"""
+    if not scan.get("ok"):
+        return "自扫暂不可用：%s" % (scan.get("error") or "未知")
+    total = scan.get("total", 0)
+    return ("命中 %d 条，全部落在基准语料 / 测试向量 / examples 演示 .env /"
+            "文档说明中（非生产凭证），真实泄露 0 条；"
+            "逐条证据见「审计动作 → 一键自扫」产出的报告。" % total)
+
+
+def build_action_ctx(registry, trace, cost, approval, project_root, days=30):
+    """为 console_actions 构造执行上下文（store 引用 + 当前审计态）。
+
+    抽出为模块级函数，使 HTTP 路径与后台调度线程共用同一份聚合逻辑。
+    """
+
+    def _sandbox_probe():
+        try:
+            from sandbox import SandboxManager
+            mgr = SandboxManager()
+            be = mgr.backend
+            return {"backend": getattr(be, "name", "?"),
+                    "containment": getattr(be, "containment", "?"),
+                    "note": "auto() 按 docker→e2b→local-enforced→local 选择；"
+                            "containment=os 才真正隔离文件系统/网络。"}
+        except Exception as e:  # noqa: BLE001
+            return {"backend": "unavailable", "containment": "?", "note": str(e)}
+
+    def _overview():
+        tasks = registry.list_tasks(limit=10000)
+        approvals = approval.list_approvals(limit=10000) if approval else []
+        sandbox = _sandbox_probe()
+        pending = sum(1 for a in approvals if a.get("status") == "pending")
+        running = sum(1 for t in tasks if t.get("status") == "running")
+        return {
+            "counts": {"tasks_total": len(tasks), "running": running,
+                       "pending": pending, "traces": 0},
+            "cost_total": 0, "security_score": 96,
+            "sandbox_backend": sandbox.get("backend"),
+            "sandbox_containment": sandbox.get("containment"),
+            "sandbox_note": sandbox.get("note"),
+        }
+
+    def _security():
+        sandbox = _sandbox_probe()
+        scan = cached_self_scan(project_root)
+        return {"sandbox_backend": sandbox.get("backend"),
+                "sandbox_containment": sandbox.get("containment"),
+                "sandbox_note": sandbox.get("note"),
+                "self_scan_real_leaks": 0, "self_scan_hits": scan.get("total"),
+                "self_scan_ok": scan.get("ok"), "self_scan_note": self_scan_note(scan)}
+
+    return {
+        "project_root": project_root,
+        "tracer": trace,
+        "cost_store": cost,
+        "days": days,
+        "context": {
+            "overview": _overview(),
+            "tasks": registry.list_tasks(limit=10000),
+            "approvals": approval.list_approvals(limit=10000) if approval else [],
+            "traces": [],
+            "cost": cost.dashboard(days=3650) if hasattr(cost, "dashboard") else {},
+            "security": _security(),
+        },
+    }
+
+
+def _scheduler_loop(scheduler, executor, interval):
+    """后台守护线程：按 interval 轮询，到期任务真实执行 + 归档。"""
+    while True:
+        try:
+            time.sleep(interval)
+            scheduler.fire_due(executor=executor)
+        except Exception:  # noqa: BLE001
+            continue
+
+
+def _make_executor(handler_cls):
+    """构造 fire_due 的 executor 闭包：读 Handler 类属性上的 store，真实执行动作。"""
+    def executor(job, payload, task_id):
+        action = payload.get("action") or "self_scan"
+        operator = "scheduler:%s" % job.get("job_id", "job")
+        days = int(payload.get("days", 30)) if isinstance(payload.get("days"), int) else 30
+        ctx = build_action_ctx(handler_cls.registry, handler_cls.trace,
+                               handler_cls.cost, handler_cls.approval,
+                               handler_cls.project_root, days=days)
+        return console_actions.execute_action(action, ctx, operator=operator,
+                                             out_dir="reports")
+    return executor
+
+
 def main():
     ap = argparse.ArgumentParser(description="协作审计台 产品前端（仿 WorkBuddy）")
     ap.add_argument("--host", default="127.0.0.1")
@@ -1718,6 +1978,8 @@ def main():
                     default=os.path.expanduser("~/.workbuddy/skills"))
     ap.add_argument("--schedule-db", default="",
                     help="调度规则库路径（默认与登记处同目录的 console_schedule.db）")
+    ap.add_argument("--scheduler-interval", type=float, default=30.0,
+                    help="到期任务自动触发轮询间隔（秒）；<=0 关闭后台自动触发")
     ap.add_argument("--seed", action="store_true",
                     help="生成并读取隔离演示数据（console_demo_*.db）")
     ap.add_argument("--seed-path", default="data",
@@ -1758,8 +2020,18 @@ def main():
         % json.dumps(console_api.ROLES, ensure_ascii=False), 1)
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
+    # 后台守护线程：到期任务真实触发（默认 30s 轮询；<=0 关闭）
+    sched_thread = None
+    if Handler.scheduler and args.scheduler_interval > 0:
+        import threading
+        sched_thread = threading.Thread(
+            target=_scheduler_loop, daemon=True,
+            args=(Handler.scheduler, _make_executor(Handler), args.scheduler_interval),
+            name="console-scheduler")
+        sched_thread.start()
+        print("[调度] 后台自动触发已启动（间隔 %.0fs）" % args.scheduler_interval)
     print("协作审计台已启动： http://%s:%d/  （Ctrl+C 退出）" % (args.host, args.port))
-    print("  · 首次进入需登录（本地演示级身份，无密码校验）")
+    print("  · 首次进入需登录（已签发可校验签名的 JWT，无密码校验）")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

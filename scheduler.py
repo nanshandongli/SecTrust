@@ -271,10 +271,16 @@ class Scheduler:
                          (now, nxt, job["job_id"]))
         return nxt
 
-    def fire_due(self, now: float = None) -> list:
-        """触发所有到期任务。返回 [(job_id, task_id)]。
+    def fire_due(self, now: float = None, executor=None) -> list:
+        """触发所有到期任务。
 
-        登记失败不推进 last_run/next_run（下次重试），错误通过返回值体现。
+        两种模式（向后兼容）：
+          - executor 为 None（默认）：把到期任务登记进 TaskRegistry，返回 [(job_id, task_id)]；
+          - executor 为一可调用对象 executor(job, payload, task_id) -> dict：调用它**真实执行**
+            动作（如自扫/成本快照/结案），返回的执行结果随 fired 一并返回：[(job_id, result)]。
+
+        无论哪种模式，执行失败都**不推进** last_run/next_run（下次重试）；
+        错误通过返回值体现。
         """
         now = now if now is not None else time.time()
         fired = []
@@ -282,6 +288,15 @@ class Scheduler:
             task_id = "%s-%d" % (job["job_id"], int(now * 1000))
             payload = dict(job["payload"])
             payload["scheduled_from"] = job["job_id"]
+            if executor is not None:
+                try:
+                    result = executor(job, payload, task_id)
+                    self._advance(job, now)
+                    fired.append((job["job_id"], result))
+                except Exception as e:  # noqa: BLE001
+                    fired.append((job["job_id"], {"ok": False, "error": str(e)}))
+                continue
+            # 兼容旧行为：登记任务
             try:
                 self.registry.register_task(task_id, payload=payload)
             except Exception as e:
