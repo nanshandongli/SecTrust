@@ -1399,3 +1399,55 @@ record_infra      ──┘         ↓
 - **文档**：`docs/feishu_integration_zh.md`
 - **测试**：`tests/test_notify.py`、`tests/test_console_notify.py`、
   `tools/console_notify_smoke.js`
+
+## 26. 算力模型接入：多供应商配置（model_profiles.py + model_providers.py）
+
+### 26.1 两种东西，别搞混
+
+| | 供应商目录 `model_providers.py` | 算力配置 `model_profiles.py` |
+|---|---|---|
+| 是什么 | **已核实的端点清单**（29 条 / 5 组） | **用户自己的接入记录**（可增删改） |
+| 落哪 | 代码里（`PROVIDERS`） | `data/model_profiles.json`（gitignore） |
+| 作用 | 免得用户手填 Base URL 填错 | 记住「我买了谁、用哪个模型」 |
+
+目录分 5 组：**免费额度 / Coding Plan（包月）/ 按量计费 / 国际版 / 本地**。
+
+### 26.2 端点纪律（改动不可破坏）
+
+1. **只写已核实的 base_url**，没核实过一律不进目录——宁可少列也不编造；
+2. **包月与按量严格分行**：同厂商两个端点路径不同，填错**按 token 扣费**；
+3. **base_url 全局唯一**（`test_base_url_unique_per_billing` 会抓），且不得含占位符；
+4. `billing` 只是**用户对所购方案的记录**，**不改变请求怎么发、也不改变实际扣费**
+   ——实际扣费由「端点 + 账号」决定。计费下拉因此保留「未指定」空值项，不替用户猜。
+
+### 26.3 已实测接入的实例（2026-10-28）
+
+| 厂商 | base_url | 模型 | 计费 |
+|---|---|---|---|
+| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | `glm-4.7-flash` | 免费额度 |
+| 商汤 SenseNova | `https://token.sensenova.cn/v1` | `sensenova-6.8-flash-lite` | 按量计费 |
+
+**商汤的坑**：平台控制台「快速使用示例」给的端点是
+`https://token.sensenova.cn/v1/chat/completions`（**域名是 `token` 不是 `api`**）。
+`api.sensenova.cn/v1/llm/chat-completions` 是**商汤原生 SDK 格式**，请求体结构与
+本产品的 OpenAI 兼容链（`base_url + /chat/completions`）**不匹配**，
+直接填会拼成 `.../chat-completions/chat/completions` → 必然 404。
+
+> **教训：用户转述的 URL 未必是可用端点——先看平台控制台给的「快速使用示例」，再核实。**
+
+### 26.4 错误提示纪律（踩过坑，改动不可破坏）
+
+1. **必须指名「实际调用的那个」profile**，不能固定显示 active——用户选了商汤却看到
+   「当前算力：智谱」，会把排查带去另一个平台的密钥；
+2. **`str(HTTPError)` 只有状态行、不含响应体** → 「模型过载 `code 1305`」与「配额不足」
+   无法区分。`models/openai_like.py` 已把响应体摘要并进异常消息；
+3. **429 必须单独归因并明说「这不是配置错误」**（免费档=模型过载，按量=RPM/TPM），
+   否则用户会反复换密钥，越换越乱；
+4. **降级文案必须含「不可用」三字**（测试与前端 meta 都按它渲染）。
+
+### 26.5 入口
+
+- **REST**：`GET /api/chat/models`（读列表不鉴权）、`GET /api/chat/providers`（目录）
+- **UI**：控制台「对话」面板顶部模型下拉 + 「⚙ 配置模型」弹窗（目录选择 / 手动填写双模式）
+- **测试**：`tests/test_model_profiles.py`、`tests/test_model_providers.py`、
+  `tools/console_model_picker_smoke.js`
