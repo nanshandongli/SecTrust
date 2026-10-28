@@ -28,7 +28,16 @@ import uuid
 from dataclasses import asdict, dataclass
 from typing import Dict, List, Optional
 
+import model_providers
+
 ALLOWED_PROVIDERS = ("ollama", "openai", "anthropic")
+# 计费方式取值来自供应商目录模块（单一事实来源，避免两处枚举漂移）
+ALLOWED_BILLINGS = (
+    model_providers.BILLING_FREE,
+    model_providers.BILLING_SUBSCRIPTION,
+    model_providers.BILLING_PAYG,
+    model_providers.BILLING_LOCAL,
+)
 DEFAULT_DATA_DIR = "data"
 
 
@@ -41,6 +50,10 @@ class ModelProfile:
     api_key: str = ""
     model: str = ""
     active: bool = False
+    # 计费方式：用户对自己所购方案的**记录**（free/subscription/payg/local）。
+    # 诚实边界：它不改变请求怎么发、也不改变实际扣费——实际扣费由
+    # 「端点(base_url) + 账号」决定；这里只用于设置页展示与提示。
+    billing: str = ""
 
     @property
     def configured(self) -> bool:
@@ -49,9 +62,16 @@ class ModelProfile:
             return True
         return bool(self.api_key)
 
+    @property
+    def billing_label(self) -> str:
+        if not self.billing:
+            return ""
+        return model_providers.billing_label(self.billing)
+
     def to_public(self) -> Dict[str, object]:
         d = asdict(self)
         d["configured"] = self.configured
+        d["billing_label"] = self.billing_label
         d["api_key_masked"] = ("****" + self.api_key[-4:]) if self.api_key else ""
         d.pop("api_key", None)
         return d
@@ -81,6 +101,7 @@ class ModelProfileStore:
                     base_url=str(p.get("base_url") or ""),
                     api_key=str(p.get("api_key") or ""),
                     model=str(p.get("model") or ""),
+                    billing=str(p.get("billing") or ""),
                 )
                 prof.active = bool(p.get("active"))
                 if prof.id:
@@ -103,7 +124,8 @@ class ModelProfileStore:
             self._profiles["ollama-local"] = ModelProfile(
                 id="ollama-local", name="本地 Ollama",
                 provider="ollama", base_url="http://127.0.0.1:11434",
-                model="", active=True)
+                model="", active=True,
+                billing=model_providers.BILLING_LOCAL)
             changed = True
 
         env_openai = os.environ.get("OPENAI_API_KEY")
@@ -171,17 +193,24 @@ class ModelProfileStore:
         base_url = str(data.get("base_url") or "").strip()
         model = str(data.get("model") or "").strip()
         api_key = str(data.get("api_key") or "")
+        billing = str(data.get("billing") or "").strip()
+        if billing and billing not in ALLOWED_BILLINGS:
+            raise ValueError("billing 必须是 %s 之一" % (ALLOWED_BILLINGS,))
 
         existing = self._profiles.get(pid)
         # 若前端回传的是掩码（****xxxx），说明用户没改 key，保留磁盘原值
         if api_key.startswith("****") and existing:
             api_key = existing.api_key
+        # 编辑时前端若没带 billing（老前端/老数据），保留已记录的值
+        if not billing and existing:
+            billing = existing.billing
 
         prof = ModelProfile(
             id=pid, name=name, provider=provider,
             base_url=base_url, api_key=api_key, model=model,
             active=bool(data.get("active",
-                                 existing.active if existing else False)))
+                                 existing.active if existing else False)),
+            billing=billing)
         self._profiles[pid] = prof
         self._save()
         return prof.to_public()

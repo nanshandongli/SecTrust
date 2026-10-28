@@ -60,6 +60,22 @@ class TestProvidersEndpoint(unittest.TestCase):
             self.assertIn("billing_label", item)
             self.assertIn("protocol", item)
 
+    def test_providers_endpoint_exposes_manual_options(self):
+        """手动填写模式所需：计费方式选项 + 协议选项（前端不硬编码枚举）。"""
+        _, data = self._get("/api/chat/providers")
+        billing = data["billing_options"]
+        self.assertEqual([b["value"] for b in billing],
+                         [mp.BILLING_FREE, mp.BILLING_SUBSCRIPTION,
+                          mp.BILLING_PAYG, mp.BILLING_LOCAL])
+        for b in billing:
+            self.assertTrue(b["label"])
+            self.assertTrue(b["hint"], "%s 缺少计费说明" % b["value"])
+        protos = data["protocol_options"]
+        self.assertEqual([p["value"] for p in protos], list(mp.PROTOCOLS))
+        for p in protos:
+            self.assertTrue(p["label"])
+            self.assertTrue(p["hint"])
+
 
 class TestFrontendScaffold(unittest.TestCase):
     """前端结构断言 —— 只验骨架，避免"页面看起来有了但钩子没接上"。"""
@@ -73,6 +89,18 @@ class TestFrontendScaffold(unittest.TestCase):
                      'id="mmList"', 'id="mmBase"', 'id="mmKey"', 'id="mmModel"',
                      'id="mmSave"', 'id="mmCancel"'):
             self.assertIn(frag, self.html, "缺少弹窗元素：%s" % frag)
+
+    def test_manual_mode_markup_present(self):
+        """手动填写（key + base_url + 计费方式）所需的弹窗元素。"""
+        for frag in ('id="mmTabCatalog"', 'id="mmTabManual"', 'id="mmCatalogPane"',
+                     'id="mmManualPane"', 'id="mmProto"', 'id="mmBilling"',
+                     'id="mmBillingHint"', 'id="mmProtoHint"'):
+            self.assertIn(frag, self.html, "缺少手动填写元素：%s" % frag)
+
+    def test_manual_mode_hooks_present(self):
+        for frag in ("setModelMode", "fillBillingSelect", "syncBillingHint",
+                     "syncProtoHint", "billing_options", "protocol_options"):
+            self.assertIn(frag, self.html, "缺少手动填写钩子：%s" % frag)
 
     def test_hooks_present(self):
         for frag in ("openModelModal", "renderProvList", "selectProvider",

@@ -80,6 +80,7 @@ py-modules = [
     "model_profiles",
     "assistant_channels",
     "model_providers",
+    "notify",
     "first_principles",
     "cost",
     "demo",

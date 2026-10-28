@@ -40,6 +40,8 @@ import console_api
 import console_actions
 from model_profiles import ModelProfileStore
 from assistant_channels import AssistantSettings
+import notify
+from notify import NotifyEngine, parse_command, help_text
 import model_providers
 
 
@@ -397,6 +399,12 @@ APP_HTML = """<!doctype html>
   .mmodal .mfoot button{padding:7px 18px;border:none;border-radius:8px;cursor:pointer;
     background:var(--accent);color:#fff;font-size:13px}
   .mmodal .mfoot .ghost{background:var(--line);color:var(--txt)}
+  /* 添加模型弹窗：目录勾选 / 手动填写 双模式切换 */
+  .modes{display:flex;gap:6px;margin-bottom:12px}
+  .modes .mtab{flex:1;border:1px solid var(--line);background:var(--card);
+    padding:7px 10px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--sub)}
+  .modes .mtab.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+  #mmCatalogPane.hidden,#mmManualPane.hidden{display:none}
   .mrow{display:flex;align-items:flex-start;gap:10px}
   .mrow>label{width:74px;flex:none;color:var(--sub);font-size:12px;padding-top:8px}
   .mrow .mfield{flex:1;min-width:0}
@@ -599,20 +607,36 @@ APP_HTML = """<!doctype html>
   </div>
 </div>
 
-<!-- 添加模型弹窗（WorkBuddy 式：供应商目录 + 搜索 + 分组 + 勾选） -->
+<!-- 添加模型弹窗（双模式：目录勾选 / 手动填写 key+base_url+计费方式） -->
 <div class="mmask hidden" id="modelModal">
   <div class="mmodal">
     <div class="mhead"><span class="mt" id="mmTitle">添加模型</span><button class="mx" id="mmX" type="button">✕</button></div>
     <div class="mbody">
-      <div class="mrow"><label>供应商</label><div class="mfield">
-        <button class="provpick" id="mmPick" type="button"><span id="mmPickName">选择供应商…</span><span class="pv-sub">▾</span></button>
-        <div class="provmenu hidden" id="mmMenu">
-          <input class="psearch" id="mmSearch" placeholder="搜索供应商 / 模型…">
-          <div class="provlist" id="mmList"></div>
-        </div>
+      <div class="modes" id="mmModes">
+        <button class="mtab active" id="mmTabCatalog" data-mode="catalog" type="button">目录选择</button>
+        <button class="mtab" id="mmTabManual" data-mode="manual" type="button">手动填写</button>
+      </div>
+      <div id="mmCatalogPane">
+        <div class="mrow"><label>供应商</label><div class="mfield">
+          <button class="provpick" id="mmPick" type="button"><span id="mmPickName">选择供应商…</span><span class="pv-sub">▾</span></button>
+          <div class="provmenu hidden" id="mmMenu">
+            <input class="psearch" id="mmSearch" placeholder="搜索供应商 / 模型…">
+            <div class="provlist" id="mmList"></div>
+          </div>
+        </div></div>
+      </div>
+      <div id="mmManualPane" class="hidden">
+        <div class="mrow"><label>协议</label><div class="mfield">
+          <select id="mmProto"></select>
+          <div class="mnote" id="mmProtoHint"></div>
+        </div></div>
+      </div>
+      <div class="mrow"><label>计费方式</label><div class="mfield">
+        <select id="mmBilling"></select>
+        <div class="mnote" id="mmBillingHint"></div>
       </div></div>
       <div class="mrow"><label>名称</label><div class="mfield"><input id="mmName" placeholder="例如：我的 DeepSeek"></div></div>
-      <div class="mrow"><label>Base URL</label><div class="mfield"><input id="mmBase" placeholder="选择供应商后自动填入"><div class="mlink" id="mmDoc"></div></div></div>
+      <div class="mrow"><label>Base URL</label><div class="mfield"><input id="mmBase" placeholder="选择供应商后自动填入，或手动粘贴"><div class="mlink" id="mmDoc"></div></div></div>
       <div class="mrow"><label>API Key</label><div class="mfield"><input id="mmKey" type="password" placeholder="留空则保留已保存的密钥"></div></div>
       <div class="mrow"><label>模型名</label><div class="mfield"><input id="mmModel" list="mmModelList" placeholder="选择供应商后可选候选模型"><datalist id="mmModelList"></datalist></div></div>
       <div class="mnote" id="mmNote"></div>
@@ -666,6 +690,11 @@ async function postJSON(u, body){
     const m=$('mmMenu');if(m)m.classList.toggle('hidden');
   });
   const search=$('mmSearch');if(search)search.addEventListener('input',function(){renderProvList(search.value);});
+  // 双模式切换：目录勾选 / 手动填写
+  const tabCat=$('mmTabCatalog');if(tabCat)tabCat.addEventListener('click',function(){setModelMode('catalog');});
+  const tabMan=$('mmTabManual');if(tabMan)tabMan.addEventListener('click',function(){setModelMode('manual');});
+  const proto=$('mmProto');if(proto)proto.addEventListener('change',syncProtoHint);
+  const billing=$('mmBilling');if(billing)billing.addEventListener('change',syncBillingHint);
   const x=$('mmX');if(x)x.addEventListener('click',closeModelModal);
   const cancel=$('mmCancel');if(cancel)cancel.addEventListener('click',closeModelModal);
   const save=$('mmSave');if(save)save.addEventListener('click',saveModel);
@@ -1034,6 +1063,15 @@ async function loadAssistants(){
       '<div class="conn-grid" id="chanGrid"></div>'+
       '<div class="ctip" style="margin-top:10px">'+esc(st.note||'')+'</div>'+
     '</div>'+
+    '<div class="panel"><h3>事件订阅 <span class="tag" style="margin-left:6px">哪些事件推到哪些通道</span></h3>'+
+      '<div id="notifySubs"><div class="empty">加载中…</div></div>'+
+      '<div class="ctip" style="margin-top:10px">审批请求/决定、任务完成/失败、自扫高危、成本快照等事件会<b>自动</b>推送到已启用的通道（不再只有「测试」按钮能发）。推送失败不影响主流程，每条推送都有记录。</div>'+
+      '<div style="margin-top:10px"><button class="btn ghost" onclick="testNotifyEvent()">发送一条事件自检</button>'+
+      '<span class="ctip" id="notifyTestMsg"></span></div>'+
+    '</div>'+
+    '<div class="panel"><h3>飞书入站（回复即控制） <span class="tag" style="margin-left:6px">诚实边界：群机器人只出不进</span></h3>'+
+      '<div id="notifyInbound"><div class="empty">加载中…</div></div>'+
+    '</div>'+
     '<div class="panel"><h3>上下文管理</h3>'+
       '<div class="litem"><div class="grow"><div class="nm">携带对话历史</div>'+
         '<div class="mt">启用后，助理对话会携带最近几轮历史作为上下文；关闭后每次提问独立处理，可明显降低 token 消耗。</div></div>'+
@@ -1041,6 +1079,89 @@ async function loadAssistants(){
       '</div>'+
     '</div>';
   renderChanGrid(st.channels||[]);
+  loadNotifySubs();
+}
+
+// ---------------- 事件订阅（事件 → 通道） ----------------
+async function loadNotifySubs(){
+  const g=$('notifySubs');if(!g)return;
+  let d;
+  try{ d=await jget('/api/assistant/notify'); }
+  catch(e){ g.innerHTML='<div class="empty">推送引擎未就绪</div>'; return; }
+  window.__notifyState=d;
+  renderInbound(d.inbound);
+  let st=window.__assistantSettings;
+  if(!st||!(st.channels||[]).length){
+    // 通道列表没缓存（直接进面板 / 缓存失效）时自己取一次——
+    // 否则会误判成「没有可用通道」，把订阅表整个隐藏掉。
+    try{ st=await jget('/api/assistant/settings'); window.__assistantSettings=st; }catch(e){}
+  }
+  st=st||{};
+  const chans=(st.channels||[]).filter(c=>c.configured);
+  const evs=d.events||[];
+  const subs=d.subscriptions||{};
+  if(!evs.length){g.innerHTML='<div class="empty">暂无事件类型</div>';return;}
+  if(!chans.length){
+    g.innerHTML='<div class="empty">还没有已配置的通道 —— 先在上面「远程通道」里连接一个（如飞书群机器人），事件才有地方可推。</div>';
+    return;
+  }
+  g.innerHTML='<table class="tbl"><thead><tr><th>事件类型</th>'+
+    chans.map(c=>'<th>'+esc(c.name)+'</th>').join('')+'</tr></thead><tbody>'+
+    evs.map(e=>'<tr><td><div class="nm">'+esc(e.label)+'</div>'+
+      '<div class="mt">'+esc(e.desc)+'</div></td>'+
+      chans.map(c=>'<td><label class="switch"><input type="checkbox" '+
+        'data-ev="'+esc(e.id)+'" data-ch="'+esc(c.id)+'" '+
+        (((subs[c.id]||[]).indexOf(e.id)>=0)?'checked':'')+'>'+
+        '<span class="slider"></span></label></td>').join('')+'</tr>').join('')+
+    '</tbody></table>'+
+    '<div style="margin-top:10px;display:flex;gap:8px;align-items:center">'+
+    '<button class="btn" onclick="saveNotifySubs()">保存订阅</button>'+
+    '<span class="ctip" id="notifySubsMsg"></span></div>'+
+    '<div class="ctip" style="margin-top:10px">已启用通道：'+
+    (esc((d.enabled_channels||[]).join('、'))||'无')+
+    '。未勾选的事件不会推送。</div>';
+}
+async function saveNotifySubs(){
+  const msg=$('notifySubsMsg');if(!msg)return;
+  const boxes=document.querySelectorAll('#notifySubs input[type=checkbox]');
+  const subs={};
+  boxes.forEach(b=>{
+    const c=b.getAttribute('data-ch'),e=b.getAttribute('data-ev');
+    if(!subs[c])subs[c]=[];
+    if(b.checked)subs[c].push(e);
+  });
+  msg.textContent='保存中…';
+  const r=await postJSON('/api/assistant/notify/subscriptions',{subscriptions:subs});
+  if(!r.ok){msg.textContent='保存失败：'+(r.error||'未知错误');return;}
+  msg.textContent='已保存';
+  await loadNotifySubs();
+}
+async function testNotifyEvent(){
+  const msg=$('notifyTestMsg');if(!msg)return;
+  msg.textContent='推送中…';
+  const r=await postJSON('/api/assistant/notify/test',{event:'approval.pending'});
+  if(!r.ok){
+    const d=(r.delivered||[]).map(x=>x.channel+'：'+(x.error||'失败')).join('；');
+    msg.textContent='✗ '+(r.error||d||'推送失败');
+    return;
+  }
+  const d=(r.delivered||[]).map(x=>x.channel+(x.ok?' ✓':' ✗')).join('　');
+  msg.textContent=(r.skipped&&r.skipped.length)?('跳过：'+r.skipped.join(',')):('✓ 已推送　'+d);
+}
+// ---------------- 飞书入站中继（诚实边界） ----------------
+function renderInbound(ib){
+  const g=$('notifyInbound');if(!g)return;
+  if(!ib){g.innerHTML='<div class="empty">推送引擎未就绪</div>';return;}
+  const tok=ib.token||'';
+  g.innerHTML='<div class="ctip" style="margin-bottom:8px">'+esc(ib.note||'')+'</div>'+
+    '<div class="litem"><div class="grow"><div class="nm">接收端点</div>'+
+      '<div class="mt"><code class="k">POST '+esc(ib.endpoint||'')+'</code>'+
+      '　请求头 <code class="k">'+esc(ib.header||'')+'</code></div></div></div>'+
+    '<div class="litem"><div class="grow"><div class="nm">入站令牌</div>'+
+      '<div class="mt">'+(tok?('<code class="k">'+esc(tok)+'</code>'):esc(ib.token_hint||'（未登录，不显示）'))+
+      '</div></div></div>'+
+    '<div class="litem"><div class="grow"><div class="nm">可用指令</div>'+
+      '<div class="mt">'+esc((ib.commands||[]).join('　'))+'</div></div></div>';
 }
 
 // ---------------- 助理远程通道（真实 webhook 通道） ----------------
@@ -1531,17 +1652,60 @@ async function refreshChatStatus(){
     }
   }catch(e){const h=document.getElementById('chatModelHint');if(h)h.textContent='模型列表加载失败';}
 }
-/* ---------------- 添加模型（WorkBuddy 式：供应商目录 + 搜索 + 分组 + 勾选） ---------------- */
-let mmCatalog={providers:[],groups:[],notice:''};
+/* ---------------- 添加模型（双模式：目录勾选 / 手动填写 key+base_url+计费方式） ---------------- */
+let mmCatalog={providers:[],groups:[],notice:'',billingOptions:[],protocolOptions:[]};
 let mmEditId=null;      // null=新增，否则为被编辑的 profile id
 let mmSel=null;         // 当前选中的目录条目
+let mmMode='catalog';   // catalog=从目录勾选 | manual=手动填写
 async function loadCatalog(){
   if(mmCatalog.providers.length)return mmCatalog;
   try{
     const c=await jget('/api/chat/providers');
     mmCatalog.providers=c.providers||[];mmCatalog.groups=c.groups||[];mmCatalog.notice=c.notice||'';
+    mmCatalog.billingOptions=c.billing_options||[];mmCatalog.protocolOptions=c.protocol_options||[];
   }catch(e){mmCatalog.providers=[];}
   return mmCatalog;
+}
+/* 填充协议/计费下拉（选项来自后端，前端不硬编码枚举） */
+function fillSelect(id,opts,cur){
+  const el=document.getElementById(id);if(!el)return;
+  const want=(cur===undefined||cur===null)?'':String(cur);
+  el.innerHTML=opts.map(function(o){
+    return '<option value="'+esc(o.value)+'"'+(o.value===want?' selected':'')+'>'+esc(o.label)+'</option>';
+  }).join('');
+  if(want)el.value=want;
+}
+/* 计费下拉：额外提供「未指定」空值项。
+   诚实边界：老配置可能没有计费记录，若直接用第一项当默认值就等于替用户
+   谎报计费方式 —— 所以必须能显式保持「未指定」。 */
+function fillBillingSelect(cur){
+  const opts=[{value:'',label:'未指定（不记录）',hint:'不猜测：实际扣费由端点与账号决定。'}]
+    .concat(mmCatalog.billingOptions||[]);
+  fillSelect('mmBilling',opts,(cur===undefined||cur===null)?'':String(cur));
+}
+function syncBillingHint(){
+  const el=document.getElementById('mmBilling');const hint=document.getElementById('mmBillingHint');
+  if(!hint)return;
+  const cur=el?el.value:'';
+  const o=(mmCatalog.billingOptions||[]).find(function(x){return x.value===cur;});
+  hint.textContent=o?o.hint:'';
+}
+function syncProtoHint(){
+  const el=document.getElementById('mmProto');const hint=document.getElementById('mmProtoHint');
+  if(!hint)return;
+  const cur=el?el.value:'';
+  const o=(mmCatalog.protocolOptions||[]).find(function(x){return x.value===cur;});
+  hint.textContent=o?o.hint:'';
+}
+function setModelMode(mode){
+  mmMode=(mode==='manual')?'manual':'catalog';
+  const cat=document.getElementById('mmCatalogPane'),man=document.getElementById('mmManualPane');
+  if(cat)cat.classList.toggle('hidden',mmMode!=='catalog');
+  if(man)man.classList.toggle('hidden',mmMode!=='manual');
+  const c=document.getElementById('mmTabCatalog'),m=document.getElementById('mmTabManual');
+  if(c)c.classList.toggle('active',mmMode==='catalog');
+  if(m)m.classList.toggle('active',mmMode==='manual');
+  const menu=document.getElementById('mmMenu');if(menu)menu.classList.add('hidden');
 }
 function provGroups(){
   const gs=mmCatalog.groups.slice();
@@ -1596,6 +1760,10 @@ function selectProvider(pid){
   }
   const nameEl=document.getElementById('mmName');
   if(nameEl&&!nameEl.value.trim())nameEl.value=p.name;
+  // 目录条目自带协议与计费方式 —— 同步到下拉，手动模式下也能沿用
+  fillSelect('mmProto',mmCatalog.protocolOptions||[],p.protocol);
+  fillBillingSelect(p.billing);
+  syncProtoHint();syncBillingHint();
   const menu=document.getElementById('mmMenu');if(menu)menu.classList.add('hidden');
   renderProvList(document.getElementById('mmSearch')?document.getElementById('mmSearch').value:'');
 }
@@ -1615,6 +1783,11 @@ async function openModelModal(pid){
   const dl=document.getElementById('mmModelList');if(dl)dl.innerHTML='';
   mmSel=null;
   await loadCatalog();
+  // 下拉选项来自后端目录接口（前端不硬编码计费枚举）
+  fillSelect('mmProto',mmCatalog.protocolOptions||[],'openai');
+  fillBillingSelect('');
+  syncProtoHint();syncBillingHint();
+  setModelMode('catalog');
   renderProvList('');
   if(pid){
     const p=(window.__modelProfiles||[]).find(function(x){return x.id===pid;});
@@ -1622,6 +1795,10 @@ async function openModelModal(pid){
       document.getElementById('mmName').value=p.name||'';
       document.getElementById('mmBase').value=p.base_url||'';
       document.getElementById('mmModel').value=p.model||'';
+      // 恢复该 profile 已记录的协议与计费方式
+      fillSelect('mmProto',mmCatalog.protocolOptions||[],p.provider||'openai');
+      fillBillingSelect(p.billing||'');
+      syncProtoHint();syncBillingHint();
       const hit=mmCatalog.providers.find(function(x){return x.base_url===p.base_url;});
       if(hit){mmSel=hit;document.getElementById('mmPickName').textContent=hit.name+' · '+hit.billing_label;
         const dl2=document.getElementById('mmModelList');
@@ -1644,13 +1821,18 @@ async function saveModel(){
   const base=document.getElementById('mmBase').value.trim();
   if(!base){alert('请先选择供应商，或手填 Base URL');return;}
   const keyVal=document.getElementById('mmKey').value;
-  const provider=mmSel?mmSel.protocol:'openai';
+  // 协议来源：目录条目 > 协议下拉（手动模式）。不再硬编码 openai。
+  const protoEl=document.getElementById('mmProto');
+  const provider=(mmSel&&mmSel.protocol)||(protoEl&&protoEl.value)||'openai';
+  const billEl=document.getElementById('mmBilling');
+  const billing=(billEl&&billEl.value)||(mmSel?mmSel.billing:'');
   const body={
     name:document.getElementById('mmName').value.trim()||(mmSel?mmSel.name:'自定义模型'),
     provider:provider,
     base_url:base,
     api_key:(mmEditId&&!keyVal)?'****':keyVal,
-    model:document.getElementById('mmModel').value.trim()
+    model:document.getElementById('mmModel').value.trim(),
+    billing:billing
   };
   if(mmEditId)body.id=mmEditId;
   const r=await postJSON('/api/chat/models',body);
@@ -1905,12 +2087,13 @@ async function loadSettings(){
   el.innerHTML='<h2 class="vh">设置</h2><p class="vdesc">产品偏好、模型接入与数据源。</p>'+
     '<div class="panel"><h3>模型</h3>'+
       '<div class="row" style="align-items:center"><button class="btn" id="btnAddModel">+ 添加模型</button>'+
-      '<span class="ctip">从预置供应商目录勾选接入；Base URL 自动填好，不用手抄。</span></div>'+
+      '<span class="ctip">从预置供应商目录勾选接入；也可切「手动填写」自填 key + Base URL + 计费方式。</span></div>'+
       '<div class="mlist" id="modelList">'+
       (profiles.length?profiles.map(function(p){
         const act=p.active;
         return '<div class="mrow2"><div class="mi">'+esc(p.name)+
           (act?' <span class="pill live">当前</span>':'')+
+          (p.billing_label?' <span class="mtag">'+esc(p.billing_label)+'</span>':'')+
           '<div class="mi-sub">'+esc(p.provider)+' · '+esc(p.base_url||'-')+' · 模型 '+
           esc(p.model||'（默认）')+(p.configured?'':' · <span style="color:#b45309">未配置密钥，对话不可用</span>')+'</div></div>'+
           '<div class="mact">'+
@@ -1992,6 +2175,8 @@ class Handler(BaseHTTPRequestHandler):
     project_root = None
     model_profiles = None
     assistant_settings = None
+    assistant_data_dir = "data"
+    notify_engine = None
     _chat = None
 
     def _json(self, obj, code=200):
@@ -2111,6 +2296,38 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"channels": [], "prefs": {"context_memory": True},
                                    "note": "助理设置未初始化"})
             return self._json(self.assistant_settings.to_public())
+        if path == "/api/assistant/notify":
+            if getattr(self, "notify_engine", None) is None:
+                return self._json({"events": [], "subscriptions": {},
+                                   "enabled_channels": [], "recent": [],
+                                   "note": "推送引擎未初始化"}, 503)
+            out = self.notify_engine.to_public()
+            # 入站中继信息：飞书**群机器人 webhook 是只出不进的**，「回复即控制」
+            # 必须靠自建应用把群消息转发到 /api/assistant/inbound。
+            #
+            # **令牌只在已登录时返回**——这个端点是只读的、**不鉴权**，
+            # 把入站令牌明文挂上去等于任何人都能远程批你的审批。
+            # 未登录只给端点与指令说明（不含 token）。
+            inbound = {
+                "endpoint": "/api/assistant/inbound",
+                "header": "X-Notify-Token",
+                "commands": ["/approve <审批ID>", "/reject <审批ID>",
+                             "/pending", "/help"],
+                "note": "群机器人 webhook 只出不进，群消息收不到；"
+                        "要「在群里回复即控制」需用飞书企业自建应用 + 事件订阅，"
+                        "把群消息 POST 到本端点（带 X-Notify-Token 头）。"
+                        "本端点只认上面四条白名单指令，认不出就报错，不猜不执行。",
+            }
+            stok = self.headers.get("X-Session-Token", "")
+            ssess = self.sessions.verify(stok) if self.sessions else None
+            if ssess:
+                inbound["token"] = notify.ensure_inbound_token(
+                    self.assistant_data_dir)
+            else:
+                inbound["token"] = ""
+                inbound["token_hint"] = "登录后才能查看入站令牌（未登录不返回令牌）"
+            out["inbound"] = inbound
+            return self._json(out)
         if path == "/api/connectors":
             return self._json(console_api.connector_status(
                 self.skills_dir, project_root=self.project_root))
@@ -2146,6 +2363,68 @@ class Handler(BaseHTTPRequestHandler):
             seed_demo(self.registry.db_path, self.trace.db_path, self.cost.db_path)
             return self._json({"ok": True})
         self._json({"error": "not found", "path": path}, 404)
+
+    # ---- 飞书入站中继（诚实边界）----
+    def _inbound_feishu(self, payload: dict):
+        """接收**飞书企业自建应用**转发过来的群消息，执行指令。
+
+        诚实边界（必须说清）：飞书**群机器人 webhook 是只出不进的**——推过去的
+        卡片按钮拿不到回调，「在群里回复即控制」必须由**自建应用 + 事件订阅**
+        把群消息 POST 到这里。因此本端点：
+        - **必须带令牌**（`X-Notify-Token`），否则任何人可远程批你的审批；
+        - 只认白名单指令（approve/reject/pending/help），认不出就明确报错，
+          **不猜、不执行**；
+        - 执行的仍是审批中心原有的 decide（带审计轨迹），不是绕过审计的捷径。
+        """
+        if getattr(self, "notify_engine", None) is None:
+            return self._json({"ok": False, "error": "推送引擎未初始化"}, 503)
+        provided = self.headers.get("X-Notify-Token", "")
+        if not notify.check_inbound_token(self.assistant_data_dir, provided):
+            return self._json({"ok": False, "error": "入站令牌无效"}, 401)
+        text = ""
+        if isinstance(payload, dict):
+            text = str(payload.get("text") or payload.get("message") or "")
+            # 兼容飞书事件订阅的原始结构：event.message.content.text
+            ev = payload.get("event")
+            if not text and isinstance(ev, dict):
+                msg = ev.get("message")
+                if isinstance(msg, dict):
+                    content = msg.get("content")
+                    if isinstance(content, dict):
+                        text = str(content.get("text") or "")
+        cmd = parse_command(text)
+        if not cmd:
+            return self._json({"ok": False, "error": "无法识别的指令",
+                               "hint": help_text()}, 400)
+        action = cmd["command"]
+        arg = cmd["arg"]
+        if action == "help":
+            return self._json({"ok": True, "reply": help_text()})
+        if action == "pending":
+            pend = self.approval.list_approvals(status="pending", limit=20)
+            if not pend:
+                return self._json({"ok": True, "reply": "当前没有待审批。"})
+            lines = ["当前待审批："]
+            for a in pend:
+                lines.append("- %s · %s · %s" % (a.get("approval_id"),
+                                                a.get("action"), a.get("detail")))
+            return self._json({"ok": True, "reply": "\n".join(lines)})
+        if action in ("approve", "reject"):
+            if not arg:
+                return self._json({"ok": False, "error": "缺少审批 ID",
+                                   "hint": help_text()}, 400)
+            by = "feishu:%s" % (str((payload or {}).get("user") or "unknown"))
+            try:
+                ok = self.approval.decide(arg, action, by=by)
+            except Exception as e:  # noqa: BLE001
+                return self._json({"ok": False, "error": str(e)}, 400)
+            if not ok:
+                return self._json({"ok": False,
+                                   "error": "审批不存在或已决策"}, 409)
+            return self._json({"ok": True, "approval_id": arg, "decision": action,
+                               "reply": "已%s %s" % ("批准" if action == "approve"
+                                                    else "拒绝", arg)})
+        return self._json({"ok": False, "error": "未知指令", "hint": help_text()}, 400)
 
     # ---- 数据聚合 ----
     def _overview(self):
@@ -2340,8 +2619,50 @@ class Handler(BaseHTTPRequestHandler):
     def _run_action(self, action: str, operator: str = "operator",
                     days: int = 30, out_dir: str = "reports"):
         ctx = self._action_context(days=days)
-        return console_actions.execute_action(action, ctx, operator=operator,
+        res = console_actions.execute_action(action, ctx, operator=operator,
                                              out_dir=out_dir)
+        # 审计动作的产物本身就是审计事件——推给已订阅的通道（旁路，失败不挡）
+        if res.get("ok"):
+            self._notify_action(action, res, operator)
+        return res
+
+    def _notify_action(self, action: str, res: dict, operator: str):
+        """把审计动作结果转成推送事件。**整段不抛异常**（旁路纪律）。"""
+        eng = getattr(self, "notify_engine", None)
+        if eng is None:
+            return
+        try:
+            if action == "self_scan":
+                sev = res.get("by_severity") or {}
+                high = int(sev.get("high") or 0) + int(sev.get("critical") or 0)
+                if high > 0:
+                    eng.notify(
+                        "security.high_risk",
+                        "源码自扫命中高危 %d 条" % high,
+                        "触发人：%s\n命中规则：%d 条（高危+严重 %d）\n"
+                        "扫描文件数：%s\n报告目录：%s\n\n"
+                        "（这些命中需人工核验；报告里的「诚实边界」段落说明"
+                        "哪些是基准向量/示例样本。）"
+                        % (operator, int(res.get("total") or 0), high,
+                           res.get("scanned_files"), res.get("report_dir")),
+                        dedupe_key="selfscan:%s" % (res.get("report_dir") or ""))
+                else:
+                    eng.notify("security.high_risk",
+                               "源码自扫未发现高危",
+                               "触发人：%s\n命中规则：%d 条（高危 0）\n报告目录：%s"
+                               % (operator, int(res.get("total") or 0),
+                                  res.get("report_dir")),
+                               dedupe_key="selfscan:%s" % (res.get("report_dir") or ""))
+            elif action == "cost_snapshot":
+                eng.notify("cost.anomaly", "成本快照已生成",
+                           "触发人：%s\n报告目录：%s" % (operator, res.get("report_dir")),
+                           dedupe_key="cost:%s" % (res.get("report_dir") or ""))
+            elif action == "closure_report":
+                eng.notify("task.completed", "结案报告已生成",
+                           "触发人：%s\n报告目录：%s" % (operator, res.get("report_dir")),
+                           dedupe_key="closure:%s" % (res.get("report_dir") or ""))
+        except Exception:  # noqa: BLE001 —— 旁路不挡主链路
+            pass
 
     def _resolve_operator(self, payload: dict):
         tok = self.headers.get("X-Session-Token", "")
@@ -2485,12 +2806,15 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/api/connectors/skillhub/install",
                     "/api/connectors/custom", "/api/connectors/custom/delete",
                     "/api/assistant/channels/config", "/api/assistant/channels/toggle",
-                    "/api/assistant/channels/test", "/api/assistant/prefs"):
+                    "/api/assistant/channels/test", "/api/assistant/prefs",
+                    "/api/assistant/notify/subscriptions",
+                    "/api/assistant/notify/test"):
             if not sess:
                 return self._json({"error": "需要登录后才能修改助理设置"}, 401)
         # ---- 助理远程通道 + 偏好（写操作需登录）----
         if path in ("/api/assistant/channels/config", "/api/assistant/channels/toggle",
-                    "/api/assistant/channels/test", "/api/assistant/prefs"):
+                    "/api/assistant/channels/test", "/api/assistant/prefs",
+                    "/api/assistant/notify/subscriptions"):
             if self.assistant_settings is None:
                 return self._json({"error": "助理设置未初始化"}, 500)
             aset = self.assistant_settings
@@ -2522,6 +2846,30 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as e:
                     return self._json({"ok": False, "error": str(e)}, 400)
                 return self._json({"ok": True, "prefs": aset.prefs()})
+        # ---- 事件推送订阅 / 自检（写操作需登录）----
+        if path in ("/api/assistant/notify/subscriptions",
+                    "/api/assistant/notify/test"):
+            if getattr(self, "notify_engine", None) is None:
+                return self._json({"ok": False, "error": "推送引擎未初始化"}, 503)
+            if path == "/api/assistant/notify/subscriptions":
+                subs = payload.get("subscriptions")
+                if not isinstance(subs, dict):
+                    return self._json({"ok": False, "error": "缺少 subscriptions"}, 400)
+                try:
+                    out = self.notify_engine.set_subscriptions(subs)
+                except Exception as e:  # noqa: BLE001
+                    return self._json({"ok": False, "error": str(e)}, 400)
+                return self._json({"ok": True, "subscriptions": out})
+            ev = str(payload.get("event") or "approval.pending")
+            res = self.notify_engine.notify(
+                ev, "SecTrust 事件推送自检",
+                "这是一条事件推送自检消息（不是「测试」按钮的固定文案）。\n"
+                "如果你在群里看到它，说明审批/任务/自扫等真实事件也能送达。",
+                dedupe_key="notifytest:%s:%s" % (ev, time.time()))
+            return self._json(res, 200 if res.get("ok") else 400)
+        # ---- 飞书入站中继（自建应用转发群消息 → 本产品执行指令）----
+        if path == "/api/assistant/inbound":
+            return self._inbound_feishu(payload)
         if path == "/api/connectors/skillhub/install":
             slug = str(payload.get("slug") or "").strip()
             if not slug:
@@ -2794,15 +3142,20 @@ def main():
 
     Handler.registry = TaskRegistry(db_path=args.db_path, runner_id="console_web")
     Handler.trace = TraceStore(args.trace_db)
+    # 助理远程通道 + 事件推送引擎（**必须先于审批中心创建**——审批中心要注入
+    # 事件回调，审批一产生/一决定就能推到飞书等通道）
+    Handler.assistant_settings = AssistantSettings(data_dir="data")
+    Handler.assistant_data_dir = "data"
+    Handler.notify_engine = NotifyEngine(Handler.assistant_settings)
     # 审批中心注入共享 trace 存储，使审计链能拼出轨迹事件（即便审批/trace 分库）
-    Handler.approval = ApprovalCenter(args.db_path, tracer=Handler.trace)
+    Handler.approval = ApprovalCenter(args.db_path, tracer=Handler.trace,
+                                      on_event=Handler.notify_engine.on_approval_event)
     Handler.cost = CostStore(args.cost_db)
     Handler.skills_dir = args.skills_dir
     Handler.project_root = os.path.dirname(os.path.abspath(__file__))
     Handler.sessions = console_api.SessionStore()
     # 模型配置（持久化到 data/model_profiles.json，已被 .gitignore 排除）
     Handler.model_profiles = ModelProfileStore(data_dir="data")
-    Handler.assistant_settings = AssistantSettings(data_dir="data")
     # 调度器用**独立**调度库（避免与登记处同库时的表/锁竞争），
     # 但共享同一个 TaskRegistry 实例——到点登记的任务会出现在任务中心。
     try:

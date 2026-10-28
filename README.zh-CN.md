@@ -1346,3 +1346,56 @@ record_infra      ──┘         ↓
 - 任务完成时 DagScheduler 自动 `finalize_task` 并补记 `cost_snapshot`
   轨迹事件；runner 尚未统一接入 orchestrator，模型层打点由调用方经
   `tracked_complete` / `cost_record` 显式完成（接线面已在测试锁定）。
+
+---
+
+## 25. 事件推送层：审计事件真的到得了飞书（notify.py）
+
+### 25.1 补的是哪个缺口
+
+2026-10-28 排查发现：`AssistantSettings.send()` **只被「测试」按钮调用**——
+审批决定、高危安全发现、任务完成**都不会自动推到飞书**。
+飞书通道「配置上是通的」（实测 `code: 0 / success`），但**产品侧没接线**。
+
+`notify.py` 补的就是这根线：真实事件在**发生的那一刻**就进群。
+
+### 25.2 事件类型（单一事实来源 `notify.EVENT_TYPES`）
+
+| 事件 ID | 触发时机 |
+|---|---|
+| `approval.pending` | 有高风险动作等待人工审批 |
+| `approval.decided` | 审批被批准/拒绝/过期 |
+| `security.high_risk` | 一键自扫命中高危/严重 |
+| `task.completed` / `task.failed` | 任务进入终态（**非终态不推**） |
+| `cost.anomaly` | 成本快照生成 |
+
+接线点：`ApprovalCenter.on_event`（新增回调）→ `execution/daemon.py` 与
+`runner.py` 的任务终态 → `console_web._run_action` 的自扫/成本结果。
+
+### 25.3 三条纪律（改动不可破坏）
+
+1. **推送失败绝不阻塞主流程**——审批已落库，推送失败只记账，不打成 500；
+2. **不假装成功**——平台 `errcode/code != 0` 一律如实记失败（如企微
+   `93000 invalid webhook url`）；
+3. **去重键跨进程稳定**——用 `sha1` 不用内置 `hash()`（每进程随机盐）。
+
+### 25.4 入站（回复即控制）的诚实边界
+
+**飞书群机器人 webhook 只出不进**——卡片拿不到回调，机器人也收不到群消息。
+要「在群里回复 `/approve ap-xxx` 即完成审批」，必须用
+**飞书企业自建应用 + 事件订阅**，把群消息 POST 到 `POST /api/assistant/inbound`
+（带 `X-Notify-Token` 头）。本产品提供后半段：令牌校验 + 4 条白名单指令
+（`approve` / `reject` / `pending` / `help`）+ 走**原有审批中心**执行
+（审计轨迹照常产生）。**认不出就报错，不猜不执行。**
+
+入站令牌**只在登录后可见**（`GET /api/assistant/notify` 未鉴权时不返回）。
+
+### 25.5 入口
+
+- **REST**：`GET /api/assistant/notify`（事件目录+订阅+推送记录）、
+  `POST /api/assistant/notify/subscriptions`、`POST /api/assistant/notify/test`、
+  `POST /api/assistant/inbound`
+- **UI**：控制台「助理」面板 → 事件订阅表 + 飞书入站配置 + 事件自检按钮
+- **文档**：`docs/feishu_integration_zh.md`
+- **测试**：`tests/test_notify.py`、`tests/test_console_notify.py`、
+  `tools/console_notify_smoke.js`

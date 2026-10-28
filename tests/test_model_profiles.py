@@ -8,7 +8,7 @@ import tempfile
 
 import pytest
 
-from model_profiles import ALLOWED_PROVIDERS, ModelProfileStore
+from model_profiles import ALLOWED_BILLINGS, ALLOWED_PROVIDERS, ModelProfileStore
 
 
 @pytest.fixture
@@ -103,3 +103,63 @@ def test_load_from_disk_restores_state(tmp_store):
 
 def test_allowed_providers_cover_scope():
     assert set(ALLOWED_PROVIDERS) == {"ollama", "openai", "anthropic"}
+
+
+# --------------------------------------------------------------------------
+# 计费方式（手动填写 key + base_url + 计费方式 的落地）
+# --------------------------------------------------------------------------
+def test_billing_persisted_and_labeled(tmp_store):
+    s, d = tmp_store
+    s.upsert({"provider": "openai", "name": "手动 Groq",
+               "base_url": "https://api.groq.com/openai/v1",
+               "api_key": "gsk-demo-1234", "model": "gpt-oss-120b",
+               "billing": "free"})
+    p = next(x for x in s.iter_profiles() if x.name == "手动 Groq")
+    assert p.billing == "free"
+    assert p.billing_label == "免费额度"
+    # 落盘也要带上（重启后不丢）
+    raw = json.load(open(os.path.join(d, "model_profiles.json"), encoding="utf-8"))
+    on_disk = next(x for x in raw["profiles"] if x["name"] == "手动 Groq")
+    assert on_disk["billing"] == "free"
+
+
+def test_billing_invalid_rejected(tmp_store):
+    s, _ = tmp_store
+    with pytest.raises(ValueError):
+        s.upsert({"provider": "openai", "name": "x", "billing": "bogus"})
+
+
+def test_billing_empty_allowed_and_not_guessed(tmp_store):
+    """没选计费方式时保持空（不替用户猜），且不报错。"""
+    s, _ = tmp_store
+    s.upsert({"provider": "openai", "name": "未知计费", "base_url": "https://x.example/v1"})
+    p = next(x for x in s.iter_profiles() if x.name == "未知计费")
+    assert p.billing == ""
+    assert p.billing_label == ""
+
+
+def test_billing_kept_when_edit_omits_it(tmp_store):
+    """编辑时前端没带 billing（老前端/老数据），保留已记录的值而不是清空。"""
+    s, _ = tmp_store
+    s.upsert({"id": "x", "provider": "openai", "name": "x",
+               "api_key": "sk-1", "billing": "subscription"})
+    s.upsert({"id": "x", "provider": "openai", "name": "x2",
+               "api_key": "sk-1"})  # 未带 billing
+    assert s.get("x").billing == "subscription"
+
+
+def test_old_profile_file_without_billing_loads(tmp_store):
+    """老磁盘文件没有 billing 字段时也要能读出来（向后兼容）。"""
+    s, d = tmp_store
+    path = os.path.join(d, "model_profiles.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"profiles": [{"id": "old", "name": "老配置",
+                                 "provider": "openai", "base_url": "https://x/v1"}]}, f)
+    s2 = ModelProfileStore(data_dir=d)
+    assert s2.get("old").billing == ""
+
+
+def test_allowed_billings_cover_catalog_values():
+    import model_providers as mp
+    assert set(ALLOWED_BILLINGS) == {mp.BILLING_FREE, mp.BILLING_SUBSCRIPTION,
+                                      mp.BILLING_PAYG, mp.BILLING_LOCAL}

@@ -149,9 +149,19 @@ class AgentRunner:
                 OutboundMessage(channel=inbound.channel, user_id=inbound.user_id, text=reply_text)
             )
             self.reg.update_task_status(tid, "done")
+            self._notify_terminal(tid, "done")
         except Exception as e:  # noqa: BLE001
             self.reg.update_task_status(tid, "failed")
+            self._notify_terminal(tid, "failed", str(e))
             print(f"[runner] 处理 {tid} 失败: {e}")
+
+    def _notify_terminal(self, tid, status, detail=""):
+        """任务终态 → 远程通道推送（飞书/企微）。**异常一律吞掉**（旁路纪律）。"""
+        try:
+            import notify as _notify
+            _notify.push_task_event(status, tid, detail=detail)
+        except Exception:  # noqa: BLE001 —— 推送绝不挡执行
+            pass
 
     def run(self, duration: float = None):
         hb = threading.Thread(target=self._heartbeat_loop, daemon=True)

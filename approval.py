@@ -76,11 +76,17 @@ class ApprovalCenter:
     （纯审批表模式，供不想在同库建 trace 表的场景）。
     """
 
-    def __init__(self, db_path=DEFAULT_DB_PATH, timeout=30, tracer=None):
+    def __init__(self, db_path=DEFAULT_DB_PATH, timeout=30, tracer=None,
+                 on_event=None):
         self.db_path = db_path
         os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
         self._timeout = timeout
         self._local = threading.local()
+        # on_event: 可选回调 on_event(kind, payload) —— kind ∈
+        # {"requested", "decided", "expired"}。用于把审批事件外抛给
+        # 推送引擎（飞书/企微），**回调异常一律吞掉**——推送是旁路，
+        # 绝不能因通知失败而挡审批主链路（与 trace 写入同纪律）。
+        self._on_event = on_event
         if tracer is False:
             self._trace_store = None
             self._owns_trace_store = False
@@ -208,6 +214,20 @@ class ApprovalCenter:
             except Exception:  # noqa: BLE001 —— 关连接的清理尽力而为
                 pass
 
+    # ---- 事件外抛（旁路）----
+    def _emit(self, kind: str, payload: dict):
+        """把审批事件交给外部回调（推送引擎）。
+
+        纪律：回调是**旁路**——抛异常、返回慢、返回假值都不得影响审批本身，
+        一律吞掉。这里不做任何"假装推送成功"的补偿。
+        """
+        if not self._on_event:
+            return
+        try:
+            self._on_event(kind, payload)
+        except Exception:  # noqa: BLE001 —— 旁路不挡主链路
+            pass
+
     # ---- 写：发起审批 ----
     def request(self, action: str, detail: str, task_id: str = "",
                 channel: str = "", user_id: str = "",
@@ -231,6 +251,10 @@ class ApprovalCenter:
                  "pending", now, None, None, tid),
             )
         self._trace_request(aid, action, detail, task_id, channel, user_id, tid)
+        self._emit("requested", {"approval_id": aid, "action": action,
+                                 "detail": detail, "task_id": task_id,
+                                 "channel": channel, "user_id": user_id,
+                                 "trace_id": tid})
         return aid
 
     # ---- 写：决策 ----
@@ -249,6 +273,9 @@ class ApprovalCenter:
             ok = cur.rowcount == 1
         if ok:
             self._trace_transition(approval_id, "approval_decided", actor=by)
+            self._emit("decided", {"approval_id": approval_id,
+                                    "decision": decision, "by": by,
+                                    "status": status})
         return ok
 
     def _mark_expired(self, approval_id: str) -> bool:
@@ -262,6 +289,8 @@ class ApprovalCenter:
             ok = cur.rowcount == 1
         if ok:
             self._trace_transition(approval_id, "approval_expired", actor="system")
+            self._emit("expired", {"approval_id": approval_id,
+                                    "status": "expired", "by": "system"})
         return ok
 
     def sweep_expired(self, max_age: float = 86400) -> list:

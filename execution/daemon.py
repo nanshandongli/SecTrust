@@ -251,7 +251,19 @@ class ExecutionDaemon:
                 self._release_guard(task_id, token)
             out.append((task_id, status))
             self._processed.append((task_id, status))
+            # 任务终态 → 远程通道推送（飞书/企微）。旁路：推送失败不影响执行。
+            self._notify_terminal(task_id, status, payload)
         return out
+
+    def _notify_terminal(self, task_id: str, status: str, payload: dict):
+        """把任务终态推送到已订阅的远程通道。**异常一律吞掉**（旁路纪律）。"""
+        try:
+            import notify as _notify
+            title = str(payload.get("title") or payload.get("cmd") or "")[:120]
+            _notify.push_task_event(status, task_id, title=title,
+                                    detail="执行器：%s" % self.reg.runner_id)
+        except Exception:  # noqa: BLE001 —— 推送绝不挡执行
+            pass
 
     def run(self, duration: float = None):
         hb = threading.Thread(target=self._heartbeat_loop, daemon=True)

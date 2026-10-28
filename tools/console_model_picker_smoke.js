@@ -158,6 +158,37 @@ function check(cond, msg) {
   const checked = (list.match(/pcheck">✓/g) || []).length;
   check(checked <= 1, '绿色对勾最多一个（选中态）');
 
+  // ⑥ 手动填写模式：协议 + 计费方式可自选（手填 key + base_url + 计费方式）
+  sandbox.setModelMode('manual');
+  check($('mmManualPane').classes.has('hidden') === false, '切到「手动填写」后手动面板可见');
+  check($('mmCatalogPane').classes.has('hidden') === true, '切到「手动填写」后目录面板隐藏');
+  const billingOpts = (apiData['/api/chat/providers'] || {}).billing_options || [];
+  const protoOpts = (apiData['/api/chat/providers'] || {}).protocol_options || [];
+  check(billingOpts.length >= 4, '后端提供计费方式选项（' + billingOpts.length + ' 项）');
+  check(protoOpts.length >= 3, '后端提供协议选项（' + protoOpts.length + ' 项）');
+  const billHtml = $('mmBilling')._html;
+  for (const b of billingOpts) {
+    check(billHtml.includes(b.value), '计费下拉含：' + b.label);
+  }
+  check(billHtml.includes('未指定'), '计费下拉有「未指定」空值项（不替用户猜计费方式）');
+  const protoHtml = $('mmProto')._html;
+  for (const p of protoOpts) {
+    check(protoHtml.includes(p.value), '协议下拉含：' + p.label);
+  }
+  // 手动模式下 Base URL 与 API Key 可自由输入（不被目录锁定）
+  $('mmBase').value = 'https://api.groq.com/openai/v1';
+  $('mmKey').value = 'gsk-test-key-0000';
+  $('mmBilling').value = 'free';
+  sandbox.syncBillingHint();
+  check($('mmBillingHint').textContent.length > 0, '计费方式有说明提示');
+  check($('mmBase').value === 'https://api.groq.com/openai/v1', '手动模式下 Base URL 可自由填写');
+
+  // ⑦ 目录勾选会把协议/计费同步到下拉（手动模式可沿用）
+  sandbox.setModelMode('catalog');
+  sandbox.selectProvider(target.id);
+  check($('mmProto').value === target.protocol, '勾选后协议同步：' + target.protocol);
+  check($('mmBilling').value === target.billing, '勾选后计费方式同步：' + target.billing);
+
   console.log('');
   if (errors.length) {
     console.error('FAIL: %d 个问题', errors.length);

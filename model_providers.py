@@ -42,6 +42,38 @@ BILLING_SUBSCRIPTION = "subscription"
 BILLING_PAYG = "payg"
 BILLING_LOCAL = "local"
 
+# 计费方式的展示名与提示 —— 单一事实来源（目录标签与手动填写下拉共用）。
+# 诚实边界：billing 只是**用户对自己所购方案的记录**，它不改变请求怎么发，
+# 也不改变实际扣费——实际扣费由「端点(base_url) + 账号」决定。
+BILLING_LABELS = {
+    BILLING_FREE: "免费额度",
+    BILLING_SUBSCRIPTION: "包月",
+    BILLING_PAYG: "按量计费",
+    BILLING_LOCAL: "本地",
+}
+
+BILLING_HINTS = {
+    BILLING_FREE: "额度内 $0，但有硬上限（速率/天数/Token），仅适合开发验证。",
+    BILLING_SUBSCRIPTION: "包月套餐额度；必须搭配该套餐专属端点，填成按量端点会按 token 扣费。",
+    BILLING_PAYG: "按 token 计费，请自行设置额度告警。",
+    BILLING_LOCAL: "本机/内网推理，不产生外部账单，数据不出本机。",
+}
+
+# 协议（= profile 的 provider 字段）：手动填写时由用户选，决定请求怎么发。
+PROTOCOLS = ("openai", "anthropic", "ollama")
+
+PROTOCOL_LABELS = {
+    "openai": "OpenAI 兼容",
+    "anthropic": "Anthropic（Claude）协议",
+    "ollama": "Ollama 本地",
+}
+
+PROTOCOL_HINTS = {
+    "openai": "绝大多数第三方平台（Groq / Mistral / DeepSeek / SiliconFlow / OpenAI 官方…）都走这个协议。",
+    "anthropic": "Claude 原生协议端点。",
+    "ollama": "本地推理，无需 API Key。",
+}
+
 GROUP_ORDER = [
     GROUP_FREE,
     GROUP_SUBSCRIPTION,
@@ -49,6 +81,32 @@ GROUP_ORDER = [
     GROUP_INTL,
     GROUP_LOCAL,
 ]
+
+
+def billing_label(billing: str) -> str:
+    """计费值 -> 展示名（未知值原样返回，不硬编造）。"""
+    return BILLING_LABELS.get(billing, billing)
+
+
+def billing_hint(billing: str) -> str:
+    """计费值 -> 一句话提示（供手动填写时解释这个选项意味着什么）。"""
+    return BILLING_HINTS.get(billing, "")
+
+
+def billing_options() -> List[Dict[str, object]]:
+    """手动填写用的计费方式选项（前端下拉直接渲染这份，不在前端硬编码）。"""
+    return [
+        {"value": v, "label": BILLING_LABELS[v], "hint": BILLING_HINTS[v]}
+        for v in (BILLING_FREE, BILLING_SUBSCRIPTION, BILLING_PAYG, BILLING_LOCAL)
+    ]
+
+
+def protocol_options() -> List[Dict[str, object]]:
+    """手动填写用的协议选项。"""
+    return [
+        {"value": p, "label": PROTOCOL_LABELS[p], "hint": PROTOCOL_HINTS[p]}
+        for p in PROTOCOLS
+    ]
 
 
 @dataclass
@@ -74,12 +132,7 @@ class ProviderEntry:
 
     @property
     def billing_label(self) -> str:
-        return {
-            BILLING_FREE: "免费额度",
-            BILLING_SUBSCRIPTION: "包月",
-            BILLING_PAYG: "按量计费",
-            BILLING_LOCAL: "本地",
-        }.get(self.billing, self.billing)
+        return billing_label(self.billing)
 
     @property
     def is_free_tier(self) -> bool:
@@ -360,6 +413,21 @@ PROVIDERS: List[ProviderEntry] = [
         compliance="按 token 计费，请设置额度告警。",
     ),
     _e(
+        id="sensenova-payg",
+        name="商汤 SenseNova（按量）",
+        group=GROUP_PAYG,
+        protocol="openai",
+        base_url="https://token.sensenova.cn/v1",
+        billing=BILLING_PAYG,
+        models=["sensenova-6.8-flash-lite", "sensenova-6.8"],
+        doc_url="https://www.sensenova.cn/",
+        key_url="https://console.sensenova.cn/",
+        note="商汤 SenseNova 按量端点（OpenAI 兼容路径 token.sensenova.cn/v1）。"
+             "已实测 sensenova-6.8-flash-lite 可对话；sensenova-6.8 同端点同协议标准版，"
+             "未逐一实测。计费按 token，请设置额度告警。",
+        compliance="按 token 计费，请设置额度告警。",
+    ),
+    _e(
         id="moonshot",
         name="月之暗面 Kimi（按量）",
         group=GROUP_PAYG,
@@ -514,10 +582,12 @@ def list_providers() -> List[Dict[str, object]]:
 
 
 def catalog() -> Dict[str, object]:
-    """完整目录：分组 + 条目 + 全局提示。"""
+    """完整目录：分组 + 条目 + 全局提示 + 手动填写用的计费/协议选项。"""
     return {
         "groups": list(GROUP_ORDER),
         "providers": list_providers(),
+        "billing_options": billing_options(),
+        "protocol_options": protocol_options(),
         "notice": "Base URL 必须与所购计费方案配套：填成「按量计费」端点会按 token 扣费，"
                   "填成「包月」端点则用不了包月额度。目录中的端点均已核实。",
     }

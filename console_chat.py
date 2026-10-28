@@ -426,16 +426,39 @@ class ChatService:
                 "next_steps": [], "usage": out.get("usage", {}),
             }
         except Exception as e:  # noqa: BLE001
-            return {
-                "answer": ("本地规则无法回答这个问题，且当前没有可用的 LLM 后端"
-                           "（Ollama 未启动或未配置 OPENAI_API_KEY），因此本回答"
-                           "**不可用**模型生成。\n"
-                           "错误：%s\n"
-                           "你可以：① 把问题换成上面这些审计类问题（任务/审批/成本/安全/轨迹/总结）；"
-                           "② 启动本地 Ollama 后重试；③ 直接去对应面板看原始数据。"
-                           ) % e,
-                "engine": "unavailable", "model": None,
-                "basis": [], "next_steps": ["启动 Ollama 或配置 OPENAI_API_KEY",
-                                            "改问审计类问题"],
-                "usage": {},
-            }
+            return self._unavailable_answer(e)
+
+    def _unavailable_answer(self, e: Exception) -> Dict[str, Any]:
+        """LLM 调用失败时的诚实降级：反映真实 active provider 与真实错误，不编造。"""
+        active = self._llm.profiles.get_active()
+        if active is None or not active.configured:
+            current = "未配置任何算力模型"
+        else:
+            current = "%s（%s / %s，端点 %s）" % (
+                active.name, active.provider, active.model or "未指定模型",
+                active.base_url or "默认")
+        err = str(e)
+        if "401" in err or "Unauthorized" in err or "unauthorized" in err:
+            cause = ("该端点返回 401 未授权——密钥未被接受。请到对应平台"
+                     "（如 open.bigmodel.cn）核对 API Key 是否过期、复制是否完整"
+                     "（无多余空格/换行）。")
+        elif "403" in err:
+            cause = "该端点返回 403——密钥可能无权限或客户端被限流。"
+        elif "404" in err or "not found" in err.lower():
+            cause = "该端点/model 未找到——检查 base_url 与模型名是否与平台一致。"
+        elif ("Connection" in err or "timeout" in err.lower()
+              or "Name or service" in err or "getaddrinfo" in err):
+            cause = "无法连接到该端点——检查 base_url 是否正确、网络是否可达。"
+        else:
+            cause = "调用失败，请检查端点配置（base_url / 模型名 / 网络 / 密钥）。"
+        return {
+            "answer": ("本地规则无法回答这个问题，且当前 LLM 后端调用失败。\n"
+                       "当前算力：%s\n错误：%s\n%s\n"
+                       "你可以：① 改问审计类问题（任务/审批/成本/安全/轨迹/总结）；"
+                       "② 修复上面的算力配置后重试；③ 直接去对应面板看原始数据。"
+                       ) % (current, err, cause),
+            "engine": "unavailable", "model": None,
+            "basis": [], "next_steps": ["检查算力配置（端点/密钥/网络）",
+                                        "改问审计类问题"],
+            "usage": {},
+        }
