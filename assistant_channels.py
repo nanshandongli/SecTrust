@@ -101,10 +101,29 @@ CHANNEL_MAP = {c["id"]: c for c in CHANNELS}
 
 
 def mask_webhook(url: str) -> str:
-    """掩去 webhook 中的敏感参数值，只保留末 4 位（单轮替换，避免参数名互相击穿）。"""
+    """掩去 webhook 中的敏感部分，只保留末 4 位。
+
+    两类形态都要掩（缺一即泄露）：
+    1. **路径型**：飞书 `…/bot/v2/hook/<uuid>` —— 凭据在路径末段，没有 `?key=`
+       可掩。曾只掩 query 参数，导致飞书地址被完整明文返回给不鉴权的
+       `GET /api/assistant/settings`（拿到即可往群里发消息）。
+    2. **参数型**：企微 `?key=xxx` / 钉钉 `?access_token=xxx` —— 必须**单轮**
+       组合正则替换，多轮逐参数会互相击穿（`token=` 会命中 `access_token=****`
+       的结果）。
+    """
     if not url:
         return ""
 
+    # 1) 路径型：命中任一已知通道的 webhook_prefix，就把 prefix 之后整段掩掉
+    for ch in CHANNELS:
+        prefix = ch.get("webhook_prefix") or ""
+        if prefix and url.startswith(prefix):
+            tail = url[len(prefix):].split("?")[0]
+            if tail:
+                keep = tail[-4:] if len(tail) > 4 else ""
+                return "%s****%s" % (prefix, keep)
+
+    # 2) 参数型：单轮组合正则
     def _mask(m: "re.Match[str]") -> str:
         val = m.group(2)
         tail = val[-4:] if len(val) > 4 else "****"

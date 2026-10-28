@@ -41,6 +41,14 @@ class TestCatalog(unittest.TestCase):
         self.assertIn("****wxyz", masked)
         self.assertIn("key=", masked)
 
+    def test_mask_webhook_path_type_hides_feishu_uuid(self):
+        # 飞书凭据在路径末段（无 ?key=），旧实现会完整明文泄露给未鉴权的 GET
+        url = "https://open.feishu.cn/open-apis/bot/v2/hook/07380eb4-c34b-46de-a360-8b74b9194e16"
+        masked = ac.mask_webhook(url)
+        self.assertNotIn("07380eb4-c34b-46de-a360-8b74b9194e16", masked)
+        self.assertIn("****4e16", masked)
+        self.assertIn("https://open.feishu.cn/open-apis/bot/v2/hook/", masked)
+
     def test_mask_webhook_plain_url_unchanged(self):
         self.assertEqual(ac.mask_webhook("https://gw.example.com/hook"),
                          "https://gw.example.com/hook")
@@ -75,6 +83,17 @@ class TestStore(unittest.TestCase):
                           enabled=True)
         self.assertEqual(self.st.get_config("dingtalk_bot")["webhook"], url)
         self.assertEqual(self.st.get_config("dingtalk_bot")["secret"], "SECabc")
+
+    def test_public_never_leaks_feishu_full_url(self):
+        # 路径型 webhook 绝不以明文出现在公开视图（GET /api/assistant/settings 不鉴权）
+        url = "https://open.feishu.cn/open-apis/bot/v2/hook/07380eb4-c34b-46de-a360-8b74b9194e16"
+        self.st.configure("feishu_bot", webhook=url, enabled=True)
+        pub = json.dumps(self.st.to_public(), ensure_ascii=False)
+        self.assertNotIn(url, pub)
+        self.assertNotIn("07380eb4-c34b-46de-a360-8b74b9194e16", pub)
+        # 磁盘保留明文（data/ 已 gitignore），掩码视图只给末 4 位
+        c = next(x for x in self.st.to_public()["channels"] if x["id"] == "feishu_bot")
+        self.assertIn("****4e16", c["webhook_masked"])
 
     def test_enable_requires_webhook(self):
         with self.assertRaises(ValueError):
