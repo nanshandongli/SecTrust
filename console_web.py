@@ -279,7 +279,8 @@ APP_HTML = """<!doctype html>
   .sk{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;box-shadow:var(--shadow)}
   .sk .nm{font-weight:600;font-size:14px}
   .sk .src{font-size:11px;color:var(--accent2);margin:2px 0 6px}
-  .sk .ds{font-size:12.5px;color:var(--sub);line-height:1.5}
+  .sk .ds{font-size:12.5px;color:var(--sub);line-height:1.5;
+    display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}
   /* ---- 连接器画廊（WorkBuddy 式卡片网格） ---- */
   .conn-top{display:flex;align-items:center;gap:10px;margin:4px 0 16px;flex-wrap:wrap}
   .conn-top .search{flex:1;min-width:220px;display:flex;gap:8px}
@@ -296,6 +297,7 @@ APP_HTML = """<!doctype html>
   .conn-card .ds{font-size:12px;color:var(--sub);line-height:1.5;
     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
   .conn-card .ft{margin-top:auto;display:flex;align-items:center;gap:6px;font-size:11px;color:var(--sub)}
+  .conn-card .sub{font-size:10.5px;color:var(--sub);opacity:.7;margin-top:-4px}
   .conn-plus{position:absolute;top:10px;right:10px;width:26px;height:26px;border-radius:50%;
     border:1px solid var(--line);background:var(--bg);color:var(--txt);font-size:16px;line-height:1;
     cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
@@ -1336,8 +1338,10 @@ function connCard(o){
   else if(o.plusSlug)corner='<button class="conn-plus" title="安装" onclick="connInstall(&quot;'+esc(o.plusSlug)+'&quot;)">+</button>';
   const tag=o.tag?'<span class="conn-tag '+(o.tagCls||'')+'">'+esc(o.tag)+'</span>':'';
   const foot=o.foot||'';
+  const sub=o.sub?'<div class="conn-sub">'+esc(o.sub)+'</div>':'';
   return '<div class="conn-card">'+corner+connBadge(o.name)+
     '<div class="nm">'+esc(o.name)+'</div>'+
+    sub+
     '<div class="ds">'+esc(o.desc||'')+'</div>'+
     '<div class="ft">'+tag+foot+'</div></div>';
 }
@@ -1380,7 +1384,8 @@ function renderConnInstalled(){
   const sk=window.__connSkills||[];
   if(!sk.length){connEmpty('connInstalled','暂无已安装技能；可去 SkillHub 推荐或搜索里点 + 安装');return;}
   $('connInstalled').innerHTML=sk.map(function(k){
-    return connCard({name:k.name,desc:k.description||k.desc||'',
+    return connCard({name:k.display_name||k.name,desc:k.description||k.desc||'',
+      sub:(k.display_name&&k.display_name!==k.name)?k.name:'',
       tag:(k.source==='custom'?'自定义':(k.source==='skillhub'?'SkillHub':'本地')),
       installed:true});
   }).join('');
@@ -1643,6 +1648,7 @@ async function loadChat(){
       const meta=[];
       if(d.engine==='rule') meta.push('引擎：<b>规则引擎</b>（确定性，零幻觉）');
       else if(d.engine==='llm') meta.push('引擎：<b>LLM</b> '+(d.model||''));
+      else if(d.engine==='hint') meta.push('引擎：<b>意图提示</b>（已识别为执行任务 → 新建任务）');
       else meta.push('引擎：<b>不可用</b>');
       if(d.basis&&d.basis.length) meta.push('依据：'+d.basis.join('、'));
       if(d.next_steps&&d.next_steps.length) meta.push('下一步：'+d.next_steps.join('；'));
@@ -2163,7 +2169,13 @@ async function loadSkills(){
   const s=await jget('/api/skills');
   el.innerHTML='<h2 class="vh">技能</h2><p class="vdesc">已安装技能（含来自 SkillHub 的）。WorkBuddy 式技能中心。</p>'+
     '<div class="grid sk-grid">'+
-      (s.length?s.map(k=>'<div class="sk"><div class="nm">'+esc(k.name)+'</div><div class="src">'+(k.source==='skillhub'?'SkillHub · ':'本地 · ')+esc(k.slug)+'</div><div class="ds">'+esc(k.description||'')+'</div></div>').join(''):'<div class="empty">暂无技能</div>')+'</div>';
+      (s.length?s.map(k=>{
+        const title=k.display_name||k.name;
+        const slugLine=(k.display_name&&k.display_name!==k.name)?'<div class="src">'+esc(k.name)+'</div>':'';
+        return '<div class="sk"><div class="nm">'+esc(title)+'</div>'+slugLine+
+          '<div class="src">'+(k.source==='skillhub'?'SkillHub · ':'本地 · ')+esc(k.slug)+'</div>'+
+          '<div class="ds">'+esc(k.description||'（暂无功能简介）')+'</div></div>';
+      }).join(''):'<div class="empty">暂无技能</div>')+'</div>';
 }
 
 // ---------------- 设置 ----------------
@@ -2647,6 +2659,69 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             return {"backend": "unavailable", "containment": "?", "note": str(e)}
 
+    # ---- 技能元数据解析（frontmatter 功能简介 + 展示名，不依赖 PyYAML）----
+    @staticmethod
+    def _fm_field(lines, key):
+        """从 frontmatter 行列表里取某个字段的值，支持 '>' '|' 多行块标量。"""
+        for i, line in enumerate(lines):
+            s = line.strip()
+            if not s.startswith(key + ":"):
+                continue
+            val = s[len(key) + 1:].strip()
+            if val in (">", "|", ">-", "|-", ">+", "|+"):
+                # 块标量：收集后续缩进行
+                collected = []
+                j = i + 1
+                while j < len(lines):
+                    nxt = lines[j]
+                    if not nxt.strip():
+                        j += 1
+                        continue
+                    if nxt[0] in " \t":
+                        collected.append(nxt.strip())
+                        j += 1
+                    else:
+                        break
+                return " ".join(collected) if val[0] == ">" else "\n".join(collected)
+            if val and val[0] in "\"'":  # 去引号
+                q = val[0]
+                if len(val) > 1 and val.endswith(q):
+                    return val[1:-1]
+                return val[1:]
+            return val
+        return ""
+
+    @staticmethod
+    def _read_skill_meta(md_path):
+        """解析 SKILL.md 的展示名与功能简介。
+
+        优先取 frontmatter 的 description_zh / description（中文 UI 优先），
+        缺失时回退到首个非空内容段落（跳过标题与字段行）。
+        不引入 PyYAML 依赖——技能 frontmatter 结构固定，针对性解析即可覆盖。
+        """
+        display_name, description = "", ""
+        try:
+            txt = open(md_path, encoding="utf-8", errors="replace").read(6000)
+        except OSError:
+            return display_name, description
+        if txt.lstrip().startswith("---"):
+            end = txt.find("\n---", 3)
+            if end > 0:
+                lines = txt[3:end].splitlines()
+                description = (Handler._fm_field(lines, "description_zh")
+                               or Handler._fm_field(lines, "description"))
+                display_name = (Handler._fm_field(lines, "display_name")
+                                or Handler._fm_field(lines, "displayName"))
+        if not description:
+            for line in txt.splitlines():
+                s = line.strip().lstrip("#").strip()
+                if len(s) >= 6 and not s.startswith(("---", "name:", "slug:",
+                                                     "version:", "description",
+                                                     "display")):
+                    description = s
+                    break
+        return display_name.strip(), description.strip()
+
     def _skills(self):
         import glob
         out = []
@@ -2659,21 +2734,14 @@ class Handler(BaseHTTPRequestHandler):
             name = os.path.basename(d)
             slug = name
             source = "skillhub" if name.endswith("__skillhub") else "local"
-            desc = ""
+            display_name, desc = "", ""
             md = os.path.join(d, "SKILL.md")
             if os.path.exists(md):
-                try:
-                    txt = open(md, encoding="utf-8", errors="replace").read(4000)
-                    # 取第一个非空行作为描述
-                    for line in txt.splitlines():
-                        line = line.strip().lstrip("#").strip()
-                        if line:
-                            desc = line[:120]
-                            break
-                except OSError:
-                    pass
+                display_name, desc = self._read_skill_meta(md)
+            if desc:
+                desc = desc[:300]
             out.append({"name": name, "slug": slug, "source": source,
-                        "description": desc})
+                        "description": desc, "display_name": display_name})
         # 自定义连接器登记的本地技能源目录
         for c in console_api.list_custom_connectors(self.project_root):
             base = c.get("path") or ""
@@ -2684,20 +2752,15 @@ class Handler(BaseHTTPRequestHandler):
                         os.path.join(d, "SKILL.md")):
                     continue
                 name = os.path.basename(d)
-                desc = ""
-                try:
-                    txt = open(os.path.join(d, "SKILL.md"),
-                               encoding="utf-8", errors="replace").read(4000)
-                    for line in txt.splitlines():
-                        line = line.strip().lstrip("#").strip()
-                        if line:
-                            desc = line[:120]
-                            break
-                except OSError:
-                    pass
+                display_name, desc = "", ""
+                md = os.path.join(d, "SKILL.md")
+                if os.path.exists(md):
+                    display_name, desc = self._read_skill_meta(md)
+                if desc:
+                    desc = desc[:300]
                 out.append({"name": name, "slug": name,
                             "source": "custom", "origin": c.get("name") or "",
-                            "description": desc})
+                            "description": desc, "display_name": display_name})
         return out
 
     def log_message(self, *args):

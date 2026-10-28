@@ -61,6 +61,38 @@ WORKER_PREAMBLE = (
 )
 
 
+# --------------------------------------------------------------------------
+# 0) 执行意图识别（把"产出型"请求从审计问答里分流，避免模型答"数据不足"）
+# --------------------------------------------------------------------------
+# 这些动词表示"要产出内容/做一件事"，不是"查询审计台数据"。命中后由上层给出
+# 重定向提示（引导去「新建任务」），**不再调 LLM 走审计问答**——否则模型只会
+# 回「现有审计数据不足以回答」，让用户以为功能坏了。
+EXECUTION_INTENT_VERBS = (
+    "写一份", "写一段", "写个", "写", "撰写", "起草一份", "起草", "拟一份", "拟写", "拟",
+    "生成", "制作", "编写", "编", "策划", "创作", "翻译", "润色", "整理成", "总结成",
+    "画", "设计", "做一份", "做一版", "做个", "出一份", "帮我做", "帮我写", "帮我生成",
+    "请帮我", "给我写", "给我做", "输出", "产出",
+)
+# 即便漏过规则引擎，只要含这些审计词也不当作执行意图（交给 LLM 按审计语境答）。
+# 注意：必须含「审计」——"写一首关于审计的诗"这类仍按审计语境处理，不重定向。
+_EXECUTION_AUDIT_GUARD = (
+    "审计", "泄露", "密钥", "安全", "成本", "审批", "任务", "轨迹",
+    "概览", "总览", "运行", "通过", "高危",
+)
+
+
+def detect_execution_intent(q: str) -> bool:
+    """识别"派发执行任务"意图：要产出内容，而非查询审计态。
+
+    排在规则引擎之后——规则引擎已优先处理审计类问题；这里只对"漏网"的
+    非审计输入判断是否是"产出型"请求。
+    """
+    text = q or ""
+    if any(k in text for k in _EXECUTION_AUDIT_GUARD):
+        return False
+    return any(v in text for v in EXECUTION_INTENT_VERBS)
+
+
 def build_context(overview: Dict[str, Any],
                   tasks: List[Dict[str, Any]],
                   approvals: List[Dict[str, Any]],
@@ -455,6 +487,11 @@ class ChatService:
             hit["usage"] = {}
             return hit
 
+        # 执行意图分流：写报告/生成文案这类"产出型"请求不是审计问答，
+        # 提前识别并引导去「新建任务」，避免模型答"数据不足"误导用户。
+        if detect_execution_intent(q):
+            return self._execution_intent_answer(q)
+
         try:
             out = self._llm.complete(q, context, history, model=model)
             return {
@@ -464,6 +501,29 @@ class ChatService:
             }
         except Exception as e:  # noqa: BLE001
             return self._unavailable_answer(e, model=model)
+
+    def _execution_intent_answer(self, q: str) -> Dict[str, Any]:
+        """把"产出型"请求重定向到执行引擎（新建任务），而不是用审计问答硬答。"""
+        return {
+            "answer": (
+                "这句话看起来是**派发一个执行任务**（要产出内容），"
+                "不是询问审计台的运行数据。\n\n"
+                "当前「对话」面板是**审计问答助手**，只依据审计台自己记录的事实"
+                "（任务 / 审批 / 成本 / 安全 / 轨迹）作答，**不会替你生成外部内容**——"
+                "若直接交给它，只会回「现有审计数据不足以回答」。\n\n"
+                "要真正产出这份内容，请用左侧 **「新建任务」**：\n"
+                "1. 在「新建任务」输入框粘贴这句话（例如「写一份今日 A 股大盘收盘报告」）；\n"
+                "2. 系统会拆成工序 → 调你配置的算力模型（商汤 / 智谱）实际去写；\n"
+                "3. 在「任务中心」查看产出与上下游接力结果。\n\n"
+                "💡 提示：模型本身没有实时 A 股行情源，写「今日收盘」类报告可能偏通用；"
+                "要真·实时数据，需再接入行情数据源（如行情抓取技能）。"
+            ),
+            "engine": "hint",
+            "model": None,
+            "basis": ["对话（审计问答）", "新建任务（执行引擎）"],
+            "next_steps": ["打开左侧「新建任务」粘贴这句话", "在「任务中心」查看产出"],
+            "usage": {},
+        }
 
     def _resolve_profile(self, model: Optional[str] = None):
         """解析**这次实际会用到的** profile：指定 model（profile id）优先，否则用 active。

@@ -393,8 +393,10 @@ def connector_status(skills_dir: str,
     local_connectors = []
     try:
         import connectors  # noqa: F401
-        local_connectors = [{"name": "github", "desc": "GitHub 技能源同步"},
-                            {"name": "imap", "desc": "IMAP 邮件技能源"}]
+        local_connectors = [
+            {"name": "github", "desc": "把 GitHub 仓库作为技能源同步（拉取社区/私有技能到本地并即时可用）"},
+            {"name": "imap", "desc": "通过 IMAP 接入邮件账户，把邮件作为技能源同步到本地"},
+        ]
     except Exception:  # noqa: BLE001
         pass
     return {

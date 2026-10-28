@@ -208,6 +208,59 @@ class TestHonestDegradation(unittest.TestCase):
         self.assertIn("请输入", r["answer"])
 
 
+class TestExecutionIntent(unittest.TestCase):
+    """「产出型」请求必须被识别并引导去「新建任务」，不浪费 LLM 走审计问答。
+
+    回归背景：用户曾在对话框输入「写一份今日 A 股大盘收盘报告」，被当作审计问答
+    交给 LLM，模型只能回「现有审计数据不足以回答」，让用户以为功能坏了。
+    """
+
+    def setUp(self):
+        self.svc = _svc()
+
+    def test_report_request_redirects_to_task(self):
+        r = self.svc.ask("写一份今日A股大盘收盘报告")
+        self.assertEqual(r["engine"], "hint")
+        self.assertIn("新建任务", r["answer"])
+        self.assertIn("不会替你生成", r["answer"])
+
+    def test_write_copy_request_redirects(self):
+        r = self.svc.ask("帮我写一段产品介绍文案")
+        self.assertEqual(r["engine"], "hint")
+        self.assertIn("新建任务", r["answer"])
+
+    def test_generate_weekly_redirects(self):
+        r = self.svc.ask("生成一份本周工作周报")
+        self.assertEqual(r["engine"], "hint")
+
+    def test_make_ppt_outline_redirects(self):
+        r = self.svc.ask("帮我做一份PPT大纲")
+        self.assertEqual(r["engine"], "hint")
+
+    def test_make_ppt_colloquial_redirects(self):
+        r = self.svc.ask("帮我做个PPT大纲")
+        self.assertEqual(r["engine"], "hint")
+
+    def test_audit_question_still_rule(self):
+        """含审计关键词的问题不能被误判为执行意图。"""
+        r = self.svc.ask("总结当前审计状态")
+        self.assertEqual(r["engine"], "rule")
+
+    def test_task_question_still_rule(self):
+        r = self.svc.ask("今天哪些任务在跑")
+        self.assertEqual(r["engine"], "rule")
+
+    def test_poem_about_audit_stays_unavailable(self):
+        """「写一首关于审计的诗」含审计词，仍按审计语境→unavailable（不重定向）。"""
+        r = self.svc.ask("帮我写一首关于审计的诗")
+        self.assertEqual(r["engine"], "unavailable")
+
+    def test_hint_has_next_steps(self):
+        r = self.svc.ask("写一份市场分析")
+        self.assertTrue(r["next_steps"])
+        self.assertIn("新建任务", r["next_steps"][0])
+
+
 class TestContextBuilding(unittest.TestCase):
     """喂给 LLM 的事实上下文必须包含关键数字。"""
 
