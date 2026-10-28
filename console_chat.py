@@ -426,24 +426,53 @@ class ChatService:
                 "next_steps": [], "usage": out.get("usage", {}),
             }
         except Exception as e:  # noqa: BLE001
-            return self._unavailable_answer(e)
+            return self._unavailable_answer(e, model=model)
 
-    def _unavailable_answer(self, e: Exception) -> Dict[str, Any]:
-        """LLM 调用失败时的诚实降级：反映真实 active provider 与真实错误，不编造。"""
-        active = self._llm.profiles.get_active()
-        if active is None or not active.configured:
+    def _resolve_profile(self, model: Optional[str] = None):
+        """解析**这次实际会用到的** profile：指定 model（profile id）优先，否则用 active。
+
+        为什么必须区分：用户可能选了商汤却仍看到「当前算力：智谱」的错误提示 ——
+        那会把排查引到错误的平台与密钥上。
+
+        兼容没有 profiles 属性的测试桩（如 _NoLlm）→ 返回 None，不抛异常。
+        """
+        profiles = getattr(self._llm, "profiles", None)
+        if profiles is None:
+            return None
+        try:
+            if model:
+                return profiles.get(model)
+            return profiles.get_active()
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _unavailable_answer(self, e: Exception,
+                            model: Optional[str] = None) -> Dict[str, Any]:
+        """LLM 调用失败时的诚实降级：反映**真实实际调用**的 provider 与真实错误，不编造。"""
+        profile = self._resolve_profile(model)
+        if profile is None or not profile.configured:
             current = "未配置任何算力模型"
         else:
             current = "%s（%s / %s，端点 %s）" % (
-                active.name, active.provider, active.model or "未指定模型",
-                active.base_url or "默认")
+                profile.name, profile.provider, profile.model or "未指定模型",
+                profile.base_url or "默认")
         err = str(e)
+        host = ""
+        if profile is not None and profile.base_url:
+            host = profile.base_url.split("//")[-1].split("/")[0]
         if "401" in err or "Unauthorized" in err or "unauthorized" in err:
-            cause = ("该端点返回 401 未授权——密钥未被接受。请到对应平台"
-                     "（如 open.bigmodel.cn）核对 API Key 是否过期、复制是否完整"
-                     "（无多余空格/换行）。")
+            cause = ("该端点返回 401 未授权——密钥未被接受。请到 %s 对应的平台控制台"
+                     "核对 API Key 是否过期、复制是否完整（无多余空格/换行）。"
+                     % (host or "该端点"))
         elif "403" in err:
             cause = "该端点返回 403——密钥可能无权限或客户端被限流。"
+        elif "429" in err:
+            # 429 在不同平台含义不同：免费档模型常是「访问量过大」，按量账户是 RPM/TPM 上限。
+            # 关键：**这不是配置错误**，重试或换模型即可 —— 提示必须说清，
+            # 否则用户会去反复更换密钥，越换越乱。
+            cause = ("该端点返回 429——触发速率/配额限制，**这不是配置错误**："
+                     "免费额度模型多为「该模型当前访问量过大」（如 code 1305），"
+                     "按量账户则受 RPM/TPM 上限。请稍后重试，或在顶部切换到其它算力模型。")
         elif "404" in err or "not found" in err.lower():
             cause = "该端点/model 未找到——检查 base_url 与模型名是否与平台一致。"
         elif ("Connection" in err or "timeout" in err.lower()
@@ -452,7 +481,7 @@ class ChatService:
         else:
             cause = "调用失败，请检查端点配置（base_url / 模型名 / 网络 / 密钥）。"
         return {
-            "answer": ("本地规则无法回答这个问题，且当前 LLM 后端调用失败。\n"
+            "answer": ("当前 LLM 后端不可用，且本地规则无法回答这个问题。\n"
                        "当前算力：%s\n错误：%s\n%s\n"
                        "你可以：① 改问审计类问题（任务/审批/成本/安全/轨迹/总结）；"
                        "② 修复上面的算力配置后重试；③ 直接去对应面板看原始数据。"

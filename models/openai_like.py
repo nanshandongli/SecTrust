@@ -11,6 +11,7 @@ OpenAIModelProvider —— OpenAI 及「OpenAI 兼容」端点。
 from __future__ import annotations
 
 import json
+import urllib.error
 import urllib.request
 from typing import Optional
 
@@ -49,8 +50,22 @@ class OpenAIModelProvider(ModelProvider):
                 "Authorization": f"Bearer {self.api_key}",
             },
         )
-        with urllib.request.urlopen(req, timeout=opts.get("timeout", 60)) as r:  # noqa: S310
-            data = json.loads(r.read())
+        try:
+            with urllib.request.urlopen(req, timeout=opts.get("timeout", 60)) as r:  # noqa: S310
+                data = json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            # HTTPError 的 str() 只有状态行，**不含响应体** → 上层无法分辨
+            # 「模型过载(code 1305)」与「配额不足(quota)」，归因必然含糊，
+            # 用户只会得到一句无用的「检查配置」。这里把响应体摘要并进消息。
+            body = ""
+            try:
+                body = e.read().decode("utf-8", "replace").strip()
+            except Exception:  # noqa: BLE001
+                body = ""
+            if len(body) > 300:
+                body = body[:300] + "…"
+            raise RuntimeError("HTTP %s %s%s" % (
+                e.code, e.reason, (" | " + body) if body else "")) from e
         choice = data["choices"][0]["message"]
         return ChatResult(
             content=choice.get("content", ""),

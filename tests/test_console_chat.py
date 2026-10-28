@@ -158,6 +158,50 @@ class TestHonestDegradation(unittest.TestCase):
         self.assertTrue(s["rule_engine"])
         self.assertIn("不会伪造", s["note"])
 
+    def test_stub_without_profiles_does_not_crash(self):
+        """LLM 桩可能没有 profiles 属性（无算力配置）——降级路径不得抛 AttributeError。
+
+        回归背景：曾直接取 self._llm.profiles.get_active()，对无该属性的桩炸
+        AttributeError，把「诚实降级」变成「500 崩溃」。
+        """
+        r = _svc().ask("随便问点什么")
+        self.assertEqual(r["engine"], "unavailable")
+        self.assertIn("不可用", r["answer"])
+
+    def test_error_names_the_profile_actually_used(self):
+        """错误提示必须写**用户实际选中的**算力，不是 active 那个。
+
+        回归背景：曾固定显示 active profile —— 用户选了商汤却看到「当前算力：智谱」，
+        排查方向被带偏（去改另一个平台的密钥）。
+        """
+        from model_profiles import ModelProfile, ModelProfileStore
+        store = ModelProfileStore()
+        store._profiles["p_active"] = ModelProfile(
+            id="p_active", name="活动模型", provider="openai",
+            api_key="sk-test-active-000000", base_url="https://active.example/v1",
+            model="active-m", active=True)
+        store._profiles["p_picked"] = ModelProfile(
+            id="p_picked", name="用户选中的模型", provider="openai",
+            api_key="sk-test-picked-000000", base_url="https://picked.example/v1",
+            model="picked-m", active=False)
+
+        class _Boom:
+            profiles = store
+
+            def status(self):
+                return {}
+
+            def complete(self, question, context, history=None, model=None):
+                raise RuntimeError("HTTP Error 429: Too Many Requests")
+
+        svc = C.ChatService(lambda: _ctx(), llm=_Boom())
+        r = svc.ask("帮我写一首关于审计的诗", model="p_picked")
+        self.assertEqual(r["engine"], "unavailable")
+        self.assertIn("用户选中的模型", r["answer"])
+        self.assertNotIn("活动模型", r["answer"])
+        # 429 必须说清「不是配置错误」，否则用户会反复换密钥
+        self.assertIn("不是配置错误", r["answer"])
+
     def test_empty_question(self):
         r = _svc().ask("   ")
         self.assertEqual(r["engine"], "rule")
