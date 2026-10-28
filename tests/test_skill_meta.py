@@ -83,5 +83,29 @@ class TestReadSkillMeta(unittest.TestCase):
         self.assertEqual(desc, "真实功能简介")
 
 
+class TestSkillOverride(unittest.TestCase):
+    """中文展示覆盖：把纯英文/中英混杂的元数据替换为中文。"""
+
+    def test_summarize_display_name_chinese(self):
+        dn, desc = console_web.Handler._apply_skill_override(
+            "summarize__skillhub", "summarize", "智能内容摘要工具……")
+        self.assertEqual(dn, "内容摘要")
+        self.assertEqual(desc, "智能内容摘要工具……")  # 简介未被覆盖
+
+    def test_multi_search_engine_description_chinese(self):
+        dn, desc = console_web.Handler._apply_skill_override(
+            "multi-search-engine__skillhub", "搜索引擎",
+            "Multi search engine integration with 16 engines……")
+        self.assertEqual(dn, "搜索引擎")  # 展示名未被覆盖
+        self.assertIn("多搜索引擎集成工具", desc)
+        self.assertNotIn("Multi search engine", desc)
+
+    def test_no_override_for_unknown(self):
+        dn, desc = console_web.Handler._apply_skill_override(
+            "some-other-skill", "原名", "原简介")
+        self.assertEqual(dn, "原名")
+        self.assertEqual(desc, "原简介")
+
+
 if __name__ == "__main__":
     unittest.main()

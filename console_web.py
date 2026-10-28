@@ -2722,6 +2722,25 @@ class Handler(BaseHTTPRequestHandler):
                     break
         return display_name.strip(), description.strip()
 
+    # 中文展示覆盖：个别技能元数据为纯英文或中英混杂，统一为中文展示名/简介。
+    # 仅覆盖已确认的非中文条目（品牌专有名词如「AI Agent」「WorkBuddy」不在此列）。
+    _SKILL_OVERRIDES = {
+        "summarize__skillhub": {"display_name": "内容摘要"},
+        "multi-search-engine__skillhub": {
+            "description": "多搜索引擎集成工具，内置 16 个引擎（7 个国内 + 9 个全球），"
+                           "覆盖安全审计、漏洞扫描、加密保护等场景，"
+                           "适合安全辅助与开发者效率提升。",
+        },
+    }
+
+    @classmethod
+    def _apply_skill_override(cls, name, display_name, desc):
+        ov = cls._SKILL_OVERRIDES.get(name)
+        if not ov:
+            return display_name, desc
+        return (ov.get("display_name", display_name),
+                ov.get("description", desc))
+
     def _skills(self):
         import glob
         out = []
@@ -2740,6 +2759,7 @@ class Handler(BaseHTTPRequestHandler):
                 display_name, desc = self._read_skill_meta(md)
             if desc:
                 desc = desc[:300]
+            display_name, desc = self._apply_skill_override(name, display_name, desc)
             out.append({"name": name, "slug": slug, "source": source,
                         "description": desc, "display_name": display_name})
         # 自定义连接器登记的本地技能源目录
@@ -2758,6 +2778,7 @@ class Handler(BaseHTTPRequestHandler):
                     display_name, desc = self._read_skill_meta(md)
                 if desc:
                     desc = desc[:300]
+                display_name, desc = self._apply_skill_override(name, display_name, desc)
                 out.append({"name": name, "slug": name,
                             "source": "custom", "origin": c.get("name") or "",
                             "description": desc, "display_name": display_name})
