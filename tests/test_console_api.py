@@ -353,6 +353,22 @@ class TestFrontendWiring(unittest.TestCase):
         self.assertNotRegex(self.src, r"(?i)api_key\s*=\s*['\"][A-Za-z0-9]{16,}")
         self.assertNotRegex(self.src, r"(?i)password\s*=\s*['\"][A-Za-z0-9]{8,}")
 
+    def test_write_files_result_ui_wired(self):
+        # 控制台要能展示落盘结果：任务详情端点 + 结构化渲染函数都得真接上
+        self.assertIn("/api/task/", self.src)
+        self.assertIn("showTaskDetail", self.src)
+        self.assertIn("renderWriteFiles", self.src)
+        self.assertIn("taskDetail", self.src)
+
+    def test_check_update_wired_in_nav_foot(self):
+        # 「检查更新」入口在左下方 nav-foot，且自动检查开关要真回写设置
+        self.assertIn("/api/updates/check", self.src)
+        self.assertIn("/api/updates/settings", self.src)
+        self.assertIn("checkUpdateBtn", self.src)
+        self.assertIn("updatePop", self.src)
+        self.assertIn("toggleAutoUpdateCheck", self.src)
+        self.assertIn("loadUpdateSettings", self.src)
+
     def test_mobile_route_wired(self):
         # 手机远程控制台：/mobile 路由必须真实接上
         self.assertIn('"/mobile"', self.src)

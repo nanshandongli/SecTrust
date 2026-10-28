@@ -158,7 +158,8 @@ APP_HTML = """<!doctype html>
     background:var(--bg);color:var(--txt);display:flex;font-size:14px}
   /* ---- 侧边栏 ---- */
   .sidebar{width:236px;background:var(--sidebar);color:var(--sidebar-txt);
-    display:flex;flex-direction:column;flex:0 0 auto;transition:width .18s ease;overflow:hidden}
+    display:flex;flex-direction:column;flex:0 0 auto;transition:width .18s ease;overflow:hidden;
+    position:relative}
   .sidebar.collapsed{width:64px}
   .brand{display:flex;align-items:center;gap:10px;padding:16px 18px;font-weight:700;
     color:#fff;font-size:15px;white-space:nowrap}
@@ -494,6 +495,20 @@ APP_HTML = """<!doctype html>
   .sidebar.collapsed .nav-group{opacity:0;height:14px;padding:4px 0}
   .nav-foot .u{color:var(--sidebar-txt);font-size:12px;display:block}
   .nav-foot .r{color:#8b949e;font-size:11px}
+  /* ---- 左下方「检查更新」浮层 ---- */
+  .update-pop{position:absolute;left:8px;right:8px;bottom:58px;background:#161b22;
+    border:1px solid #30363d;border-radius:10px;padding:12px;z-index:60;white-space:normal;
+    font-size:12px;line-height:1.55;color:#c9d1d9;max-height:360px;overflow:auto;
+    box-shadow:0 8px 24px rgba(0,0,0,.35)}
+  .update-pop.hidden{display:none}
+  .update-pop .up-hd{display:flex;align-items:center;justify-content:space-between;
+    margin-bottom:8px;font-weight:700}
+  .update-pop code{background:#0d1117;padding:1px 5px;border-radius:4px;font-size:11px}
+  .update-pop .ok{color:#3fb950}
+  .update-pop .warn{color:#d29922}
+  .update-pop .bad{color:#f85149}
+  .update-pop .muted{color:#8b949e}
+  .sidebar.collapsed .update-pop{left:4px;right:4px}
   /* ---- 工作台首页 ---- */
   .ws-hero{background:linear-gradient(135deg,rgba(59,108,255,.10),rgba(22,184,166,.08));
     border:1px solid var(--line);border-radius:14px;padding:20px 22px;margin-bottom:16px}
@@ -869,6 +884,7 @@ async function doLogin(){
     SESSION=d;
     localStorage.setItem('wbSession',d.token);
     applySession(d);
+    loadUpdateSettings();
     $('loginWrap').classList.add('hidden');
     go('workspace');
   }catch(e){$('loginErr').textContent='登录请求失败：'+e;}
@@ -879,9 +895,13 @@ function applySession(s){
   $('newTaskBtn').style.display='inline-block';
   const roleName=(window.__ROLES__||[]).find(r=>r.id===s.role);
   $('navfoot').innerHTML='v0.9 · 本地可审计<span class="u">'+esc(s.user)+' · '+esc(roleName?roleName.name:s.role)+'</span>'+
-    '<span class="r" id="logoutBtn" style="cursor:pointer;text-decoration:underline">退出登录</span>';
+    '<span class="r" id="checkUpdateBtn" style="cursor:pointer;text-decoration:underline;margin-right:8px">检查更新</span>'+
+    '<span class="r" id="logoutBtn" style="cursor:pointer;text-decoration:underline">退出登录</span>'+
+    '<div class="update-pop hidden" id="updatePop"></div>';
   const lo=$('logoutBtn');
   if(lo)lo.addEventListener('click',doLogout);
+  const cu=$('checkUpdateBtn');
+  if(cu)cu.addEventListener('click',checkUpdate);
 }
 async function doLogout(){
   try{await fetch('/api/logout',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -892,6 +912,69 @@ async function doLogout(){
   $('newTaskBtn').style.display='none';
   $('navfoot').textContent='v0.9 · 本地可审计';
 }
+
+// ---------------- 检查更新（入口在左下方 nav-foot） ----------------
+let __updateState=null;
+async function loadUpdateSettings(){
+  try{ window.__updateSettings=await jget('/api/updates/settings'); }
+  catch(e){ window.__updateSettings={auto_check:false}; }
+  // 开了自动检查就后台跑一次：只更新徽标，不主动弹面板（不打扰）
+  if((window.__updateSettings||{}).auto_check){
+    try{ __updateState=await jget('/api/updates/check'); renderUpdateBadge(); }
+    catch(e){}
+  }
+}
+function renderUpdateBadge(){
+  const d=__updateState,b=$('checkUpdateBtn');
+  if(!d||!b)return;
+  if(d.state==='remote_newer')b.innerHTML='检查更新 <span class="warn">●</span>';
+  else if(d.state==='up_to_date')b.innerHTML='检查更新 <span class="ok">✓</span>';
+  else b.textContent='检查更新';
+}
+async function checkUpdate(){
+  const pop=$('updatePop');
+  if(!pop)return;
+  pop.classList.remove('hidden');
+  pop.innerHTML='<div class="muted">正在检查…（只读比对本地 git 与远端，不会改动任何文件）</div>';
+  let d;
+  try{ d=await jget('/api/updates/check'); }
+  catch(e){
+    pop.innerHTML='<div class="up-hd">检查更新<span class="r" id="updateClose" style="cursor:pointer">✕</span></div>'+
+      '<div class="bad">检查失败：'+esc(e.message||String(e))+'</div>';
+    bindUpdateClose();return;
+  }
+  __updateState=d;renderUpdateBadge();
+  const loc=d.local||{};
+  const cls=d.state==='up_to_date'?'ok':(d.state==='remote_newer'?'warn':'muted');
+  const label=d.state==='up_to_date'?'已是最新':(d.state==='remote_newer'?'远端与本地不一致':'无法判断');
+  let h='<div class="up-hd">检查更新<span class="r" id="updateClose" style="cursor:pointer">✕</span></div>';
+  h+='<div>本地提交：<code>'+esc(loc.commit||'-')+'</code>'+
+     (loc.branch?' · 分支 <code>'+esc(loc.branch)+'</code>':'')+'</div>';
+  h+='<div class="muted">版本标识：'+esc(loc.describe||'-')+'</div>';
+  if(loc.dirty)h+='<div class="warn">⚠ 本地有 '+esc(String(loc.dirty_files||0))+' 个未提交改动</div>';
+  h+='<div style="margin-top:8px">远端状态：<span class="'+cls+'">'+esc(label)+'</span></div>';
+  if(d.message)h+='<div class="muted">'+esc(d.message)+'</div>';
+  if(d.reason)h+='<div class="muted">原因：'+esc(d.reason)+'</div>';
+  h+='<label style="display:flex;align-items:center;gap:6px;margin-top:10px">'+
+     '<input type="checkbox" id="autoUpdateCheck"'+(((window.__updateSettings||{}).auto_check)?' checked':'')+
+     '><span>打开控制台时自动检查</span></label>';
+  pop.innerHTML=h;
+  bindUpdateClose();
+  const cb=$('autoUpdateCheck');
+  if(cb)cb.addEventListener('change',toggleAutoUpdateCheck);
+}
+function bindUpdateClose(){
+  const c=$('updateClose');
+  if(c)c.addEventListener('click',()=>{const p=$('updatePop');if(p)p.classList.add('hidden');});
+}
+async function toggleAutoUpdateCheck(){
+  const el=$('autoUpdateCheck');
+  try{
+    const st=await postJSON('/api/updates/settings',{auto_check:!!(el&&el.checked)});
+    window.__updateSettings=st;
+    toast(st.auto_check?'已开启：打开控制台时自动检查更新':'已关闭自动检查');
+  }catch(e){ toast('保存失败：'+(e.message||e)); }
+}
 async function restoreSession(){
   const t=localStorage.getItem('wbSession');
   if(!t)return false;
@@ -900,6 +983,7 @@ async function restoreSession(){
     const d=await r.json();
     if(!d.ok)return false;
     SESSION=d.session;applySession(d.session);
+    loadUpdateSettings();
     $('loginWrap').classList.add('hidden');
     return true;
   }catch(e){return false;}
@@ -1965,9 +2049,17 @@ async function loadTasks(){
   const body=$('tasksBody');
   if(tasksTab==='tasks'){
     const tasks=await jget('/api/tasks?limit=500');const dag=await jget('/api/dag');
-    body.innerHTML='<div class="panel"><table class="tbl"><thead><tr><th>task_id</th><th>runner</th><th>状态</th><th>依赖/等待</th><th>创建</th></tr></thead><tbody>'+
+    body.innerHTML='<div class="panel"><table class="tbl"><thead><tr><th>task_id</th><th>runner</th><th>状态</th><th>依赖/等待</th><th>创建</th><th>结果</th></tr></thead><tbody>'+
       (tasks.length?tasks.map(t=>{const dt=(dag.tasks&&dag.tasks[t.task_id])||{};const dep=(dt.depends_on&&dt.depends_on.length)?'依赖: '+dt.depends_on.join(', '):(dt.dead_upstream&&dt.dead_upstream.length?'上游已死: '+dt.dead_upstream.join(', '):'—');
-        return '<tr><td>'+esc(t.task_id)+'</td><td>'+esc(t.runner_id||'-')+'</td><td>'+badge(t.status)+'</td><td style="color:var(--sub);font-size:12px">'+esc(dep)+'</td><td>'+fmt(t.created_at)+'</td></tr>';}).join(''):'<tr><td colspan="5" class="empty">无任务</td></tr>')+'</tbody></table></div>';
+        const res=(t.payload&&t.payload.result)||null;
+        let rtag='<span class="muted">—</span>';
+        if(res){
+          if(res.op==='write_files')rtag='<span class="tag">📝 落盘 '+((res.written||[]).length)+' 个文件</span>';
+          else if(res.op==='scan')rtag='<span class="tag">🔍 扫描 '+((res.findings_count!=null)?res.findings_count:((res.findings||[]).length))+' 处命中</span>';
+          else rtag='<span class="tag">产出</span>';
+        }
+        return '<tr style="cursor:pointer" onclick="showTaskDetail(&quot;'+esc(t.task_id)+'&quot;)"><td>'+esc(t.task_id)+'</td><td>'+esc(t.runner_id||'-')+'</td><td>'+badge(t.status)+'</td><td style="color:var(--sub);font-size:12px">'+esc(dep)+'</td><td>'+fmt(t.created_at)+'</td><td>'+rtag+'</td></tr>';}).join(''):'<tr><td colspan="6" class="empty">无任务</td></tr>')+'</tbody></table></div>'+
+      '<div id="taskDetail"></div>';
   } else if(tasksTab==='dag'){
     const dag=await jget('/api/dag');const ready=new Set(dag.ready||[]);
     body.innerHTML='<div class="panel">'+(!dag.tasks||!Object.keys(dag.tasks).length?'<div class="empty">暂无带依赖的任务</div>':
@@ -1980,6 +2072,84 @@ async function loadTasks(){
     body.innerHTML='<div class="panel"><table class="tbl"><thead><tr><th>runner_id</th><th>last_heartbeat</th><th>状态</th><th>距上次</th></tr></thead><tbody>'+
       (rs.length?rs.map(r=>'<tr><td>'+esc(r.runner_id)+'</td><td>'+fmt(r.last_heartbeat)+'</td><td class="'+(r.status==='stale'?'b-failed':'')+'">'+badge(r.status)+'</td><td>'+ago(r.last_heartbeat)+'</td></tr>').join(''):'<tr><td colspan="4" class="empty">无 Runner 心跳</td></tr>')+'</tbody></table></div>';
   }
+}
+
+// ---------------- 任务详情（落盘结果结构化渲染） ----------------
+async function showTaskDetail(tid){
+  const el=$('taskDetail');
+  if(!el)return;
+  el.innerHTML='<div class="panel"><div class="empty">加载中…</div></div>';
+  let d;
+  try{ d=await jget('/api/task/'+encodeURIComponent(tid)); }
+  catch(e){ el.innerHTML='<div class="panel"><div class="empty">加载失败：'+esc(e.message||String(e))+'</div></div>'; return; }
+  if(d.error){ el.innerHTML='<div class="panel"><div class="empty">'+esc(d.error)+'</div></div>'; return; }
+  let h='<div class="panel"><h3>'+esc(d.task_id)+' '+badge(d.status)+'</h3>';
+  h+='<div class="muted" style="font-size:12px;margin:6px 0 10px">算子：<code>'+esc(d.op||'-')+
+     '</code> · 环节：'+esc(d.name||'-')+(d.runner_id?' · 执行者：'+esc(d.runner_id):'')+'</div>';
+  if(d.instruction)h+='<div class="muted" style="font-size:12px;margin-bottom:10px">任务要求：'+esc(d.instruction)+'</div>';
+  if(d.last_feedback)h+='<div style="color:#d29922;font-size:12px;margin-bottom:10px">上次打回反馈：'+esc(d.last_feedback)+'</div>';
+  h+=renderResult(d.result);
+  h+='</div>';
+  el.innerHTML=h;
+  el.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+function renderResult(res){
+  if(!res)return '<div class="empty">该任务尚无结果（可能还没执行，或执行失败未产出）</div>';
+  if(res.op==='write_files')return renderWriteFiles(res);
+  if(res.op==='scan')return renderScanResult(res);
+  const txt=res.output||res.stdout||'';
+  if(!txt)return '<div class="empty">结果里没有可展示的文本内容</div>';
+  return '<div style="margin-top:10px"><h3>产出内容</h3>'+
+    '<pre style="white-space:pre-wrap;font-size:12.5px;margin:0">'+esc(txt)+'</pre></div>';
+}
+function renderWriteFiles(res){
+  const w=res.written||[],b=res.blocked||[],s=res.scan||{};
+  let h='<div style="margin-top:10px"><h3>代码落盘结果 <span class="tag">'+w.length+' 个文件</span>'+
+    (b.length?' <span class="tag" style="color:#c0392b">拒写 '+b.length+' 项</span>':'')+'</h3>';
+  h+='<div class="muted" style="font-size:12px;margin-bottom:8px">落盘根目录：<code>'+esc(res.root||'-')+'</code></div>';
+  if(w.length){
+    h+='<table class="tbl"><thead><tr><th>文件</th><th>字节</th><th>sha256</th><th>方式</th></tr></thead><tbody>'+
+      w.map(x=>'<tr><td><code>'+esc(x.path)+'</code></td><td>'+(x.bytes||0)+'</td>'+
+        '<td style="font-size:11px;color:var(--sub)">'+esc((x.sha256||'').slice(0,16))+'…</td>'+
+        '<td>'+(x.overwrote?'覆盖':'新建')+'</td></tr>').join('')+'</tbody></table>';
+  }else{
+    h+='<div class="empty">本次没有文件落盘（原因见下方拒写清单）</div>';
+  }
+  if(b.length){
+    h+='<h3 style="margin-top:14px">拒写清单</h3><table class="tbl"><thead><tr><th>路径</th><th>原因</th></tr></thead><tbody>'+
+      b.map(x=>'<tr><td><code>'+esc(x.path||'(未知路径)')+'</code></td>'+
+        '<td style="color:#c0392b">'+esc(x.reason||'')+'</td></tr>').join('')+'</tbody></table>';
+  }
+  const sm=s.summary||{},bad=s.should_fail;
+  h+='<div style="margin-top:14px;padding:10px;border-radius:8px;background:'+(bad?'#fdecea':'#eafaf1')+
+     ';border:1px solid '+(bad?'#f5c6c2':'#bfe5d0')+'"><strong>落盘后密钥扫描：</strong>'+
+     (s.error?('<span style="color:#d29922">'+esc(s.error)+'</span>'):
+       ((sm.total||0)+' 处命中，闸门'+(bad?'<span style="color:#c0392b">触发（高危）</span>':'<span class="ok">通过</span>')))+'</div>';
+  if((s.findings||[]).length){
+    h+='<table class="tbl" style="margin-top:10px"><thead><tr><th>严重度</th><th>规则</th><th>位置</th><th>证据（已脱敏）</th></tr></thead><tbody>'+
+      s.findings.map(f=>'<tr><td>'+esc(f.severity||'')+'</td><td>'+esc(f.rule_name||f.rule_id||'')+'</td>'+
+        '<td><code>'+esc((f.path||'')+':'+(f.line_no||''))+'</code></td>'+
+        '<td style="font-size:11px">'+esc(f.secret_masked||'')+'</td></tr>').join('')+'</tbody></table>';
+  }
+  if(res.output)h+='<pre style="white-space:pre-wrap;font-size:12px;margin-top:10px;background:var(--bg);padding:10px;border-radius:8px">'+esc(res.output)+'</pre>';
+  h+='</div>';
+  return h;
+}
+function renderScanResult(res){
+  const f=res.findings||[];
+  let h='<div style="margin-top:10px"><h3>扫描结果 <span class="tag">'+f.length+' 处命中</span></h3>';
+  h+='<div class="muted" style="font-size:12px;margin-bottom:8px">目标：<code>'+esc(res.target||'-')+
+     '</code> · 闸门：'+(res.gate_fail?'<span style="color:#c0392b">触发</span>':'<span class="ok">通过</span>')+'</div>';
+  if(f.length){
+    h+='<table class="tbl"><thead><tr><th>严重度</th><th>规则</th><th>位置</th><th>证据（已脱敏）</th></tr></thead><tbody>'+
+      f.map(x=>'<tr><td>'+esc(x.severity||'')+'</td><td>'+esc(x.rule_name||x.rule_id||'')+'</td>'+
+        '<td><code>'+esc((x.path||'')+':'+(x.line_no||''))+'</code></td>'+
+        '<td style="font-size:11px">'+esc(x.secret_masked||'')+'</td></tr>').join('')+'</tbody></table>';
+  }else{
+    h+='<div class="empty">未发现命中</div>';
+  }
+  h+='</div>';
+  return h;
 }
 
 // ---------------- 审计轨迹 ----------------
@@ -2308,6 +2478,8 @@ class Handler(BaseHTTPRequestHandler):
     notify_engine = None
     _chat = None
     _plan = None
+    # 方法名与缓存属性必须错开：同名会让方法覆盖掉缓存槽（_chat/_plan 同此纪律）
+    _update_checker = None
 
     def _json(self, obj, code=200):
         data = json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8")
@@ -2365,6 +2537,13 @@ class Handler(BaseHTTPRequestHandler):
                 limit=int(qs.get("limit", ["500"])[0])))
         if path == "/api/runners":
             return self._json(self.registry.list_runners(stale_after=90))
+        if path.startswith("/api/task/"):
+            tid = path[len("/api/task/"):]
+            return self._json(self._task_detail(tid))
+        if path == "/api/updates/check":
+            return self._json(self._updater().check())
+        if path == "/api/updates/settings":
+            return self._json(self._updater().settings())
         if path == "/api/approvals":
             return self._json(self.approval.list_approvals(
                 status=qs.get("status", [None])[0],
@@ -2899,6 +3078,43 @@ class Handler(BaseHTTPRequestHandler):
                 llm=LlmEngine(self.model_profiles))
         return Handler._chat
 
+    def _updater(self):
+        """「检查更新」检查器（懒加载单例）：本地 git 仓库 vs 远端，只读。"""
+        if getattr(Handler, "_update_checker", None) is None:
+            from updates import UpdateChecker
+            Handler._update_checker = UpdateChecker(
+                repo_dir=self.project_root,
+                data_dir=self.assistant_data_dir or "data")
+        return Handler._update_checker
+
+    def _task_detail(self, task_id):
+        """单个任务详情（含 result）——供落盘结果等结构化产出直接渲染。
+
+        result 是执行层写回的完整 dict（op=write_files 时含 written/blocked/
+        scan），前端据此渲染，不需要再猜格式。
+        """
+        try:
+            t = self.registry.get_task(task_id)
+        except Exception as e:                      # noqa: BLE001
+            return {"error": "读取任务失败：%s" % e}
+        if not t:
+            return {"error": "任务不存在: %s" % task_id}
+        payload = t.get("payload") or {}
+        return {
+            "task_id": t.get("task_id"),
+            "status": t.get("status"),
+            "runner_id": t.get("runner_id"),
+            "depends_on": t.get("depends_on") or [],
+            "created_at": t.get("created_at"),
+            "updated_at": t.get("updated_at"),
+            "op": payload.get("op", ""),
+            "name": payload.get("name", ""),
+            "instruction": payload.get("instruction", ""),
+            "result": payload.get("result"),
+            "log": payload.get("log") or [],
+            "last_feedback": payload.get("last_feedback", ""),
+        }
+
     def _chat_context(self):
         """喂给对话引擎的当前审计态（只读聚合）。"""
         return {
@@ -2918,6 +3134,9 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, OSError):
             return self._json({"error": "bad request"}, 400)
 
+        if path == "/api/updates/settings":
+            # 只收 auto_check 布尔开关：不存凭据，也不触发任何写仓库动作
+            return self._json(self._updater().save_settings(payload))
         if path == "/api/chat":
             question = str(payload.get("question") or "")
             history = payload.get("history") or []

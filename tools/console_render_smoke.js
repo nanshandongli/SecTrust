@@ -34,6 +34,7 @@ function makeEl(id) {
     set innerHTML(v) { el._html = String(v); },
     insertAdjacentHTML(pos, h) { el._html += String(h); },
     appendChild() {}, remove() {}, focus() {}, scrollTop: 0, scrollHeight: 0,
+    scrollIntoView() {},
     addEventListener() {}, removeEventListener() {},
     querySelector: () => null, querySelectorAll: () => [],
     getAttribute: () => null, setAttribute() {},
@@ -173,6 +174,93 @@ const loaders = ['loadWorkspace', 'loadNewTask', 'loadRoster', 'loadAssistants',
       errors.push('runFirstPrinciples(unavailable): ' + e.message);
     }
     sandbox.fetch = realFetch;
+  }
+
+  // ---- 落盘结果渲染（op=write_files 的结构化 result 直接消费）----
+  const RES = {
+    op: 'write_files', root: 'C:\\tmp\\repo',
+    written: [
+      { path: 'src/calc.py', bytes: 31, sha256: '8f75a68646c879fd0cff5c02708c010fb1c01d67ef9930d4e419106feb7897aa', overwrote: false },
+      { path: 'src/util.py', bytes: 25, sha256: 'e2ad06d0f0362f04699275c8159f6c75eabef10dee9ddb1a23769216092692eb', overwrote: true },
+    ],
+    blocked: [{ path: '.env', reason: '拒绝写入敏感文件：.env' }],
+    scan: { should_fail: false, summary: { total: 0 }, findings: [] },
+    output: '已落盘 2 个文件（根目录：C:\\tmp\\repo）',
+  };
+  if (typeof sandbox.renderWriteFiles !== 'function') {
+    errors.push('renderWriteFiles: 未定义');
+  } else {
+    const h = sandbox.renderWriteFiles(RES);
+    for (const f of ['代码落盘结果', 'src/calc.py', 'src/util.py', '覆盖',
+                     '拒写', '.env', '拒绝写入敏感文件', '密钥扫描', '闸门']) {
+      if (h.indexOf(f) < 0) errors.push('落盘结果渲染缺少: ' + f);
+    }
+    console.log('  ok  renderWriteFiles (%d chars)', h.length);
+    // 高危：必须渲染"触发"，且把命中规则/严重度摆出来
+    const BAD = JSON.parse(JSON.stringify(RES));
+    BAD.scan = { should_fail: true, summary: { total: 1 }, findings: [
+      { severity: 'critical', rule_name: 'Slack Bot Token', path: 'src/leak.py',
+        line_no: 1, secret_masked: 'xoxb-…' }] };
+    const h2 = sandbox.renderWriteFiles(BAD);
+    if (h2.indexOf('触发') < 0) errors.push('落盘结果：高危时未渲染"触发"');
+    if (h2.indexOf('Slack Bot Token') < 0) errors.push('落盘结果：未渲染扫描命中规则');
+    if (h2.indexOf('critical') < 0) errors.push('落盘结果：未渲染严重度');
+    console.log('  ok  renderWriteFiles(高危) (%d chars)', h2.length);
+  }
+
+  // ---- 任务详情：点开任务 → /api/task/<id> ----
+  if (typeof sandbox.showTaskDetail !== 'function') {
+    errors.push('showTaskDetail: 未定义');
+  } else {
+    const realFetch2 = sandbox.fetch;
+    sandbox.fetch = () => Promise.resolve({ status: 200, ok: true,
+      json: () => Promise.resolve({
+        task_id: 't1', status: 'completed', op: 'write_files', name: '代码落盘',
+        runner_id: 'exec-1', instruction: '把代码落盘',
+        result: { op: 'write_files', root: 'C:\\tmp',
+                  written: [{ path: 'a.py', bytes: 3, sha256: 'f'.repeat(64), overwrote: false }],
+                  blocked: [], scan: { should_fail: false, summary: { total: 0 } } } }) });
+    try {
+      await sandbox.showTaskDetail('t1');
+      const hd = $('taskDetail')._html || '';
+      for (const f of ['t1', '代码落盘', 'a.py']) {
+        if (hd.indexOf(f) < 0) errors.push('任务详情渲染缺少: ' + f);
+      }
+      console.log('  ok  showTaskDetail (%d chars)', hd.length);
+    } catch (e) { errors.push('showTaskDetail: ' + e.message); }
+    sandbox.fetch = realFetch2;
+  }
+
+  // ---- 检查更新（左下方浮层）：关键是查不到不许显示"已是最新" ----
+  if (typeof sandbox.checkUpdate !== 'function') {
+    errors.push('checkUpdate: 未定义');
+  } else {
+    const realFetch3 = sandbox.fetch;
+    // a) 已是最新
+    sandbox.fetch = () => Promise.resolve({ status: 200, ok: true,
+      json: () => Promise.resolve({ state: 'up_to_date', message: '已是最新：本地 HEAD 与远端 origin 一致',
+        local: { commit: 'abc123456789', branch: 'main', describe: 'v1.0', dirty: false, dirty_files: 0 } }) });
+    try {
+      await sandbox.checkUpdate();
+      const hu = $('updatePop')._html || '';
+      for (const f of ['已是最新', 'abc123456789', 'main', '自动检查']) {
+        if (hu.indexOf(f) < 0) errors.push('检查更新渲染缺少: ' + f);
+      }
+      console.log('  ok  checkUpdate(up_to_date) (%d chars)', hu.length);
+    } catch (e) { errors.push('checkUpdate: ' + e.message); }
+    // b) 无法判断：必须显示"无法判断"+原因，绝不能显示"已是最新"
+    sandbox.fetch = () => Promise.resolve({ status: 200, ok: true,
+      json: () => Promise.resolve({ state: 'unknown', reason: '无法访问远端 origin：模拟网络不可达',
+        local: { commit: 'abc123456789', branch: 'main', describe: 'v1.0', dirty: false, dirty_files: 0 } }) });
+    try {
+      await sandbox.checkUpdate();
+      const hk = $('updatePop')._html || '';
+      if (hk.indexOf('无法判断') < 0) errors.push('检查更新：unknown 未显示"无法判断"');
+      if (hk.indexOf('模拟网络不可达') < 0) errors.push('检查更新：unknown 未显示原因');
+      if (hk.indexOf('已是最新') >= 0) errors.push('检查更新：unknown 时不得显示"已是最新"');
+      console.log('  ok  checkUpdate(unknown 不谎报)');
+    } catch (e) { errors.push('checkUpdate(unknown): ' + e.message); }
+    sandbox.fetch = realFetch3;
   }
   console.log('');
   if (errors.length) {

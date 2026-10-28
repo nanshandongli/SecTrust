@@ -101,6 +101,7 @@ py-modules = [
     "task_registry",
     "threads",
     "trace",
+    "updates",
     "voice",
 ]
 # 子包（含 __init__.py 的全部目录）
