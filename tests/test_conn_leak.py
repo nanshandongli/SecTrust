@@ -1,8 +1,8 @@
 """SQLite 连接泄漏回归测试（2026-10-25 巡检发现并修复）。
 
 背景：`with self._conn() as c:` 是**事务上下文**（commit/rollback），**不是关闭**。
-ballot.py 曾因这个模式泄漏连接（已修）；本次巡检发现 arbiter.py / assets.py /
-games/xiangqi_table.py 存在完全相同的模式——每调一次方法泄漏一个
+ballot.py 曾因这个模式泄漏连接（已修）；本次巡检发现 arbiter.py / assets.py
+存在完全相同的模式——每调一次方法泄漏一个
 sqlite3.Connection（Windows 上表现为句柄累积 + ResourceWarning）。
 
 设计原则与既有测试一致：**不测实现细节，测承诺**。
@@ -22,7 +22,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import arbiter                                                        # noqa: E402
 import assets                                                         # noqa: E402
-from games.xiangqi_table import GameTable                               # noqa: E402
 
 
 class _ConnectCounter:
@@ -72,16 +71,6 @@ class TestNoConnectionLeak(unittest.TestCase):
         self.assertEqual(cc.count, 1,
                          "AssetStore 每调一次方法就新建连接（连接泄漏）")
         s.close()
-
-    # ---------------------------------------------------------------- 象棋
-    def test_xiangqi_table_connects_once(self):
-        with _ConnectCounter() as cc:
-            t = GameTable(db_path=self._db("xq.db"))
-            for _ in range(50):
-                t.get_state("no-such-game")
-        self.assertEqual(cc.count, 1,
-                         "GameTable 每调一次方法就新建连接（连接泄漏）")
-        t.close()
 
     # ---------------------------------------------------------------- 通用契约
     def test_close_then_reconnect_makes_new_connection(self):

@@ -84,7 +84,6 @@ proposal voting (`ballot_*`), compliance scanning, long-term memory, approval qu
 | `scanner/` | Compliance scanner: 78 detection rules, entropy engine, fingerprints, SARIF, gitleaks benchmark (F1 = 1.0) |
 | `memory_semantic.py` / `memory_hybrid.py` | Memory: BM25 + entities + optional real embeddings (Ollama/OpenAI), vector-space guards against silent dimensional corruption |
 | `channels/` | WeCom / Feishu adapters with real AES-256-CBC callback verification |
-| `games/` | Two-player Chinese chess — a live proof that the base supports real-time multi-agent play |
 | `execution/` | **Execution layer**: per-bot workspace (path-escape refusal, atomic state) + resident daemon (claim → sandbox → approval gate → complete/fail) + programmable browser (Edge CDP over a hand-rolled stdlib WebSocket client; degrades to one-shot headless batch) |
 | `scheduler.py` | Scheduler: pure-stdlib cron + interval; fires tasks on due, never double-fires across restarts |
 | `connectors/` | Connector framework (unknown action refused, unconfigured = explicit error, never fake data) + GitHub REST + IMAP email trigger |

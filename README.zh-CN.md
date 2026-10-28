@@ -68,7 +68,6 @@ runner 用 `--api-base` 即可把登记处/心跳写到远程中心，从而放�
 | `planner.py` | **编排层 · 需求拆解器**（规则模板版）：一句需求 → 带技能/质量规则的子任务 DAG，槽位抽不到不编造 |
 | `arbiter.py` | **编排层 · 冲突仲裁**：多 AI 产出版本登记，默认人工裁，可选 recency/source_priority/evidence |
 | `assets.py` | **编排层 · 素材库**：blake2b 内容寻址去重 + 版本链 + 任务关联 + 软删除 |
-| `games/` | **多 AI 协同最小原型**：两人中国象棋（共享棋局表 + CAS 回合锁 + Broker 观战），验证底座可支撑多方博弈 |
 | `execution/` | **执行层**：`workspace.py` 每 Bot 独立工作区（越权路径拒绝 + 状态原子写）+ `daemon.py` 常驻执行守护（认领→沙箱执行→审批门→complete/fail）+ `browser.py` 可编程浏览器（Edge CDP，手写 WebSocket 客户端；失败降级一次性 headless 批处理） |
 | `scheduler.py` | **调度器**：纯标准库 cron 五段式 + interval，到期向登记处建任务（重启不重复触发；登记失败不推进） |
 | `connectors/` | **连接器框架**：`base.py` 契约（未知 action 拒绝 / 未配置明确报错不返假数据）+ `github.py`（urllib REST）+ `imap.py`（邮件触发建任务，登记成功才标已读） |
@@ -80,7 +79,7 @@ runner 用 `--api-base` 即可把登记处/心跳写到远程中心，从而放�
 | `demo.py` | 5 条最小验收的自测脚本（含真·跨进程并发） |
 | `DESIGN.md` | **多渠道/多技能/多模型 运行时扩展设计**（架构、信任边界、密钥管理） |
 | `.env.example` | 全部环境变量清单（密钥只从环境变量读） |
-| `tests/` | 单元测试（unittest；验收 + WAL 健壮性 + 运行时回归 + 象棋原型 + DAG 调度 + 编排层应用 + 执行层 + 消息框架 + 轨迹回放 + 成本打点 + Docker 沙箱八条规格 + 跨机协同三件套 + 真实多机压测 + 通用结果汇总），共 **781** 例（全过） |
+| `tests/` | 单元测试（unittest；验收 + WAL 健壮性 + 运行时回归 + DAG 调度 + 编排层应用 + 执行层 + 消息框架 + 轨迹回放 + 成本打点 + Docker 沙箱八条规格 + 跨机协同三件套 + 真实多机压测 + 通用结果汇总），共 **781** 例（全过） |
 | `tools/self_audit.py` | **自检评测脚本**：从代码与运行时取证（功能清点/性能实测/扫描检出率/记忆/技能/证据门禁/安全穿透），输出 JSON |
 | `tools/cluster_stress_test.py` | **真实多机压测**：起真实 TCP 协调服务器，拉 N 个真实 OS 进程模拟多机，压跨机锁/心跳/死信互斥与延迟，并跑真实 daemon 集群校验零重复执行；结果落 data/cluster_stress_*.json+.md |
 | `tools/pipeline_run.py` | **端到端编排闭环演示**：建 DAG → 真实 ExecutionDaemon 执行 → ResultSummarizer 汇总成交付物落盘 |
