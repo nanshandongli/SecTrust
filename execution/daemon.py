@@ -13,6 +13,10 @@ execution/daemon.py —— 常驻执行 daemon（"AI 同事真正干活"的本�
                                                   模型驱动的执行归 AgentRunner
      {"op":"llm",   "instruction":"..."}           → 调真实算力模型产出文本
                                                   （无模型则如实失败，不伪造）
+     {"op":"write_files", "files":[{path,content}]}→ 把文件真正落盘到工作区：
+                                                  路径校验 + 原子写 + 落盘后
+                                                  密钥扫描；也支持给模型产出
+                                                  原文自动提取代码块
      {"op":"noop"}                                → 空转（测试/演练用）
 4. 审批门：payload 带 approval_action（send/publish/buy/delete 语义）时，
    **先请求人工批准再执行**；被拒 → 任务转 needs_human 带 feedback，不执行；
@@ -199,6 +203,8 @@ class ExecutionDaemon:
             return self._execute_llm(task_id, payload)
         if op == "scan":
             return self._execute_scan(task_id, payload)
+        if op == "write_files":
+            return self._execute_write_files(task_id, payload)
         if op == "shell":
             cmd = payload.get("cmd")
             if not cmd:
@@ -225,7 +231,8 @@ class ExecutionDaemon:
             self.workspace.write_state({"last_skill": name, "last_skill_at": time.time()})
             return True, {"op": "skill", "name": name, "description": spec.description,
                           "body_bytes": spec.bytes}, None
-        return False, {}, "未知 op: %r（支持 shell/skill/noop/llm）" % op
+        return False, {}, ("未知 op: %r（支持 shell/skill/noop/llm/scan/write_files）"
+                           % op)
 
     # ---------------- LLM 执行（多 AI 流水线真正干活的那一步） ----------------
     def _execute_llm(self, task_id: str, payload: dict):
@@ -336,6 +343,77 @@ class ExecutionDaemon:
             "summary": summary,
         }, None
 
+    # ---------------- 文件落盘（AI 同事真正把代码写进仓库） ----------------
+    def _execute_write_files(self, task_id: str, payload: dict):
+        """op=write_files：把 AI 同事产出的代码真正落到磁盘工作区。
+
+        三种喂法：
+        1. files: [{"path": "src/app.py", "content": "..."}] —— 显式清单；
+        2. extract: "<模型产出的 markdown 原文>" —— 自动提取 fenced 代码块；
+        3. from_upstream: true —— 直接消费上游（依赖）任务的 LLM 产出原文。
+
+        安全纪律（本产品的本分）：
+        · 路径一律过 BotWorkspace._resolve()，越出工作区即拒写；
+        · 拒绝覆盖 .git/、data/、密钥与证书等仓库根基；
+        · 原子写（临时文件 + os.replace），不留半个文件；
+        · **落盘后立刻跑密钥扫描**，命中高危由 process_task 挂起等人工——
+          而不是让带凭证的代码顺畅走到下一步。
+        """
+        from .writer import (extract_code_blocks, normalize_files,
+                             plan_from_payload, write_files)
+        try:
+            if payload.get("from_upstream"):
+                text = self._upstream_text(task_id)
+                if not text.strip():
+                    return False, {}, "from_upstream 但取不到上游产出文本"
+                blocks = extract_code_blocks(text)
+                if not blocks:
+                    return False, {}, ("上游产出里没有 fenced 代码块，无法落盘"
+                                       "（模型可能只给了说明没给代码）")
+                items, blocked = normalize_files(blocks)
+            else:
+                items, blocked = plan_from_payload(payload)
+        except Exception as e:          # noqa: BLE001 —— 解析失败如实报，不猜
+            return False, {}, "落盘清单解析失败：%s" % e
+        if not items:
+            return False, {"op": "write_files", "written": [],
+                           "blocked": blocked}, \
+                "没有可落盘的文件（全部被拒或清单为空）"
+        try:
+            res = write_files(
+                self.workspace, items, blocked=blocked,
+                root=payload.get("root"),
+                allow_outside=bool(payload.get("allow_outside")),
+                overwrite=bool(payload.get("overwrite")),
+            )
+        except Exception as e:         # noqa: BLE001
+            return False, {}, "落盘失败：%s" % e
+        if not res.get("written"):
+            return False, res, "所有文件均被拒写（见 blocked 原因）"
+        return True, res, None
+
+    def _upstream_text(self, task_id: str) -> str:
+        """取所有上游任务的原始产出文本（供 write_files 提取代码块）。
+
+        取不到返回空串：落盘阶段会据此如实失败，而不是凭空造文件。
+        """
+        bits = []
+        try:
+            task = self.reg.get_task(task_id)
+            for dep in (task or {}).get("depends_on") or []:
+                up = self.reg.get_task(dep)
+                if not up:
+                    continue
+                p = up.get("payload") or {}
+                out = p.get("result") or p.get("output")
+                if isinstance(out, dict):
+                    out = out.get("output") or out.get("stdout") or ""
+                if out:
+                    bits.append(str(out))
+        except Exception:              # noqa: BLE001 —— 上下文是旁路
+            pass
+        return "\n\n".join(bits)
+
     def _resolve_profile_id(self, profiles, payload: dict):
         """把 payload 里的模型指向解析成一个 profile id。
 
@@ -398,7 +476,8 @@ class ExecutionDaemon:
         执行链（按场景补全后的真实闭环）：
         1. 审批门：payload 声明 approval_action（含 high_risk）必须人工批准；
         2. **投票汇合**：ballot_gather 任务跳过 LLM，直接 rank() 出确定性推荐；
-        3. 执行：按 op 派发（shell/skill/llm/scan/noop）；
+        3. 执行：按 op 派发（shell/skill/llm/scan/write_files/noop）；
+        3.5 落盘闸门：write_files 落盘后扫描，命中高危 → needs_human 等人工；
         4. **质量门**：payload 带 quality 规则时送 QualityGate，不合格打回重做
            （rework），超限升级 needs_human——"递归校验"真实发生；
         5. **投票登记**：带 ballot 元信息的分支任务完成后 submit_proposal 登记打分；
@@ -434,6 +513,18 @@ class ExecutionDaemon:
             self.sched.fail(task_id, error=error or "执行失败")
             self._note_cluster_failure(task_id, error or "执行失败")
             return "failed"
+
+        # ---- 3.5) 落盘后密钥闸门 ----
+        # AI 同事写进去的代码若混了真实凭证，就地挂起等人工：文件**已经写入**，
+        # 不能假装没发生，也不能执行层偷偷删——由人来确认或回滚。
+        if isinstance(result, dict) and result.get("op") == "write_files":
+            scan = result.get("scan") or {}
+            if scan.get("should_fail"):
+                why = scan.get("fail_reason") or "命中高危凭证"
+                self.reg.update_task_status(task_id, "needs_human")
+                self.reg.set_progress(task_id, log=[
+                    "落盘完成但触发密钥闸门：%s——文件已写入，等待人工确认或回滚" % why])
+                return "needs_human"
 
         text_out = result.get("output") or result.get("stdout") or ""
         already_completed = False

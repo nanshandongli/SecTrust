@@ -184,10 +184,11 @@ class TestBuildWithScheduler(unittest.TestCase):
     def test_build_scheduler_waves_match_plan(self):
         plan = Planner().decompose("开发一个登录功能", tier="complex")
         plan.build(self.s, plan_id="p1")
+        # 波次含 write_code（代码落盘）：前端/后端产出先落成文件，再进测试
         self.assertEqual(self.s.waves(),
                          [["p1/requirements"], ["p1/architecture"],
-                          ["p1/backend", "p1/frontend"], ["p1/testing"],
-                          ["p1/docs"]])
+                          ["p1/backend", "p1/frontend"], ["p1/write_code"],
+                          ["p1/testing"], ["p1/docs"]])
 
     def test_build_twice_rejected(self):
         plan = Planner().decompose("做一场营销活动")

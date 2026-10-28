@@ -248,10 +248,18 @@ TEMPLATES: list[dict] = [
              "depends_on": ["architecture"],
              "quality": {"min_chars": 100, "required": ["接口"],
                          "format": "markdown"}},
-            {"key": "testing", "name": "测试验证",
-             "instruction": "为{topic}编写并执行测试用例（单元+集成），记录覆盖率与失败项。",
-             "skill": "qa-engineer", "model": "",
+            {"key": "write_code", "name": "代码落盘",
+             "instruction": "把前端实现与后端实现产出的代码提取为文件并写入工作区，"
+                            "随后自动跑密钥扫描；命中高危凭证则挂起等人工确认。",
+             "skill": "", "model": "",
+             "op": "write_files", "from_upstream": True, "overwrite": True,
              "depends_on": ["frontend", "backend"],
+             "quality": {"min_chars": 10, "required": ["落盘"]}},
+            {"key": "testing", "name": "测试验证",
+             "instruction": "为{topic}编写并执行测试用例（单元+集成），记录覆盖率与失败项。"
+                            "代码已落盘到工作区，请基于实际文件测试。",
+             "skill": "qa-engineer", "model": "",
+             "depends_on": ["write_code"],
              "quality": {"min_chars": 100, "required": ["测试"],
                          "forbidden": ["TODO"], "format": "markdown"}},
             {"key": "docs", "name": "文档编写",
@@ -680,6 +688,13 @@ class Plan:
         # scan op 的扫描目标（已在 decompose 阶段做了 {slot} 填充）
         if s.get("target"):
             p["target"] = s["target"]
+        # write_files op 的落盘控制（把产出的代码真正写进工作区）：
+        #   from_upstream —— 直接消费上游任务产出的代码块；
+        #   overwrite     —— 允许覆盖已存在文件（迭代开发场景的常态）；
+        #   root          —— 落盘根目录，仍受工作区边界约束。
+        for k in ("from_upstream", "overwrite", "root", "files"):
+            if s.get(k):
+                p[k] = s[k]
         return p
 
 
@@ -756,6 +771,14 @@ class Planner:
                 sub["approval_action"] = st["approval_action"]
             if target:
                 sub["target"] = target
+            # write_files op 的落盘控制（把产出的代码真正写进工作区）：
+            #   from_upstream —— 直接消费上游任务产出的代码块；
+            #   overwrite     —— 允许覆盖已存在文件（迭代开发的常态）；
+            #   root / files  —— 静态落盘根目录与清单。
+            # 不写这里，落盘工序拿到的是空 payload（此前正是断在这一步）。
+            for k in ("from_upstream", "overwrite", "root", "files"):
+                if st.get(k):
+                    sub[k] = st[k]
             subtasks.append(sub)
 
         # ---- 成本路由：先分档，再按档裁剪 ----
