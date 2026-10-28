@@ -334,6 +334,8 @@ APP_HTML = """<!doctype html>
   .tabs button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
   .btn{border:1px solid var(--accent);background:var(--accent);color:#fff;padding:7px 14px;border-radius:8px;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block}
   .btn.ghost{background:transparent;color:var(--accent)}
+  .btn.ok{background:#2e7d32;border-color:#2e7d32}
+  .btn.bad{background:#b3261e;border-color:#b3261e}
   .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
   code.k{background:var(--chip);padding:1px 6px;border-radius:5px;font-size:12px}
   .warnbar{background:#fff4e5;color:#b26a00;border:1px solid #ffe0b2;border-radius:10px;padding:10px 14px;font-size:13px;margin-bottom:16px}
@@ -685,6 +687,16 @@ async function postJSON(u, body){
   const t=localStorage.getItem('wbSession'); if(t) headers['X-Session-Token']=t;
   const r=await fetch(u,{method:'POST',headers:headers,body:JSON.stringify(body||{})});
   return {status:r.status, data:await r.json()};
+}
+function toast(msg, kind){
+  let el=document.getElementById('wbToast');
+  if(!el){el=document.createElement('div');el.id='wbToast';
+    el.style.cssText='position:fixed;right:18px;bottom:18px;z-index:9999;max-width:360px;'+
+      'padding:10px 14px;border-radius:8px;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.18);'+
+      'background:#222;color:#fff;opacity:0;transition:opacity .2s';document.body.appendChild(el);}
+  el.style.background = (kind==='err')?'#b3261e':(kind==='ok'?'#2e7d32':'#222');
+  el.textContent=msg; el.style.opacity='1';
+  clearTimeout(el._t); el._t=setTimeout(function(){el.style.opacity='0';},2600);
 }
 
 /* ---------------- 添加模型弹窗 · 全局事件（弹窗在 body 顶层，任何面板都能开） ---------------- */
@@ -2091,10 +2103,26 @@ async function loadApprovals(){
   $('apprBody').innerHTML='<div class="panel"><div class="tabs">'+
     tabs.map(t=>'<button class="'+(apprTab===t[0]?'active':'')+'" onclick="setApprTab(&quot;'+t[0]+'&quot;)">'+esc(t[1])+'</button>').join('')+
     '</div>'+
-    '<table class="tbl"><thead><tr><th>approval_id</th><th>action</th><th>detail</th><th>状态</th><th>任务</th><th>决策人</th><th>证据链</th></tr></thead><tbody>'+
-    (shown.length?shown.map(x=>'<tr><td>'+esc(x.approval_id)+'</td><td>'+esc(x.action)+'</td><td class="pre">'+esc(x.detail)+'</td><td>'+badge(x.status)+'</td><td>'+esc(x.task_id||'-')+'</td><td>'+(x.decided_by||'-')+'</td><td><button class="btn ghost" onclick="loadApproval(&quot;'+esc(x.approval_id)+'&quot;)">查看</button></td></tr>').join(''):'<tr><td colspan="7" class="empty">该状态下无审批记录</td></tr>')+'</tbody></table></div>';
+    '<table class="tbl"><thead><tr><th>approval_id</th><th>action</th><th>detail</th><th>状态</th><th>任务</th><th>决策人</th><th>证据链</th><th>操作</th></tr></thead><tbody>'+
+    (shown.length?shown.map(x=>{
+      const act = (x.status==='pending')
+        ? '<button class="btn ok" onclick="decideApproval(&quot;'+esc(x.approval_id)+'&quot;,&quot;approve&quot;)">通过</button> '+
+          '<button class="btn bad" onclick="decideApproval(&quot;'+esc(x.approval_id)+'&quot;,&quot;reject&quot;)">驳回</button>'
+        : '<span class="muted">—</span>';
+      return '<tr><td>'+esc(x.approval_id)+'</td><td>'+esc(x.action)+'</td><td class="pre">'+esc(x.detail)+'</td><td>'+badge(x.status)+'</td><td>'+esc(x.task_id||'-')+'</td><td>'+(x.decided_by||'-')+'</td><td><button class="btn ghost" onclick="loadApproval(&quot;'+esc(x.approval_id)+'&quot;)">查看</button></td><td>'+act+'</td></tr>';
+    }).join(''):'<tr><td colspan="8" class="empty">该状态下无审批记录</td></tr>')+'</tbody></table></div>';
 }
 function setApprTab(t){apprTab=t;loadApprovals();}
+async function decideApproval(aid, decision){
+  if(!confirm((decision==='approve'?'确认通过':'确认驳回')+'审批 '+aid+' ？')) return;
+  const r=await postJSON('/api/approvals/decide',{approval_id:aid, decision:decision});
+  if(r.status===200 && r.data && r.data.ok){
+    toast((decision==='approve'?'已通过':'已驳回')+'：'+aid,'ok');
+    loadApprovals(); $('apprDetail').innerHTML='';
+  }else{
+    toast('审批失败：'+((r.data&&r.data.error)||r.status),'err');
+  }
+}
 async function loadApproval(aid){
   const el=$('apprDetail');el.innerHTML='<div class="panel"><div class="empty">加载中…</div></div>';
   const d=await jget('/api/audit/approval/'+encodeURIComponent(aid));

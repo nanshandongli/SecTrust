@@ -360,6 +360,21 @@ class TestFrontendWiring(unittest.TestCase):
         # 审批决策写接口（移动端「通过/拒绝」依赖它）
         self.assertIn('"/api/approvals/decide"', self.src)
 
+    def test_approval_action_buttons_wired(self):
+        # 审批中心必须提供「通过/驳回」可视化按钮，真正调用决策端点
+        # （之前只靠审批中心 API，UI 入口缺一步）
+        self.assertIn("function decideApproval", self.src)
+        self.assertIn('decideApproval(', self.src)
+        self.assertIn('"/api/approvals/decide"', self.src)
+        # 通过/驳回按钮的样式类（视觉可区分）
+        self.assertIn('class="btn ok"', self.src)
+        self.assertIn('class="btn bad"', self.src)
+        # 审批表新增「操作」列，且只有 pending 行可操作
+        self.assertIn("操作", self.src)
+        self.assertIn("x.status==='pending'", self.src)
+        # 轻量 toast 反馈（不依赖外部库）
+        self.assertIn("function toast", self.src)
+
 
 class TestMobileConsolePage(unittest.TestCase):
     """移动端页面（独立 SPA）的契约：结构与接口接线不能壳化。"""

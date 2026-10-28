@@ -378,7 +378,7 @@ TEMPLATES: list[dict] = [
              "instruction": "对 {repo_path} 做密钥/凭证扫描，列出命中的文件、规则与"
                             "处置建议（高危项须阻断合入）。",
              "skill": "", "model": "", "op": "scan", "target": "{repo_path}",
-             "depends_on": ["code_review"],
+             "depends_on": [],
              "quality": {}},
             {"key": "report", "name": "安全报告汇总",
              "instruction": "综合代码审查与密钥扫描结论，输出安全报告：风险等级、"
