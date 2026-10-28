@@ -211,6 +211,7 @@ TEMPLATES: list[dict] = [
                             "{topic}完整方案包，标注未决事项。",
              "skill": "editor", "model": "",
              "depends_on": ["compliance", "roi"],
+             "approval_action": "publish",
              "quality": {"min_chars": 400, "required": ["方案", "汇总"],
                          "format": "markdown"}},
         ],
@@ -358,6 +359,33 @@ TEMPLATES: list[dict] = [
              "skill": "editor", "model": "",
              "depends_on": ["review"],
              "quality": {"min_chars": 200, "required": ["交付"],
+                         "format": "markdown"}},
+        ],
+    },
+    {
+        "name": "secure_dev",
+        "title": "内部研发安全工具链",
+        "keywords": ("代码审查", "密钥扫描", "安全扫描", "内审", "合规审查",
+                     "代码安全", "secret", "密钥", "凭证", "安全工具链", "安全审计"),
+        "stages": [
+            {"key": "code_review", "name": "代码安全审查",
+             "instruction": "对 {repo_path} 做安全视角的代码审查：注入/越权/反序列化/"
+                            "硬编码凭证/日志泄露/依赖风险，输出风险清单与修复建议。",
+             "skill": "security-reviewer", "model": "",
+             "quality": {"min_chars": 300, "required": ["风险", "修复"],
+                         "forbidden": ["TODO"], "format": "markdown"}},
+            {"key": "secret_scan", "name": "密钥扫描",
+             "instruction": "对 {repo_path} 做密钥/凭证扫描，列出命中的文件、规则与"
+                            "处置建议（高危项须阻断合入）。",
+             "skill": "", "model": "", "op": "scan", "target": "{repo_path}",
+             "depends_on": ["code_review"],
+             "quality": {}},
+            {"key": "report", "name": "安全报告汇总",
+             "instruction": "综合代码审查与密钥扫描结论，输出安全报告：风险等级、"
+                            "必须修复项、是否阻断发布。",
+             "skill": "security-reporter", "model": "",
+             "depends_on": ["secret_scan"],
+             "quality": {"min_chars": 200, "required": ["风险等级", "修复"],
                          "format": "markdown"}},
         ],
     },
@@ -581,6 +609,10 @@ class Plan:
                 "ballot_gather": {"group": group, "n": n,
                                   "branch_ids": branch_ids},
             }
+            # 终态阶段的审批动作（如发布审批）随汇合点继承：选出的方案同样
+            # 需要人工审批后才算发布——择优与发布审批两条纪律都保留。
+            if s.get("approval_action"):
+                gather_payload["approval_action"] = s["approval_action"]
             if trace_id:
                 gather_payload["trace_id"] = trace_id
             scheduler.add_task(gid, payload=gather_payload,
@@ -624,11 +656,11 @@ class Plan:
         return created
 
     def _payload(self, pid: str, s: dict, key: str) -> dict:
-        return {
+        p = {
             # op 必须写全：执行层（execution/daemon.py）按 op 派发。
             # 缺 op 的任务被认领后必然 failed（"未知 op: ''"）——
             # 那是登记时没写全，不是执行失败。
-            "op": "llm",
+            "op": s.get("op", "llm"),
             "name": s["name"],
             "instruction": s["instruction"],
             "skill": s.get("skill", ""),
@@ -642,6 +674,13 @@ class Plan:
             "needs_input": sorted(set(re.findall(r"<待补:(\w+)>",
                                                  s["instruction"]))),
         }
+        # 发布审批等：把 stage 声明的审批动作透传给执行层审批门
+        if s.get("approval_action"):
+            p["approval_action"] = s["approval_action"]
+        # scan op 的扫描目标（已在 decompose 阶段做了 {slot} 填充）
+        if s.get("target"):
+            p["target"] = s["target"]
+        return p
 
 
 # ---------------------------------------------------------------------------
@@ -697,15 +736,27 @@ class Planner:
         fanout = self._detect_fanout(requirement)
         subtasks = []
         for st in tpl["stages"]:
-            subtasks.append({
+            # stage 可声明 op（默认 llm）/ approval_action（发布审批等）
+            # / target（scan op 的扫描目标，支持 {slot} 占位）——执行层据此派发。
+            op = st.get("op", "llm")
+            target = st.get("target")
+            if target:
+                target = _fmt(target, slots)
+            sub = {
                 "key": st["key"],
                 "name": st["name"],
                 "instruction": _fmt(st["instruction"], slots),
                 "skill": st.get("skill", ""),
                 "model": st.get("model", ""),
+                "op": op,
                 "depends_on": list(st.get("depends_on", [])),
                 "quality": dict(st.get("quality", {})),
-            })
+            }
+            if st.get("approval_action"):
+                sub["approval_action"] = st["approval_action"]
+            if target:
+                sub["target"] = target
+            subtasks.append(sub)
 
         # ---- 成本路由：先分档，再按档裁剪 ----
         auto_tier, reasons, score = self._estimate_complexity(

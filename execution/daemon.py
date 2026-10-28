@@ -56,7 +56,23 @@ from transport.distributed import ClusterCoordinator
 from .workspace import BotWorkspace, default_root
 
 # payload 里声明这些 action 的，执行前必须走人工审批（HITL 红线）
-_APPROVAL_ACTIONS = {"send", "publish", "buy", "delete", "pay", "post"}
+_APPROVAL_ACTIONS = {"send", "publish", "buy", "delete", "pay", "post", "high_risk"}
+
+# shell 命令命中这些模式 → 视为高风险（破坏性/不可逆），**未显式声明审批时**
+# 由 daemon 自动升级为 high_risk 审批门（拦截=先问人，而非直接拒绝或放行）。
+# 这是"内部工具链"场景里"高风险操作拦截"的实现：宁可多一次确认，也不让 AI
+# 静默跑 rm -rf / 管道装包 / 关机 这类命令。
+_HIGH_RISK_SHELL_PATTERNS = [
+    re.compile(r"\brm\s+-[rR]*f\b"),                 # rm -rf / rm -fr
+    re.compile(r"\brm\s+-[fF]*r\b"),
+    re.compile(r"\bdd\b[^|]*\bif="),                  # dd if=...
+    re.compile(r"\bmkfs\b"),                          # 格式化
+    re.compile(r":\(\)\s*\{.*\}\s*;:"),               # fork bomb
+    re.compile(r"\b(curl|wget)\b[^\n|]*\|\s*(ba)?sh\b"),  # 下载即执行
+    re.compile(r"\b(shutdown|reboot|halt|poweroff)\b"),
+    re.compile(r">\s*/dev/sd[a-z]"),                  # 直写块设备
+    re.compile(r"\bchmod\s+-R\s+777\b"),
+]
 
 # daemon 执行任务时的默认审批等待上限（秒）：超时未决 → 任务挂起等人工
 _APPROVAL_WAIT = float(os.environ.get("SECTRUST_APPROVAL_WAIT", "120"))
@@ -76,6 +92,7 @@ class ExecutionDaemon:
         sandbox=None,
         cluster=None,
         profiles=None,
+        llm_engine_factory=None,
     ):
         self.reg = TaskRegistry(db_path=db_path)
         self.sched = DagScheduler(db_path=db_path, registry=self.reg)
@@ -88,6 +105,10 @@ class ExecutionDaemon:
         # 算力配置来源：默认从磁盘读（与控制台同一份 model_profiles.json）；
         # 传 profiles 则用注入的（测试用，避免依赖真实磁盘配置）。
         self._profiles = profiles
+        # LLM 引擎工厂（可选注入，测试用）：传它时绕过真实 LlmEngine，
+        # 直接返回注入的引擎实例——这样单测能在不连真实模型的情况下
+        # 覆盖"llm 产出 → 质量门 → 打回/择优"全链路。
+        self._llm_engine_factory = llm_engine_factory
         # 跨机协同：未显式传入则按环境变量自动装配。TTL 取心跳间隔 3 倍
         # （下限 60s）——漏一拍心跳不该被判死/锁过期。强开不可达时这里就抛错，
         # 绝不静默降级回单机语义（transport.distributed 的开关纪律）。
@@ -176,6 +197,8 @@ class ExecutionDaemon:
             return True, {"op": "noop"}, None
         if op == "llm":
             return self._execute_llm(task_id, payload)
+        if op == "scan":
+            return self._execute_scan(task_id, payload)
         if op == "shell":
             cmd = payload.get("cmd")
             if not cmd:
@@ -231,10 +254,15 @@ class ExecutionDaemon:
         except ImportError as e:      # pragma: no cover - 仓库内恒可导入
             return False, {}, "模型层不可用: %s" % e
         try:
-            profiles = self._profiles or ModelProfileStore(
-                data_dir=self._profiles_dir())
-            engine = LlmEngine(profiles)
-            model_id = self._resolve_profile_id(profiles, payload)
+            if self._llm_engine_factory is not None:
+                # 注入路径（测试）：绕过真实模型层，直接给引擎实例
+                engine = self._llm_engine_factory()
+                model_id = None
+            else:
+                profiles = self._profiles or ModelProfileStore(
+                    data_dir=self._profiles_dir())
+                engine = LlmEngine(profiles)
+                model_id = self._resolve_profile_id(profiles, payload)
             out = engine.execute(instruction, self._task_context(task_id),
                                  model=model_id)
         except RuntimeError as e:
@@ -257,6 +285,55 @@ class ExecutionDaemon:
             "model": out.get("model"),
             "output": answer,
             "usage": out.get("usage") or {},
+        }, None
+
+    # ---------------- 密钥/凭证扫描（内部工具链：密钥扫描环节） ----------------
+    def _execute_scan(self, task_id: str, payload: dict):
+        """op=scan：对 target（文件/目录）或 text（内联片段）跑密钥扫描。
+
+        复用 scanner 包（77+ 结构化规则 + 熵兜底），产出结构化 findings。
+        **诚实边界**：扫描是"检测"不是"修复"——只报告命中，不动代码；
+        找不到 target 时如实说明，不假装扫过。
+        """
+        target = payload.get("target")
+        text = payload.get("text")
+        if not target and not text:
+            return False, {}, "scan op 缺少 target（路径）或 text（内联片段）"
+        try:
+            from scanner import scan_path
+        except ImportError:            # pragma: no cover - 仓库内恒可导入
+            return False, {}, "扫描引擎不可用"
+        try:
+            if text:
+                # 内联片段：落临时文件以复用完整检测（含熵兜底），扫完即删
+                import tempfile
+                tf = tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".txt", delete=False, encoding="utf-8")
+                try:
+                    tf.write(text)
+                    tf.close()
+                    res = scan_path(tf.name)
+                finally:
+                    try:
+                        os.unlink(tf.name)
+                    except OSError:
+                        pass
+            else:
+                res = scan_path(target)
+        except Exception as e:         # noqa: BLE001
+            return False, {}, "扫描失败：%s" % e
+        findings = res.get("findings") or []
+        summary = res.get("summary") or {}
+        gate = res.get("gate") or {}
+        return True, {
+            "op": "scan",
+            "target": target,
+            "findings_count": len(findings),
+            "severity_counts": summary.get("by_severity", {}),
+            "gate_fail": bool(gate.get("should_fail")),
+            "gate_severity": gate.get("fail_on"),
+            "findings": findings[:200],   # 截断存储，避免超大 payload 撑爆任务表
+            "summary": summary,
         }, None
 
     def _resolve_profile_id(self, profiles, payload: dict):
@@ -316,8 +393,26 @@ class ExecutionDaemon:
 
     # ---------------- 单任务处理 ----------------
     def process_task(self, task_id: str, payload: dict) -> str:
-        """处理一个已认领的任务，返回最终状态。"""
+        """处理一个已认领的任务，返回最终状态。
+
+        执行链（按场景补全后的真实闭环）：
+        1. 审批门：payload 声明 approval_action（含 high_risk）必须人工批准；
+        2. **投票汇合**：ballot_gather 任务跳过 LLM，直接 rank() 出确定性推荐；
+        3. 执行：按 op 派发（shell/skill/llm/scan/noop）；
+        4. **质量门**：payload 带 quality 规则时送 QualityGate，不合格打回重做
+           （rework），超限升级 needs_human——"递归校验"真实发生；
+        5. **投票登记**：带 ballot 元信息的分支任务完成后 submit_proposal 登记打分；
+        6. 收尾：complete(result=...) / fail(error=...)。
+        """
+        # ---- 1) 审批门（HITL 红线） ----
         action = str(payload.get("approval_action", "")).strip()
+        # 高风险 shell 命令且未显式声明审批 → 自动升级为 high_risk 审批门（拦截）
+        if (not action and payload.get("op") == "shell"
+                and self._is_high_risk_shell(payload.get("cmd"))):
+            action = "high_risk"
+            payload = dict(payload, approval_action="high_risk")
+            # 回写任务 payload：审计/UI 应能看到"高危待审批"，而非伪装成普通任务
+            self.reg.set_payload(task_id, payload)
         if action:
             if action.lower() not in _APPROVAL_ACTIONS:
                 self.sched.fail(task_id, error="未知 approval_action: %s" % action)
@@ -328,13 +423,133 @@ class ExecutionDaemon:
                 self.reg.update_task_status(task_id, "needs_human")
                 self.reg.set_progress(task_id, log=["审批未通过：%s" % why])
                 return "needs_human"
+
+        # ---- 2) 投票汇合：确定性择优，不跑 LLM ----
+        if isinstance(payload.get("ballot_gather"), dict):
+            return self._run_gather(task_id, payload)
+
+        # ---- 3) 执行 ----
         ok, result, error = self._execute(task_id, payload)
-        if ok:
+        if not ok:
+            self.sched.fail(task_id, error=error or "执行失败")
+            self._note_cluster_failure(task_id, error or "执行失败")
+            return "failed"
+
+        text_out = result.get("output") or result.get("stdout") or ""
+        already_completed = False
+
+        # ---- 4) 质量门：递归校验/打回 ----
+        rules = payload.get("quality")
+        if rules and isinstance(text_out, str):
+            status = self._quality_review(task_id, payload, text_out, result)
+            if status != "done":
+                return status          # rework（registered）/ needs_human / failed
+            already_completed = True   # QualityGate 已 complete（带完整 result）
+
+        # ---- 5) 投票登记：分支方案送审打分 ----
+        if isinstance(payload.get("ballot"), dict):
+            self._submit_proposal(task_id, payload, text_out)
+
+        # ---- 6) 收尾 ----
+        if not already_completed:
             self.sched.complete(task_id, result=result)
+        return "done"
+
+    # ---------------- 质量门接入（递归校验/打回） ----------------
+    def _quality_gate(self) -> "QualityGate":
+        """复用 agentskills.quality.QualityGate，质量库与本任务库同目录。"""
+        from agentskills.quality import QualityGate
+        db = os.path.join(os.path.dirname(os.path.abspath(self.reg.db_path)),
+                          "quality.db")
+        return QualityGate(db_path=db)
+
+    def _quality_review(self, task_id: str, payload: dict, text_out: str,
+                        result: dict) -> str:
+        """送质量门；返回 done / rework / needs_human / failed。
+
+        done 时 QualityGate 已 complete 任务（result_override 保留模型/usage）；
+        调用方据此跳过二次 complete。
+        """
+        qg = self._quality_gate()
+        try:
+            v = qg.review(self.sched, task_id, text_out,
+                          rules=payload.get("quality"), result_override=result)
+        except Exception as e:      # noqa: BLE001 —— 质量门自身异常：如实 fail，不假装
+            self.sched.fail(task_id, error="质量门异常：%s" % e)
+            return "failed"
+        # QualityGate 每次 _conn() 自开自关，无持久连接，无需 close()
+        st = v.get("status")
+        if st == "completed":
             return "done"
-        self.sched.fail(task_id, error=error or "执行失败")
-        self._note_cluster_failure(task_id, error or "执行失败")
+        if st == "needs_human":
+            return "needs_human"
+        if st == "registered":
+            return "rework"          # 已打回，等 worker 修订后重新认领
+        # not_running 等异常态：不静默放行，如实失败
+        self.sched.fail(task_id, error="质量门未生效：%s" % (v.get("reason") or st))
         return "failed"
+
+    # ---------------- 投票/择优接入（确定性，不靠 LLM 祈祷） ----------------
+    def _ballot(self) -> "Ballot":
+        """复用 ballot.Ballot，投票库与本任务库同目录。"""
+        from ballot import Ballot
+        db = os.path.join(os.path.dirname(os.path.abspath(self.reg.db_path)),
+                          "ballot.db")
+        return Ballot(db_path=db)
+
+    def _submit_proposal(self, task_id: str, payload: dict, text_out: str):
+        """分支任务完成后登记方案 + 按 quality 规则打分（确定性）。"""
+        b = payload.get("ballot") or {}
+        group = b.get("group")
+        if not group:
+            return
+        ballot = self._ballot()
+        try:
+            ballot.submit_proposal(group, task_id, text_out, source="daemon")
+        except Exception as e:      # noqa: BLE001 —— 提案登记是审计旁路，失败不挡主链路
+            print("[exec:%s] 投票提案登记失败 %s: %s"
+                  % (self.reg.runner_id, task_id, e))
+        finally:
+            ballot.close()
+
+    def _run_gather(self, task_id: str, payload: dict) -> str:
+        """ballot_gather 汇合任务：确定性 rank() 出推荐，不自动确认。
+
+        推荐≠生效——胜出仍由人类在控制台 confirm()（Ballot 纪律：
+        默认不自动生效）。本任务 complete 后把推荐结果写进 result 供前端展示。
+        """
+        bg = payload["ballot_gather"]
+        group = bg.get("group")
+        if not group:
+            self.sched.fail(task_id, error="ballot_gather 缺少 group")
+            return "failed"
+        ballot = self._ballot()
+        try:
+            ranked = ballot.rank(group)
+        except Exception as e:      # noqa: BLE001
+            self.sched.fail(task_id, error="投票排序失败：%s" % e)
+            return "failed"
+        finally:
+            ballot.close()
+        rec = ranked.get("recommended")
+        self.sched.complete(task_id, result={
+            "op": "ballot",
+            "group": group,
+            "recommended": rec,
+            "confidence": ranked.get("confidence"),
+            "needs_human": ranked.get("needs_human"),
+            "reason": ranked.get("reason"),
+            "candidates": [p["task_id"] for p in (ranked.get("ranked") or [])],
+        })
+        return "done"
+
+    # ---------------- 高风险命令识别 ----------------
+    def _is_high_risk_shell(self, cmd) -> bool:
+        """shell cmd 是否命中破坏性/不可逆模式（见 _HIGH_RISK_SHELL_PATTERNS）。"""
+        if not cmd:
+            return False
+        s = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+        return any(p.search(s) for p in _HIGH_RISK_SHELL_PATTERNS)
 
     # ---------------- 主循环 ----------------
     def run_once(self, max_tasks: int = 1) -> list:

@@ -289,12 +289,17 @@ class QualityGate:
         return names
 
     def review(self, scheduler, task_id: str, output: str,
-               rules: dict = None, evidence: Optional[Evidence] = None) -> dict:
+               rules: dict = None, evidence: Optional[Evidence] = None,
+               result_override: dict = None) -> dict:
         """核验产出并驱动状态机。
 
         规则来源优先级：显式 rules > payload.quality（planner 写入的）。
         通过 → scheduler.complete(task_id, result=output)；不通过 → send_back
         （或重试超限 → escalate）。返回完整 verdict（含新状态）。
+
+        result_override：通过时写进任务 result 的**完整**字典（如保留模型名/
+        token 用量等元数据）。不传则默认只存 {"output": output}。执行层
+        （daemon）用它来保留 LLM 调用的模型/usage，而不是被回退成纯文本。
         """
         task = scheduler.registry.get_task(task_id)
         if task is None:
@@ -325,7 +330,8 @@ class QualityGate:
         self._record(task_id, v, output or "")
 
         if v.accepted:
-            scheduler.complete(task_id, result={"output": output})
+            store = result_override if result_override is not None else {"output": output}
+            scheduler.complete(task_id, result=store)
             return {"accepted": True, "completed": True, "task_id": task_id,
                     "status": "completed", "rework_count": 0,
                     "verdict": v.to_dict()}

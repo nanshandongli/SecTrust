@@ -249,6 +249,18 @@ class TaskRegistry:
 
         self._retry_write(op)
 
+    def set_payload(self, task_id, payload: dict):
+        """整写任务 payload（如执行层把 shell 任务自动升级为 high_risk 后
+        回写 approval_action，让审计/UI 看到"高危待审批"）。幂等、任务不存在则跳过。"""
+
+        def op(conn):
+            conn.execute(
+                "UPDATE tasks SET payload=?, updated_at=? WHERE task_id=?",
+                (json.dumps(payload, ensure_ascii=False), time.time(), task_id),
+            )
+
+        self._retry_write(op)
+
     def set_progress(self, task_id, progress=None, log=None):
         """更新任务进度（向后兼容：仅改 payload 内的 progress/log 子键，不动 status 主字段）。
         - progress: 数字(0-100) 或阶段文本，供 live_view 实时展示进度条/阶段。
