@@ -1451,3 +1451,61 @@ record_infra      ──┘         ↓
 - **UI**：控制台「对话」面板顶部模型下拉 + 「⚙ 配置模型」弹窗（目录选择 / 手动填写双模式）
 - **测试**：`tests/test_model_profiles.py`、`tests/test_model_providers.py`、
   `tools/console_model_picker_smoke.js`
+
+---
+
+## 27. 一句话需求 → 拆解 → 建图 → 执行（plan_service.py + execution/daemon.py）
+
+### 27.1 怎么用（控制台）
+
+1. 打开 http://127.0.0.1:8099/ → 左侧「**新建任务**」→ 选「**一句话拆成流水线**」；
+2. 在「你要做的事」里写一句话，例如：
+   `写一份 2026 年中国新能源汽车行业分析报告`
+3. 点「**预览拆解**」——先看它拆成几道工序、几个并行波次、复杂度档、哪些参数待补；
+4. 满意就点「**按此建图并创建任务**」→ 自动跳「任务中心」看依赖波次；
+5. **执行**（另开一个进程）：
+
+```bash
+PYTHONPATH=. python -m execution.daemon --db-path data/task_registry.db
+```
+
+daemon 会按依赖顺序认领就绪工序、调用你配置的真实算力模型产出内容、
+把上游产出喂给下游。
+
+### 27.2 5 套拆解模板
+
+| 模板 | 命中什么 | 工序数 |
+|---|---|---|
+| `content_marketing` | 营销/推广/双十一/文案/投放 | 7 |
+| `software_dev` | 开发/功能/API/前端/后端/测试 | 6 |
+| `research_report` | 报告/研报/分析/白皮书/竞品分析 | 5 |
+| `customer_service` | 客服/工单/投诉/售后/私域 | 4 |
+| `generic` | 兜底 | 4 |
+
+### 27.3 纪律（改动不可破坏）
+
+1. **缺参数不编造**——抽不到的槽位标 `<待补:xxx>` 并列入 `needs_input`，
+   交人补；**绝不让模型猜**，也**绝不把占位符发给模型**（模型会把它当正文原样吐出来）。
+2. **两种模式不可混用**——`LlmEngine.complete()` 是**审计问答**（限定「只能依据 facts
+   回答，事实不足就说『现有审计数据不足以回答』」），`execute()` 才是**干活**。
+   拿问答模式去干活，模型会答"审计数据不足以回答"，等于什么都没干。
+3. **任务 payload 必须有 `op`**——daemon 按 `op` 派发；缺 op 的任务被认领后**必然 failed**
+   （`未知 op: ''`）。控制台建的任务与 planner 建的任务都必须写 `op="llm"`。
+4. **profile id ≠ 模型名**——planner 写的 `payload["model"]` 是模型名，
+   执行层要的是 profile id（`zhipu-glm-4.7-flash`）。规则：
+   显式 `profile_id` > 恰是 profile id 的 `model` > 留空用 active。
+5. **建图前先 `plan.validate()`**，中途失败把已建任务置 failed —— **不留半张图**。
+6. **归因要准**——429（模型过载）/ 401（鉴权失败）**不是**"没配模型"。
+   只有哨兵串 `no_llm_available` 才代表没配模型；归因错了会把排查带去另一个平台换密钥。
+
+### 27.4 端点
+
+- `GET  /api/plan/templates` —— 模板清单（只读）
+- `POST /api/plan/preview` —— 拆解预览（**不落库**）
+- `POST /api/plan/build` —— 拆解 + 建图（写 tasks 表 + trace 事件）
+
+### 27.5 测试
+
+- `tests/test_plan_service.py` —— 21 条回归（拆解落库边界 / op 存在性 / 缺参数拒绝发给模型 /
+  无模型如实失败 / 429 不误报成未配置 / 两种模式 prompt 不混用）
+- `tools/console_plan_smoke.js` —— 18 项前端断言（双模式 / 拆解结果渲染 / 待补参数警示）

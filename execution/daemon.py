@@ -11,6 +11,8 @@ execution/daemon.py —— 常驻执行 daemon（"AI 同事真正干活"的本�
      {"op":"shell",  "cmd":[...], "timeout":30}   → 工作区沙箱执行
      {"op":"skill",  "name":"x"}                  → 激活技能（元数据+正文），
                                                   模型驱动的执行归 AgentRunner
+     {"op":"llm",   "instruction":"..."}           → 调真实算力模型产出文本
+                                                  （无模型则如实失败，不伪造）
      {"op":"noop"}                                → 空转（测试/演练用）
 4. 审批门：payload 带 approval_action（send/publish/buy/delete 语义）时，
    **先请求人工批准再执行**；被拒 → 任务转 needs_human 带 feedback，不执行；
@@ -41,6 +43,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import threading
 import time
@@ -72,6 +75,7 @@ class ExecutionDaemon:
         approval_wait: float = None,
         sandbox=None,
         cluster=None,
+        profiles=None,
     ):
         self.reg = TaskRegistry(db_path=db_path)
         self.sched = DagScheduler(db_path=db_path, registry=self.reg)
@@ -81,6 +85,9 @@ class ExecutionDaemon:
         self.heartbeat_interval = heartbeat_interval
         self.poll_interval = poll_interval
         self.approval_wait = approval_wait if approval_wait is not None else _APPROVAL_WAIT
+        # 算力配置来源：默认从磁盘读（与控制台同一份 model_profiles.json）；
+        # 传 profiles 则用注入的（测试用，避免依赖真实磁盘配置）。
+        self._profiles = profiles
         # 跨机协同：未显式传入则按环境变量自动装配。TTL 取心跳间隔 3 倍
         # （下限 60s）——漏一拍心跳不该被判死/锁过期。强开不可达时这里就抛错，
         # 绝不静默降级回单机语义（transport.distributed 的开关纪律）。
@@ -167,6 +174,8 @@ class ExecutionDaemon:
         op = payload.get("op", "")
         if op == "noop":
             return True, {"op": "noop"}, None
+        if op == "llm":
+            return self._execute_llm(task_id, payload)
         if op == "shell":
             cmd = payload.get("cmd")
             if not cmd:
@@ -193,7 +202,117 @@ class ExecutionDaemon:
             self.workspace.write_state({"last_skill": name, "last_skill_at": time.time()})
             return True, {"op": "skill", "name": name, "description": spec.description,
                           "body_bytes": spec.bytes}, None
-        return False, {}, "未知 op: %r（支持 shell/skill/noop）" % op
+        return False, {}, "未知 op: %r（支持 shell/skill/noop/llm）" % op
+
+    # ---------------- LLM 执行（多 AI 流水线真正干活的那一步） ----------------
+    def _execute_llm(self, task_id: str, payload: dict):
+        """按 instruction 调真实算力模型，产出文本。
+
+        诚实边界：
+        - **没有可用模型就报错，绝不用 Mock 假装干活**（与 console_chat 的
+          LlmEngine 同一纪律：调不通必须说调不通）。
+        - 模型未配置时返回 error（任务转 failed），而不是悄悄生成一段假文本。
+        - 只调用用户在「设置」里配好的 profile；不读环境变量里的未知密钥。
+        """
+        instruction = str(payload.get("instruction") or "").strip()
+        if not instruction:
+            return False, {}, "llm  op 缺少 instruction"
+        # **待补占位符不能发给模型**（踩过坑）：planner 抽不到的槽位会留
+        # "<待补:topic>"，模型会把它当正文原样吐出来（"针对主题 <待补:topic>"）。
+        # 缺参数是**要人来补**的事，不是让模型猜——如实失败并说清缺什么。
+        missing = sorted(set(re.findall(r"<待补:(\w+)>", instruction)))
+        if missing:
+            return False, {}, ("缺少必要参数：%s——请补全后重新下发"
+                               "（planner 抽不到的槽位不会自动编造）"
+                               % "、".join(missing))
+        try:
+            from model_profiles import ModelProfileStore
+            from console_chat import LlmEngine
+        except ImportError as e:      # pragma: no cover - 仓库内恒可导入
+            return False, {}, "模型层不可用: %s" % e
+        try:
+            profiles = self._profiles or ModelProfileStore(
+                data_dir=self._profiles_dir())
+            engine = LlmEngine(profiles)
+            model_id = self._resolve_profile_id(profiles, payload)
+            out = engine.execute(instruction, self._task_context(task_id),
+                                 model=model_id)
+        except RuntimeError as e:
+            # **必须区分两类 RuntimeError**（踩过坑）：provider 层的 HTTP 错误
+            # （429 过载 / 401 鉴权失败）也是 RuntimeError，若一律说成
+            # "未配置模型"，排查方向会被带偏——用户会去反复换密钥。
+            # 只有 LlmEngine 的哨兵串 no_llm_available 才代表"没配模型"。
+            msg = str(e)
+            if "no_llm_available" in msg:
+                return False, {}, ("无可用算力模型（未配置模型或缺少 API Key）"
+                                   "——到「设置」里配置模型后重试")
+            return False, {}, "模型调用失败：%s" % msg
+        except Exception as e:         # noqa: BLE001
+            return False, {}, "模型调用失败: %s" % e
+        answer = str(out.get("answer") or "")
+        if not answer.strip():
+            return False, {}, "模型返回空内容"
+        return True, {
+            "op": "llm",
+            "model": out.get("model"),
+            "output": answer,
+            "usage": out.get("usage") or {},
+        }, None
+
+    def _resolve_profile_id(self, profiles, payload: dict):
+        """把 payload 里的模型指向解析成一个 profile id。
+
+        **语义区分（踩过坑）**：planner 写的 payload["model"] 是「模型名」
+        （如 gpt-4o），而执行层需要的是「profile id」（如 zhipu-glm-4.7-flash）——
+        两者不是一回事，直接把模型名当 id 传下去会查不到 profile。
+
+        规则：
+        1. payload["profile_id"] 明确给了 profile id → 直接用；
+        2. payload["model"] 恰好**就是一个已存在的 profile id** → 用它；
+        3. 否则 → 留空用当前 active（不猜、不报错）。
+        """
+        explicit = str(payload.get("profile_id") or "").strip()
+        if explicit:
+            return explicit
+        model = str(payload.get("model") or "").strip()
+        if model and profiles.get(model) is not None:
+            return model
+        return None
+
+    def _profiles_dir(self) -> str:
+        """模型配置文件所在目录（与控制台同一份 data/）。"""
+        # task_registry.db 通常就在 data/ 下；用它的父目录，保证 daemon 与
+        # 控制台读到**同一份** model_profiles.json。
+        db = os.path.abspath(self.reg.db_path)
+        parent = os.path.dirname(db)
+        return parent if os.path.basename(parent) else "data"
+
+    def _task_context(self, task_id: str) -> str:
+        """喂给模型的事实上下文：上游产出 + 打回反馈。
+
+        没有上游也不报错——上下文为空时模型照常干活，只是不知道上游写了什么。
+        """
+        bits = []
+        try:
+            task = self.reg.get_task(task_id)
+            payload = (task or {}).get("payload") or {}
+            fb = payload.get("last_feedback")
+            if fb:
+                bits.append("【上一轮被打回的反馈，请据此修订】\n%s" % fb)
+            for dep in (task or {}).get("depends_on") or []:
+                up = self.reg.get_task(dep)
+                if not up:
+                    continue
+                up_payload = up.get("payload") or {}
+                out = up_payload.get("result") or up_payload.get("output")
+                if isinstance(out, dict):
+                    out = out.get("output") or out.get("stdout") or ""
+                if not out:
+                    continue
+                bits.append("【上游任务 %s 的产出】\n%s" % (dep, str(out)[:4000]))
+        except Exception:              # noqa: BLE001 —— 上下文是旁路，取不到不挡执行
+            pass
+        return "\n\n".join(bits)
 
     # ---------------- 单任务处理 ----------------
     def process_task(self, task_id: str, payload: dict) -> str:

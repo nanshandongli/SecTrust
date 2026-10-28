@@ -141,9 +141,22 @@ class TestPlan(unittest.TestCase):
             Planner().decompose("   ")
 
     def test_needs_input_marked_in_payload(self):
-        plan = Planner().decompose("写一份行业分析报告")  # topic 抽不到
+        # 主题**抽不到**时，instruction 里必须留 "<待补:topic>" 占位，
+        # 交人补——绝不自动编一个值填进去（planner 的核心纪律）。
+        # 用「行业分析报告」：命中 research_report 模板，但没有任何
+        # 可抽取主题的句式（不能写"写一份X"，那个现在能抽到了）。
+        plan = Planner().decompose("行业分析报告")
         self.assertTrue(any("<待补:topic>" in s["instruction"]
                             for s in plan.subtasks))
+
+    def test_topic_from_write_pattern(self):
+        # 「写一份X报告」是最常见句式，之前抽不到 topic，
+        # 会导致 instruction 里留占位符、被模型原样吐出来。
+        s = extract_slots("写一份2026年中国新能源汽车行业分析报告")
+        self.assertEqual(s["topic"], "2026年中国新能源汽车行业分析报告")
+        plan = Planner().decompose("写一份2026年中国新能源汽车行业分析报告")
+        self.assertFalse(any("<待补:topic>" in st["instruction"]
+                             for st in plan.subtasks))
 
 
 class TestBuildWithScheduler(unittest.TestCase):

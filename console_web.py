@@ -40,6 +40,7 @@ import console_api
 import console_actions
 from model_profiles import ModelProfileStore
 from assistant_channels import AssistantSettings
+from plan_service import PlanService, PlanServiceError
 import notify
 from notify import NotifyEngine, parse_command, help_text
 import model_providers
@@ -960,7 +961,26 @@ async function loadNewTask(){
   const roles=window.__ROLES__||[];
   if(!el.dataset.init){
     el.dataset.init='1';
-    el.innerHTML='<h2 class="vh">新建任务</h2><p class="vdesc">登记一个可调度的任务；依赖会进入 DAG 调度，创建动作会记入审计轨迹。</p>'+
+    el.innerHTML='<h2 class="vh">新建任务</h2><p class="vdesc">两种做法：写一句需求让它自动拆成流水线，或手动登记一条任务。</p>'+
+      '<div class="seg" id="ntModeSeg">'+
+        '<button data-mode="plan" class="active">一句话拆成流水线</button>'+
+        '<button data-mode="single">手动登记一条</button>'+
+      '</div>'+
+      '<div id="ntPlanMode">'+
+      '<div class="split"><div class="panel"><h3>需求</h3>'+
+        '<div class="fld"><label>你要做的事 *</label><textarea id="ntReq" rows="3" placeholder="例如：写一份 2026 年中国新能源汽车行业分析报告"></textarea>'+
+          '<div class="hint">系统会按需求类型自动拆成若干道工序，能并行的并行；可以先预览再决定是否建图。</div></div>'+
+        '<button class="btn" id="ntPreview">预览拆解</button>'+
+        '<div class="form-err" id="ntPlanErr"></div>'+
+        '<div id="ntPlanOut"></div>'+
+      '</div>'+
+      '<div class="panel"><h3>拆解规则</h3><div id="ntTplBox"><div class="empty">加载中…</div></div>'+
+        '<div class="panel" style="margin-top:16px"><h3>写操作边界</h3>'+
+          '<div class="check"><div class="dot">✓</div><div><div class="t">只写 tasks 表 + trace 事件</div><div class="d">不碰审批、成本、素材等其他表。</div></div></div>'+
+          '<div class="check"><div class="dot">✓</div><div><div class="t">缺参数不编造</div><div class="d">抽不到的槽位标「待补」交人补，不让模型猜。</div></div></div>'+
+        '</div></div></div>'+
+      '</div>'+
+      '<div id="ntSingleMode" style="display:none">'+
       '<div class="split"><div class="panel"><h3>任务定义</h3>'+
         '<div class="fld"><label>任务标题 *</label><input id="ntTitle" placeholder="例如：生成双十一主图素材" maxlength="120"></div>'+
         '<div class="fld"><label>岗位角色 *</label><select id="ntRole">'+roles.map(r=>'<option value="'+r.id+'">'+esc(r.name)+' — '+esc(r.desc)+'</option>').join('')+'</select></div>'+
@@ -975,17 +995,86 @@ async function loadNewTask(){
         '<div class="panel" style="margin-top:16px"><h3>写操作边界</h3>'+
         '<div class="check"><div class="dot">✓</div><div><div class="t">只写 tasks 表 + trace 事件</div><div class="d">不碰审批、成本、素材等其他表。</div></div></div>'+
         '<div class="check"><div class="dot">✓</div><div><div class="t">创建人写入轨迹</div><div class="d">谁在何时建了什么，可审计。</div></div></div>'+
-      '</div></div>';
+      '</div></div></div>'+
+      '</div>';
     $('ntSubmit').addEventListener('click',submitNewTask);
+    $('ntPreview').addEventListener('click',previewPlan);
+    el.querySelectorAll('#ntModeSeg button').forEach(b=>b.addEventListener('click',()=>setNtMode(b.dataset.mode||'plan')));
   }
-  // 候选依赖任务
+  // 拆解模板清单（只读）
+  try{
+    const d=await jget('/api/plan/templates');
+    $('ntTplBox').innerHTML=(d.templates||[]).map(t=>'<div class="litem"><div class="grow"><div class="nm">'+esc(t.title||t.name)+'</div>'+
+      '<div class="mt">'+esc(t.name)+' · '+(t.stages||[]).length+' 道工序</div></div></div>').join('');
+  }catch(e){$('ntTplBox').innerHTML='<div class="empty">模板清单加载失败</div>';}
+  // 候选依赖任务（仅单条模式需要）
   try{
     const ts=await jget('/api/tasks?limit=40');
-    $('ntCandidates').innerHTML=ts.length?ts.map(t=>'<div class="litem"><div class="grow"><div class="nm">'+esc((t.payload&&t.payload.title)||t.task_id)+'</div>'+
-      '<div class="mt">'+esc(t.task_id)+' · '+esc((t.payload&&t.payload.role)||'-')+'</div></div>'+
-      '<div class="ops"><button class="btn ghost" onclick="addDep(&quot;'+esc(t.task_id)+'&quot;)">选为依赖</button></div></div>').join('')
+    if($('ntCandidates'))$('ntCandidates').innerHTML=ts.length?ts.map(t=>'<div class="litem"><div class="grow"><div class="nm">'+esc((t.payload&&t.payload.title)||t.task_id)+'</div>'+
+      '<div class="mt">'+esc(t.task_id)+' · '+esc((t.payload&&t.payload.role)||'-')+'</div></div><div class="ops"><button class="btn ghost" onclick="addDep("'+esc(t.task_id)+'")">选为依赖</button></div></div>').join('')
       :'<div class="empty">暂无已有任务</div>';
-  }catch(e){$('ntCandidates').innerHTML='<div class="empty">加载失败</div>';}
+  }catch(e){if($('ntCandidates'))$('ntCandidates').innerHTML='<div class="empty">加载失败</div>';}
+}
+function setNtMode(m){
+  const el=$('view-newtask');
+  el.querySelectorAll('#ntModeSeg button').forEach(b=>b.classList.toggle('active',(b.dataset.mode||'')===m));
+  $('ntPlanMode').style.display=(m==='plan')?'':'none';
+  $('ntSingleMode').style.display=(m==='single')?'':'none';
+}
+function planTierLabel(t){
+  return ({simple:'简单',medium:'中等',complex:'复杂'})[t]||t||'-';
+}
+async function previewPlan(){
+  const req=$('ntReq').value.trim();
+  $('ntPlanErr').textContent='';
+  if(!req){$('ntPlanErr').textContent='请先写下你要做的事';return;}
+  const out=$('ntPlanOut');
+  out.innerHTML='<div class="empty">拆解中…</div>';
+  try{
+    const r=await fetch('/api/plan/preview',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({requirement:req})});
+    const d=await r.json();
+    if(!r.ok||!d.ok){$('ntPlanErr').textContent=d.error||'拆解失败';out.innerHTML='';return;}
+    window.__lastPlan=req;
+    let h='<div class="panel" style="margin-top:14px"><h3>拆解结果</h3>'+
+      '<div class="grid stats" style="margin-bottom:10px">'+
+        stat(d.subtasks.length,'工序')+stat(d.waves.length,'并行波次','accent')+stat(planTierLabel(d.tier),'复杂度档')+
+      '</div>'+
+      '<div class="mt" style="margin-bottom:8px">模板：'+esc(d.template)+'　成本估算倍数：'+(d.cost&&d.cost.multiplier_vs_single_ai!=null?d.cost.multiplier_vs_single_ai+'x 单 AI':'未估')+'</div>';
+    (d.waves||[]).forEach((w,i)=>{
+      h+='<div class="wave"><div class="wave-label">波次 '+i+'</div><div class="wave-nodes">'+
+        w.map(n=>'<span class="tag">'+esc(n)+'</span>').join('')+'</div></div>';
+    });
+    h+='<div class="mt" style="margin:8px 0">各道工序：</div>';
+    (d.subtasks||[]).forEach(s=>{
+      h+='<div class="litem"><div class="grow"><div class="nm">'+esc(s.name)+'</div>'+
+        '<div class="mt">'+esc(s.instruction.slice(0,120))+'</div>'+
+        ((s.needs_input&&s.needs_input.length)?'<div class="mt" style="color:var(--warn)">待补参数：'+esc(s.needs_input.join('、'))+'</div>':'')+
+        '</div></div>';
+    });
+    if(d.needs_input&&d.needs_input.length){
+      h+='<div class="mt" style="color:var(--warn);margin-top:8px">注意：有参数抽不出来（'+esc(d.needs_input.join('、'))+'），建图后这些工序会如实失败并提示缺参，不会让模型乱猜。</div>';
+    }
+    h+='<div style="margin-top:12px"><button class="btn" id="ntBuild">按此建图并创建任务</button>'+
+       '<div class="form-ok" id="ntBuildOk"></div></div></div>';
+    out.innerHTML=h;
+    $('ntBuild').addEventListener('click',buildPlan);
+  }catch(e){$('ntPlanErr').textContent='请求失败：'+e;out.innerHTML='';}
+}
+async function buildPlan(){
+  const req=window.__lastPlan||$('ntReq').value.trim();
+  const btn=$('ntBuild'); if(btn) btn.disabled=true;
+  try{
+    const r=await fetch('/api/plan/build',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({requirement:req,operator:SESSION?SESSION.user:'operator'})});
+    const d=await r.json();
+    if(!r.ok||!d.ok){$('ntPlanErr').textContent=d.error||'建图失败';return;}
+    $('ntPlanErr').textContent='';
+    $('ntBuildOk').textContent='已建图 '+d.created.length+' 个任务（'+d.plan_id+'）——到「任务中心」看依赖波次';
+    $('ntReq').value='';
+    setTimeout(()=>{go('tasks');},900);
+  }catch(e){$('ntPlanErr').textContent='请求失败：'+e;}
+  finally{if(btn) btn.disabled=false;}
 }
 function addDep(tid){
   const i=$('ntDeps');const cur=i.value.split(/[,，\\s]+/).filter(Boolean);
@@ -2178,6 +2267,7 @@ class Handler(BaseHTTPRequestHandler):
     assistant_data_dir = "data"
     notify_engine = None
     _chat = None
+    _plan = None
 
     def _json(self, obj, code=200):
         data = json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8")
@@ -2278,6 +2368,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(self.model_profiles.list_public())
         if path == "/api/chat/providers":
             return self._json(model_providers.catalog())
+        # ---- 拆解模板清单（前端展示"这类需求会被拆成什么样"）----
+        if path == "/api/plan/templates":
+            return self._json({"templates": self._plan_service().templates()})
         # ---- 工作台新增 ----
         if path == "/api/roles":
             return self._json({"roles": console_api.ROLES})
@@ -2679,6 +2772,13 @@ class Handler(BaseHTTPRequestHandler):
         return self._run_action(action, operator=operator, days=days)
 
     # ---- 对话后端 ----
+    def _plan_service(self):
+        """拆解服务（懒加载单例）——与控制台共用同一份 tasks 表与 trace。"""
+        if getattr(Handler, "_plan", None) is None:
+            Handler._plan = PlanService(registry=self.registry,
+                                        tracer=self.trace)
+        return Handler._plan
+
     def _chat_service(self):
         if getattr(Handler, "_chat", None) is None:
             from console_chat import ChatService, LlmEngine
@@ -2780,6 +2880,32 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/logout":
             ok = self.sessions.logout(str(payload.get("token") or ""))
             return self._json({"ok": ok})
+
+        # ---- 一句话需求 → 拆解 → 建图（planner 接入控制台）----
+        if path in ("/api/plan/preview", "/api/plan/build"):
+            operator = str(payload.get("operator") or "operator")
+            tok = self.headers.get("X-Session-Token", "")
+            sess = self.sessions.verify(tok) if self.sessions else None
+            if sess:
+                operator = sess["user"]
+            params = payload.get("params") or {}
+            if not isinstance(params, dict):
+                params = {}
+            tier = payload.get("tier") or None
+            try:
+                svc = self._plan_service()
+                if path == "/api/plan/preview":
+                    out = svc.preview(str(payload.get("requirement") or ""),
+                                       params=params, tier=tier)
+                else:
+                    out = svc.build(str(payload.get("requirement") or ""),
+                                    params=params, tier=tier, operator=operator)
+            except PlanServiceError as e:
+                return self._json({"ok": False, "error": e.message,
+                                   "detail": e.detail}, 400)
+            except Exception as e:  # noqa: BLE001
+                return self._json({"ok": False, "error": "拆解失败：%s" % e}, 500)
+            return self._json(out)
 
         # ---- 新建任务（写操作）----
         if path == "/api/tasks/new":

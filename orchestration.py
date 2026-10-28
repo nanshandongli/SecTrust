@@ -350,6 +350,9 @@ class DagScheduler:
         payload = t["payload"] if isinstance(t["payload"], dict) else {}
         if result is not None:
             payload["result"] = result
+        # 清掉上一轮的失败原因：重试成功后还挂着旧 error，会让人以为这次也失败了
+        payload.pop("error", None)
+        payload.pop("failed_at", None)
         payload["completed_at"] = now
         with self.registry._connect() as conn:
             cur = conn.execute(

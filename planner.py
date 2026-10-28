@@ -67,6 +67,18 @@ _TOPIC_AFTER_RE = re.compile(
 _CAMPAIGN_RE = re.compile(
     r"(?:做一?[场个期次]|策划一?[场个期次]|筹备一?[场个期次]|组织一?[场个期次])"
     r"([^，。；、,.!?！？\s]{2,20})")
+# "写一份X报告 / 做一份X方案 / 出一篇X" —— 最常见的两种句式，
+# 之前抽不到 topic，instruction 里会留下 "<待补:topic>" 占位符被模型原样吐出来。
+# 主题取到句末标点为止（含"报告/方案"等后缀——它是主题的一部分，不是另算）。
+#
+# **ReDoS 纪律**：这里不写 `[^\s...]{2,30}` 同时又在别处叠 `\s*`——量词与
+# 字符类重叠写法会退化。正解是：先把待匹配文本里的空白**整体去掉**再匹配
+# （中文需求里的空格基本只是排版），字符类里就不必再排除空白。
+_WRITE_RE = re.compile(
+    r"(?:写|做|出|生成|产出|整理|撰写|编|起草)一?[份个篇版]"
+    r"([^，。；、,.!?！？]{2,40})")
+# 抽 topic 前先把空白去掉（"写一份 2026 年中国…" → "写一份2026年中国…"）
+_WS_RE = re.compile(r"\s+")
 
 
 def _norm_year(y: int) -> int:
@@ -79,14 +91,17 @@ def extract_slots(text: str) -> dict:
     if not text:
         return slots
 
-    # 主题：引号 > "做一场X" > "关于X"
+    # 主题：引号 > "做一场X" > "写一份X报告" > "关于X"
+    # 匹配用**去空白**的副本：中文需求里的空格多为排版（"写一份 2026 年…"），
+    # 带空格会让主题被截断成 "2026"。引号内的内容仍按原样取。
+    ns = _WS_RE.sub("", text)
     m = _QUOTED_RE.search(text)
     if m:
         slots["topic"] = m.group(1).strip()
     else:
-        for rx in (_CAMPAIGN_RE, _TOPIC_AFTER_RE):
-            m = rx.search(text)
-            if m:
+        for rx in (_CAMPAIGN_RE, _WRITE_RE, _TOPIC_AFTER_RE):
+            m = rx.search(ns)
+            if m and m.group(1).strip():
                 slots["topic"] = m.group(1).strip()
                 break
 
@@ -550,6 +565,7 @@ class Plan:
                 created.append(tid)
             gid = f"{pid}/{key}__ballot"
             gather_payload = {
+                "op": "llm",
                 "name": f"{s['name']}（投票汇总）",
                 "instruction": (f"汇合 {n} 个并行方案并择优后交付："
                                 f"{s['instruction']}"),
@@ -609,6 +625,10 @@ class Plan:
 
     def _payload(self, pid: str, s: dict, key: str) -> dict:
         return {
+            # op 必须写全：执行层（execution/daemon.py）按 op 派发。
+            # 缺 op 的任务被认领后必然 failed（"未知 op: ''"）——
+            # 那是登记时没写全，不是执行失败。
+            "op": "llm",
             "name": s["name"],
             "instruction": s["instruction"],
             "skill": s.get("skill", ""),

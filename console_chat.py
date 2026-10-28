@@ -50,6 +50,16 @@ SYSTEM_PREAMBLE = (
     "回答用中文，简洁、结构化，数字要标明来源面板。"
 )
 
+# 执行模式的 system prompt（干活用，不是问答用）。
+# 与 SYSTEM_PREAMBLE 严格分开：审计问答要"不许发挥"，干活要"给我产出"。
+WORKER_PREAMBLE = (
+    "你是「协作审计台」流水线里的一名执行者。你收到的是一道**工序指令**，"
+    "不是问题——请直接按指令产出成果本身（正文/方案/文案/分析结论），"
+    "不要回答「数据不足」「无法回答」这类话，也不要反问。"
+    "下面 <background> 里是上游工序的产出与返工反馈，仅作背景参考。"
+    "输出用中文，只给成果内容，不要写「好的，我来执行」这类开场白。"
+)
+
 
 def build_context(overview: Dict[str, Any],
                   tasks: List[Dict[str, Any]],
@@ -363,15 +373,42 @@ class LlmEngine:
                 messages.append(ChatMessage(role=role, content=content))
         messages.append(ChatMessage(role="user", content=question))
 
+        return self._invoke(profile, messages, timeout=60)
+
+    # -- 执行模式：干活的指令，不是提问 --
+    def execute(self, instruction: str, context: str = "",
+                model: Optional[str] = None) -> Dict[str, Any]:
+        """执行一条**工作指令**（流水线里的某一道工序）。
+
+        与 complete() 的区别（踩过坑，别混用）：
+        - complete() 是**审计问答**：system prompt 限定"只能依据 facts 回答，
+          事实不足就说『现有审计数据不足以回答』"——用它干活用，模型会答
+          "审计数据不足以回答"，等于什么都没干。
+        - execute() 是**干活**：system prompt 要求直接按指令产出成果，
+          facts 只作为背景参考，不限制发挥。
+        """
+        profile = self.profiles.get(model) if model else self.profiles.get_active()
+        if profile is None or not profile.configured:
+            raise RuntimeError("no_llm_available")
+
+        sys_prompt = WORKER_PREAMBLE
+        if context:
+            sys_prompt += "\n\n<background>\n" + context + "\n</background>"
+        messages = [ChatMessage(role="system", content=sys_prompt),
+                    ChatMessage(role="user", content=instruction)]
+        # 干活要给足篇幅（审计问答 1024 tokens 不够写一节内容）
+        return self._invoke(profile, messages, timeout=180)
+
+    def _invoke(self, profile, messages, timeout=60) -> Dict[str, Any]:
         provider = _build_provider(profile)
         opts: Dict[str, Any] = {}
         if profile.provider == "openai":
             opts["temperature"] = 0.2
         if profile.provider == "anthropic":
-            opts["max_tokens"] = 1024
+            opts["max_tokens"] = 4096
 
         result = provider.complete(
-            messages, model=profile.model or None, timeout=60, **opts)
+            messages, model=profile.model or None, timeout=timeout, **opts)
         return {
             "answer": result.content,
             "model": "%s/%s" % (profile.provider, profile.model or result.model),

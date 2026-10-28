@@ -542,8 +542,13 @@ def create_task(registry: Any, tracer: Any, title: str, role: str,
             return {"ok": False, "error": "依赖任务不存在：%s" % ", ".join(missing)}
 
     task_id = "task-%s" % os.urandom(5).hex()
+    # op 必须写进 payload：daemon 按 op 派发执行。缺 op 的任务被认领后
+    # 必然 failed（"未知 op: ''"）——那不是执行失败，是登记时就没写全。
+    # 标题即指令：控制台建的任务是"让 AI 干这件事"，故默认 op=llm。
     payload = {
+        "op": "llm",
         "title": title,
+        "instruction": title,
         "role": role,
         "template": template or "",
         "priority": priority,

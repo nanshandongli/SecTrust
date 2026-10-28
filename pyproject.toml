@@ -91,6 +91,7 @@ py-modules = [
     "memory_semantic",
     "orchestration",
     "planner",
+    "plan_service",
     "proposal",
     "runner",
     "runner_daemon",
