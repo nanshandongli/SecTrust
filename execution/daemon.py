@@ -255,6 +255,37 @@ class ExecutionDaemon:
             return False, {}, ("缺少必要参数：%s——请补全后重新下发"
                                "（planner 抽不到的槽位不会自动编造）"
                                % "、".join(missing))
+
+        # ---- 真实联网搜索（搜索意图任务）----
+        # 命中 web_search 标记的任务，先跑真实 web 搜索，把结果注入模型上下文，
+        # 让模型"基于资料作答、标注来源"，而不是凭记忆编（之前会编出假日期）。
+        # 诚实边界：搜索失败（网络/代理不可达）**绝不阻断任务**——如实记一笔、
+        # 继续让模型按自身知识答；不伪造搜索结果、不假装搜过。
+        search_meta = {"requested": bool(payload.get("web_search")),
+                       "ok": False, "error": None, "count": 0, "query": None}
+        web_block = ""
+        if payload.get("web_search"):
+            try:
+                from execution.web_search import web_search, build_search_query
+                # **指令 ≠ 搜索词**：指令里带任务要求（"给出3条要点"），
+                # 整句丢给搜索引擎会命中垃圾结果。清洗出真正的搜索词。
+                query = build_search_query(instruction)
+                search_meta["query"] = query
+                sres = web_search(query, max_results=5, timeout=15)
+                search_meta["ok"] = bool(sres.get("ok"))
+                search_meta["error"] = sres.get("error")
+                results = sres.get("results") or []
+                search_meta["count"] = len(results)
+                if results:
+                    lines = ["【真实联网检索结果（非模型记忆，请基于下列资料作答并标注来源）】"]
+                    for i, r in enumerate(results, 1):
+                        lines.append("%d. %s\n   %s\n   %s" % (
+                            i, r.get("title", ""), r.get("url", ""),
+                            r.get("snippet", "")))
+                    web_block = "\n".join(lines)
+            except Exception as e:  # noqa: BLE001 - 搜索异常不可阻断主任务
+                search_meta["error"] = "搜索模块异常：%s" % e
+
         try:
             from model_profiles import ModelProfileStore
             from console_chat import LlmEngine
@@ -270,8 +301,17 @@ class ExecutionDaemon:
                     data_dir=self._profiles_dir())
                 engine = LlmEngine(profiles)
                 model_id = self._resolve_profile_id(profiles, payload)
-            out = engine.execute(instruction, self._task_context(task_id),
-                                 model=model_id)
+            # 把真实检索结果并入背景上下文；有资料时加"标注来源"指令，
+            # 让模型引用而非凭记忆——这是接真实搜索的核心目的。
+            ctx = self._task_context(task_id)
+            final_instruction = instruction
+            if web_block:
+                ctx = web_block + "\n\n" + (ctx or "")
+                final_instruction = (instruction +
+                                     "\n\n（已附真实联网检索结果于 <background>，"
+                                     "请基于资料作答，关键事实处标注来源链接；"
+                                     "若资料不足请说明，不要编造。）")
+            out = engine.execute(final_instruction, ctx, model=model_id)
         except RuntimeError as e:
             # **必须区分两类 RuntimeError**（踩过坑）：provider 层的 HTTP 错误
             # （429 过载 / 401 鉴权失败）也是 RuntimeError，若一律说成
@@ -287,12 +327,17 @@ class ExecutionDaemon:
         answer = str(out.get("answer") or "")
         if not answer.strip():
             return False, {}, "模型返回空内容"
-        return True, {
+        result = {
             "op": "llm",
             "model": out.get("model"),
             "output": answer,
             "usage": out.get("usage") or {},
-        }, None
+        }
+        # 搜索元信息回写：UI 可据 search.ok / search.count 透明展示
+        # "本次是否真联网、拿到几条真实结果"，不掩盖失败。
+        if search_meta.get("requested"):
+            result["search"] = search_meta
+        return True, result, None
 
     # ---------------- 密钥/凭证扫描（内部工具链：密钥扫描环节） ----------------
     def _execute_scan(self, task_id: str, payload: dict):

@@ -93,6 +93,32 @@ def detect_execution_intent(q: str) -> bool:
     return any(v in text for v in EXECUTION_INTENT_VERBS)
 
 
+# 搜索意图关键词：含这些词的任务需要**真实联网**而不是模型凭记忆编。
+# 单字（搜/查/找）在中文里就是搜索动词，配合审计守卫（排除审计语境）不会误伤。
+SEARCH_INTENT_KW = (
+    "搜索", "搜一下", "搜", "搜搜", "查一下", "查询", "查", "查找", "找一下",
+    "找", "了解一下", "了解", "资讯", "新闻", "最新消息", "最新", "行情", "近况",
+    "今日", "今天", "最近", "热点", "动态", "进展", "快讯",
+    "search", "news", "latest", "lookup", "find", "what is",
+)
+
+
+def detect_search_intent(q: str) -> bool:
+    """识别"需要真实联网搜索"的意图。
+
+    控制台建的任务是 op=llm，命中搜索意图时会被打上 web_search=True 标记，
+    由 ExecutionDaemon 在派发执行前先跑真实 web 搜索、把结果注入模型上下文
+    （见 execution/daemon.py 的 _execute_llm）。
+
+    诚实边界：审计类问题（密钥/审批/成本…）不当搜索任务——那些交给规则引擎/
+    审计问答，且搜索结果对审计态无益。
+    """
+    text = (q or "").lower()
+    if any(k in text for k in _EXECUTION_AUDIT_GUARD):
+        return False
+    return any(k in text for k in SEARCH_INTENT_KW)
+
+
 def build_context(overview: Dict[str, Any],
                   tasks: List[Dict[str, Any]],
                   approvals: List[Dict[str, Any]],

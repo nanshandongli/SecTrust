@@ -22,6 +22,8 @@ import argparse
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -3569,6 +3571,60 @@ def _make_executor(handler_cls):
     return executor
 
 
+def _ensure_daemon(db_path, project_root, stale_after=90):
+    """确保有一个常驻执行 daemon 在跑——**随控制台自动启动**。
+
+    解决痛点：以前控制台重启后没有 daemon 在跑，用户下的任务会一直卡在
+    「已登记」拿不到结果。本函数在控制台启动时：
+      1. 读 runners 表，若有**非 stale** 的执行 daemon（排除控制台自身
+         runner_id="console_web"），说明它（可能是上次拉起的那个，已脱离
+         控制台独立存活）还活着 → 跳过，避免重复派发导致任务被执行两次；
+      2. 否则 detached 拉起 `execution.daemon`（同解释器 / 同 db / 同项目根 /
+         继承环境），使其随控制台一起工作，重启后也不会再卡任务。
+
+    诚实边界：拉起失败不致命——打印告警，任务仍可由用户手动启动的 daemon 兜底，
+    绝不让控制台因 daemon 起不来而崩溃。
+    """
+    # 1) 检测是否已有存活 daemon
+    try:
+        probe = TaskRegistry(db_path=db_path, runner_id="console_web_probe")
+        runners = probe.list_runners(stale_after=stale_after)
+        probe.close()
+    except Exception as e:  # noqa: BLE001
+        print("[daemon] 心跳检测失败（将尝试拉起）：%s" % e)
+        runners = []
+    alive = [r for r in runners
+             if r.get("status") != "stale" and r.get("runner_id") != "console_web"]
+    if alive:
+        print("[daemon] 检测到存活的执行 daemon（%s），跳过重复拉起"
+              % ", ".join(r["runner_id"] for r in alive))
+        return False
+
+    # 2) 拉起 detached 子进程
+    log_path = os.path.join(project_root, "data", "daemon.log")
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    try:
+        popen_kwargs = dict(
+            args=[sys.executable, "-m", "execution.daemon", "--db-path", db_path],
+            cwd=project_root,
+            env=os.environ.copy(),
+            stdout=open(log_path, "a", encoding="utf-8"),
+            stderr=subprocess.STDOUT,
+        )
+        # 脱离控制台进程组：Windows 用 CREATE_NEW_PROCESS_GROUP，POSIX 用 start_new_session
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = getattr(subprocess,
+                                                    "CREATE_NEW_PROCESS_GROUP", 0)
+        else:
+            popen_kwargs["start_new_session"] = True
+        subprocess.Popen(**popen_kwargs)
+        print("[daemon] 已随控制台拉起执行 daemon（日志：%s）" % log_path)
+        return True
+    except Exception as e:  # noqa: BLE001
+        print("[daemon] 拉起失败（任务由手动启动的 daemon 兜底）：%s" % e)
+        return False
+
+
 def main():
     ap = argparse.ArgumentParser(description="协作审计台 产品前端（仿 WorkBuddy）")
     ap.add_argument("--host", default="127.0.0.1")
@@ -3640,6 +3696,10 @@ def main():
             name="console-scheduler")
         sched_thread.start()
         print("[调度] 后台自动触发已启动（间隔 %.0fs）" % args.scheduler_interval)
+    # 随控制台自动拉起执行 daemon：用户下的任务不再卡在「已登记」拿不到结果。
+    # 若已检测到存活 daemon（如上次拉起、已独立存活的）则跳过，避免重复派发。
+    if not args.seed:
+        _ensure_daemon(args.db_path, Handler.project_root)
     print("协作审计台已启动： http://%s:%d/  （Ctrl+C 退出）" % (args.host, args.port))
     print("  · 首次进入需登录（已签发可校验签名的 JWT，无密码校验）")
     try:

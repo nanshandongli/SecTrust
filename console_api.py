@@ -36,6 +36,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional
 
 from security import oauth
+from console_chat import detect_search_intent
 
 # --------------------------------------------------------------------------
 # 常量
@@ -547,6 +548,9 @@ def create_task(registry: Any, tracer: Any, title: str, role: str,
     # op 必须写进 payload：daemon 按 op 派发执行。缺 op 的任务被认领后
     # 必然 failed（"未知 op: ''"）——那不是执行失败，是登记时就没写全。
     # 标题即指令：控制台建的任务是"让 AI 干这件事"，故默认 op=llm。
+    # 搜索意图标记：含"搜索/查一下/新闻/最新…"的任务让 daemon 先跑真实
+    # 联网搜索、把结果注入模型上下文，避免模型凭记忆编（见 daemon._execute_llm）。
+    web_search = bool(detect_search_intent(title))
     payload = {
         "op": "llm",
         "title": title,
@@ -555,6 +559,7 @@ def create_task(registry: Any, tracer: Any, title: str, role: str,
         "template": template or "",
         "priority": priority,
         "note": note,
+        "web_search": web_search,
         "created_by": operator,
         "created_at": time.time(),
     }
