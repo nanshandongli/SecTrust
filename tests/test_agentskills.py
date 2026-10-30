@@ -75,10 +75,15 @@ class TestSkillLibrary(unittest.TestCase):
         self.lib = SkillLibrary()
 
     def test_builtin_skills_all_valid(self):
-        names = {s["name"] for s in self.lib.list(include_broken=True)}
-        self.assertEqual(names, {"verification-before-completion",
-                                 "systematic-debugging", "writing-plans",
-                                 "registry-first"})
+        items = self.lib.list(include_broken=True)
+        names = {s["name"] for s in items}
+        # 原有 4 个核心内置技能必须仍在；标准格式技能（competitor-analysis）
+        # 是有意叠加的样板，故用「子集」而非硬编码相等，避免每加一个内置技能
+        # 就误报回归——真正要守的是「每个内置技能都合格、没有 broken」。
+        self.assertTrue({"verification-before-completion", "systematic-debugging",
+                         "writing-plans", "registry-first"}.issubset(names))
+        self.assertTrue(all(s["ok"] for s in items),
+                        [s for s in items if not s["ok"]])
         st = self.lib.stats()
         self.assertEqual(st["broken"], 0)
 

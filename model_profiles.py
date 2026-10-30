@@ -54,6 +54,11 @@ class ModelProfile:
     # 诚实边界：它不改变请求怎么发、也不改变实际扣费——实际扣费由
     # 「端点(base_url) + 账号」决定；这里只用于设置页展示与提示。
     billing: str = ""
+    # 用途类型：chat（对话/文本，默认）| image（文生图）。
+    # 同一个兼容网关若同时支持 chat 与 /images/generations，用户可设两个 profile
+    # 分别标 chat / image；image 算子优先挑 kind=image 的已配置 profile，
+    # 否则回退当前 active（很多网关 chat/绘图共用同一 key）。
+    kind: str = "chat"
 
     @property
     def configured(self) -> bool:
@@ -102,6 +107,7 @@ class ModelProfileStore:
                     api_key=str(p.get("api_key") or ""),
                     model=str(p.get("model") or ""),
                     billing=str(p.get("billing") or ""),
+                    kind=str(p.get("kind") or "chat"),
                 )
                 prof.active = bool(p.get("active"))
                 if prof.id:
@@ -181,6 +187,24 @@ class ModelProfileStore:
         pid = self.get_active_id()
         return self._profiles.get(pid) if pid else None
 
+    def get_image(self) -> Optional[ModelProfile]:
+        """挑一个用于文生图的 profile（诚实边界：未配置就返回 None 让调用方报错）。
+
+        优先级：
+          1. 显式标 kind=image 且已配置（有 key）的 profile；
+          2. 否则回退当前 active（前提是云端已配置）——很多 OpenAI 兼容网关
+             的 /images/generations 与 /chat/completions 共用同一 key 与 base_url。
+        本地 Ollama 没有绘图端点，不参与回退（configured=True 但会调不通，
+        由调用方如实报「不支持文生图」而非静默伪造）。
+        """
+        for p in self._profiles.values():
+            if p.kind == "image" and p.configured:
+                return p
+        active = self.get_active()
+        if active and active.configured and active.provider != "ollama":
+            return active
+        return None
+
     # ---------------- 写操作 ----------------
     def upsert(self, data: Dict[str, object]) -> Dict[str, object]:
         pid = str(data.get("id") or "").strip()
@@ -196,6 +220,10 @@ class ModelProfileStore:
         billing = str(data.get("billing") or "").strip()
         if billing and billing not in ALLOWED_BILLINGS:
             raise ValueError("billing 必须是 %s 之一" % (ALLOWED_BILLINGS,))
+        # 用途类型：chat（默认）/ image（文生图）。前端未带时保留原值或默认 chat。
+        kind = str(data.get("kind") or "").strip()
+        if kind and kind not in ("chat", "image"):
+            raise ValueError("kind 必须是 chat 或 image")
 
         existing = self._profiles.get(pid)
         # 若前端回传的是掩码（****xxxx），说明用户没改 key，保留磁盘原值
@@ -204,13 +232,17 @@ class ModelProfileStore:
         # 编辑时前端若没带 billing（老前端/老数据），保留已记录的值
         if not billing and existing:
             billing = existing.billing
+        # 编辑时前端若没带 kind（老前端/老数据），保留已记录的值
+        if not kind and existing:
+            kind = existing.kind
 
         prof = ModelProfile(
             id=pid, name=name, provider=provider,
             base_url=base_url, api_key=api_key, model=model,
             active=bool(data.get("active",
                                  existing.active if existing else False)),
-            billing=billing)
+            billing=billing,
+            kind=kind or "chat")
         self._profiles[pid] = prof
         self._save()
         return prof.to_public()

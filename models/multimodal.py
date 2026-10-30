@@ -194,4 +194,35 @@ class MediaRouter:
         return self.fallback
 
     def generate(self, kind: str, prompt: str, model: str = None, **opts) -> MediaResult:
-        return self.route(model).generate(kind, prompt, model=model, **opts)
+        """生成媒体，前后接内容防护（A2）：
+
+        1. 前置：生成 prompt 过注入/越狱检测，高危直接拒绝（不把攻击送进 provider）；
+        2. 产出：有字节数据时过魔数/类型/大小校验，不一致明确报错；
+        3. meta.content_guard 记录守卫决策，**semantic_check=false 如实标注**——
+           未接入视觉/音频审核模型，绝不谎称已做语义审核。
+        provider 只回 URL 未回字节时无法做魔数校验，如实标注 validate.ok=None。
+        """
+        from governance import content_guard as _cg
+        pc = _cg.check_media_prompt(prompt)
+        if pc["block"]:
+            raise ValueError(
+                "内容防护拦截：媒体生成 prompt 检测到提示注入/越狱意图（命中 %s）"
+                % "、".join(h["rule"] for h in pc["hits"]))
+        res = self.route(model).generate(kind, prompt, model=model, **opts)
+        if res.data:
+            v = _cg.validate_media(res.data, kind, res.mime or "")
+            if not v["ok"]:
+                raise RuntimeError("媒体内容防护拦截：%s" % v["reason"])
+            guard = {"prompt_risk": pc["risk"], "prompt_hits": pc["hits"],
+                     "validate": v, "semantic_check": False,
+                     "note": "仅魔数/大小/类型校验；未配置视觉/音频语义审核模型，"
+                             "不宣称已做语义审核"}
+        else:
+            guard = {"prompt_risk": pc["risk"], "prompt_hits": pc["hits"],
+                     "validate": {"ok": None,
+                                  "reason": "provider 只回 URL 未回字节，无法做魔数校验"},
+                     "semantic_check": False,
+                     "note": "无字节数据，未做魔数校验；未配置语义审核模型"}
+        res.meta = dict(res.meta or {})
+        res.meta["content_guard"] = guard
+        return res

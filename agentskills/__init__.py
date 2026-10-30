@@ -32,6 +32,13 @@ from .loader import (SkillLibrary, SkillSpec, SkillSpecError, load_one,
 from .evidence import (Evidence, EvidenceGate, Verdict, scan_rationalizations,
                        looks_like_command, RUN_ALLOWLIST)
 from .quality import QualityGate, QualityVerdict
+# 智能运行时演进（从防守到智能）：反思闭环 / 分层记忆 / Confidence Loop。
+# reflection 顶层只用标准库，重排依赖链（llm_rerank→retrieval→memory_hybrid）在
+# ConfidenceLoop.decide() 内延迟导入，故此处顶层导入不拖慢包加载。
+from .reflection import (classify_error, ExperienceStore, ReflectionEngine,
+                         LayeredMemory, ConfidenceLoop, build_runtime,
+                         CAT_TOOL_FAILURE, CAT_MISSING_PARAM,
+                         CAT_INSUFFICIENT_PERMISSION, CAT_UNKNOWN)
 
 __all__ = [
     "SkillLibrary", "SkillSpec", "SkillSpecError", "load_one",
@@ -39,6 +46,10 @@ __all__ = [
     "Evidence", "EvidenceGate", "Verdict", "scan_rationalizations",
     "looks_like_command", "RUN_ALLOWLIST",
     "QualityGate", "QualityVerdict",
+    "classify_error", "ExperienceStore", "ReflectionEngine",
+    "LayeredMemory", "ConfidenceLoop", "build_runtime",
+    "CAT_TOOL_FAILURE", "CAT_MISSING_PARAM", "CAT_INSUFFICIENT_PERMISSION",
+    "CAT_UNKNOWN",
 ]
 
 __version__ = "0.1.0"

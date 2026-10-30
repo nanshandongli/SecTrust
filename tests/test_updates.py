@@ -169,6 +169,35 @@ class UpdateCheckerTest(_Tmp, unittest.TestCase):
         self.assertNotIn("token", s)
         self.assertNotIn("cmd", s)
 
+    def test_run_timeout_returns_promptly_with_grandchild_holding_handle(self):
+        """回归（2026-10-31 夜间）：超时必须**真正快速返回**，不能卡住端点。
+
+        构造一个会 spawn 孙进程并继承 stdout/stderr 句柄的命令来复现 Windows
+        陷阱：旧版 subprocess.run(capture_output=True, timeout) 超时后读管道
+        等 EOF，孙进程不退出就一直阻塞（实测 timeout=5 阻塞 21s+），把
+        /api/updates/check 拖过客户端 15s 超时。修复后应在 timeout 附近返回。
+
+        用独立的 python 子进程（不依赖 git / 网络），确定性复现「孙进程持句柄」。
+        """
+        import time as _time
+        # 父进程 spawn 一个 sleep 孙进程后自己也 sleep；孙进程继承输出句柄。
+        # 用正向/反斜杠兼容的写法，Windows 下 -c 内层引号需转义处理：
+        # 借助 sys.executable 启一个「启动孙进程后长睡」的脚本文件更稳。
+        script = os.path.join(self.tmp, "hang.py")
+        with open(script, "w", encoding="utf-8") as f:
+            f.write("import subprocess, sys, time\n"
+                    "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+                    "time.sleep(30)\n")
+        t0 = _time.time()
+        out, err = updates._run([sys.executable, script], self.tmp, timeout=2)
+        elapsed = _time.time() - t0
+        self.assertIsNone(out)
+        self.assertIsNotNone(err)
+        self.assertIn("超时", err)
+        # 关键断言：绝不能像旧版那样阻塞到孙进程自然退出（>20s）
+        self.assertLess(elapsed, 12,
+                        "超时后必须快速返回，不能等孙进程释放句柄（旧版实测 21s+）")
+
 
 # ------------------------------------------------------- 2. 落盘 CLI
 class EmitFilesCliTest(_Tmp, unittest.TestCase):

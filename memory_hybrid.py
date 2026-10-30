@@ -40,6 +40,10 @@ from memory_semantic import (EMBED_VERSION, HashedNGramIndex, SemanticMemory,
 # 借鉴 Mem0 对记忆类型的划分：不同类型**衰减速度**不同
 KINDS = ("semantic", "episodic", "procedural", "working")
 
+# KB 分级标签（与 governance.asset_registry.CLASSIFICATIONS / kb_control 同一口径）。
+# 这里用本地元组避免记忆层反向依赖治理层（治理层的 discover 会读 console_api）。
+_CLASSIFICATIONS = ("public", "internal", "restricted", "confidential")
+
 # 半衰期（天）：工作记忆几小时就失效，语义事实可留存数月
 DEFAULT_HALF_LIFE_DAYS = {
     "working": 0.5,
@@ -287,6 +291,7 @@ class HybridMemory(SemanticMemory):
                 created_at REAL NOT NULL, updated_at REAL NOT NULL,
                 access_count INTEGER NOT NULL DEFAULT 0,
                 last_access REAL,
+                classification TEXT NOT NULL DEFAULT 'internal',
                 PRIMARY KEY (category, key)
             );
             CREATE TABLE IF NOT EXISTS memory_entities (
@@ -297,6 +302,17 @@ class HybridMemory(SemanticMemory):
             """
         )
         conn.commit()
+        # ---- 迁移：旧库 memory_meta 无 classification 列 ----
+        # 新表已含该列时 ALTER 会抛 duplicate column name，吞掉（迁移幂等 + 并发竞态）。
+        # 其它 OperationalError 一律上抛，不静默吞掉真正的结构问题。
+        try:
+            conn.execute(
+                "ALTER TABLE memory_meta ADD COLUMN classification "
+                "TEXT NOT NULL DEFAULT 'internal'")
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
 
     def _rebuild_hybrid(self) -> None:
         """从 memory_items 重建 BM25 语料（实体表已持久化，无需重建）。"""
@@ -316,9 +332,18 @@ class HybridMemory(SemanticMemory):
                  kind: str = "semantic",
                  scope: Optional[Dict[str, str]] = None,
                  entities: Optional[Iterable[str]] = None,
-                 importance: float = 0.5) -> None:
+                 importance: float = 0.5,
+                 classification: str = "internal") -> None:
         """ADD-only 写入：新事实追加；同 (category,key) 更新内容但**保留 created_at**，
-        这样"何时首次学到"不会因重写而丢失（Mem0 的 timeline 思路）。"""
+        这样"何时首次学到"不会因重写而丢失（Mem0 的 timeline 思路）。
+
+        classification：KB 分级标签（public/internal/restricted/confidential），
+        与 governance.kb_control 的出域审批共用同一口径；默认 internal。
+        非法值直接抛 ValueError——错标分级比不标更危险，绝不静默降级。
+        """
+        if classification not in _CLASSIFICATIONS:
+            raise ValueError("未知分级：%s（应为 %s）"
+                             % (classification, "/".join(_CLASSIFICATIONS)))
         super().remember(category, key, value, note=note, semantic_text=semantic_text)
 
         text = semantic_text if semantic_text is not None else f"{key} {note} {value}"
@@ -330,14 +355,16 @@ class HybridMemory(SemanticMemory):
         scope = scope or {}
         conn.execute(
             "INSERT INTO memory_meta(category, key, kind, user_id, agent_id, run_id, "
-            "org_id, app_id, importance, created_at, updated_at, access_count, last_access) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,0,NULL) "
+            "org_id, app_id, importance, created_at, updated_at, access_count, last_access, "
+            "classification) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,0,NULL,?) "
             "ON CONFLICT(category, key) DO UPDATE SET "
-            "kind=excluded.kind, importance=excluded.importance, updated_at=excluded.updated_at",
+            "kind=excluded.kind, importance=excluded.importance, "
+            "updated_at=excluded.updated_at, classification=excluded.classification",
             (category, key, kind if kind in KINDS else "semantic",
              scope.get("user_id"), scope.get("agent_id"), scope.get("run_id"),
              scope.get("org_id"), scope.get("app_id"),
-             max(0.0, min(1.0, importance)), now, now),
+             max(0.0, min(1.0, importance)), now, now, classification),
         )
         conn.execute("DELETE FROM memory_entities WHERE category=? AND key=?", (category, key))
         for e in set(x.lower() for x in ents if x):
@@ -355,16 +382,35 @@ class HybridMemory(SemanticMemory):
         conn.commit()
         return super().forget(category, key)
 
+    # ---- KB 分级标签（与 governance.kb_control 同一口径）----
+    def set_classification(self, category: str, key: str, level: str) -> bool:
+        """给已有记忆条目改分级；条目不存在返回 False，不凭空新建。"""
+        if level not in _CLASSIFICATIONS:
+            raise ValueError("未知分级：%s（应为 %s）"
+                             % (level, "/".join(_CLASSIFICATIONS)))
+        conn = self._connect()
+        cur = conn.execute(
+            "UPDATE memory_meta SET classification=?, updated_at=? "
+            "WHERE category=? AND key=?", (level, time.time(), category, key))
+        conn.commit()
+        return cur.rowcount > 0
+
+    def get_classification(self, category: str, key: str) -> str:
+        """取分级标签；无该条目按默认 internal。"""
+        m = self._meta().get("%s::%s" % (category, key))
+        return (m or {}).get("classification", "internal")
+
     # ---- 读取 ----
     def _meta(self) -> Dict[str, Dict]:
         conn = self._connect()
         rows = conn.execute(
             "SELECT category, key, kind, user_id, agent_id, run_id, org_id, app_id, "
-            "importance, created_at, updated_at, access_count, last_access FROM memory_meta"
+            "importance, created_at, updated_at, access_count, last_access, "
+            "classification FROM memory_meta"
         ).fetchall()
         cols = ("category", "key", "kind", "user_id", "agent_id", "run_id", "org_id",
                 "app_id", "importance", "created_at", "updated_at", "access_count",
-                "last_access")
+                "last_access", "classification")
         return {f"{r[0]}::{r[1]}": dict(zip(cols, r)) for r in rows}
 
     def decay_factor(self, meta: Dict, now: Optional[float] = None) -> float:
@@ -520,6 +566,8 @@ class HybridMemory(SemanticMemory):
                 "category": cat, "key": key,
                 "score": round(s * dec, 6),
                 "record": rec,
+                # 分级随检索结果返回：出域门/UI 可据此判断是否需审批
+                "classification": m.get("classification", "internal"),
                 "signals": {"vector": round(vec_scores.get(did, 0.0), 4),
                             "bm25": round(bm_scores.get(did, 0.0), 4),
                             "entity": en_scores.get(did, 0.0),

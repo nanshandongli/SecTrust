@@ -1,0 +1,10 @@
+{
+  "name": "competitor-analysis",
+  "version": "1.0.0",
+  "permissions": ["web_search", "file_write", "task.read"],
+  "risk_level": "medium",
+  "requires_approval": false,
+  "allowed_domains": ["*.com", "*.cn"],
+  "blocked_patterns": ["secret_key", "password", "token", "api_key"],
+  "cost_estimate": "low"
+}

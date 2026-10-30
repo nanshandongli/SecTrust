@@ -36,7 +36,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional
 
 from security import oauth
-from console_chat import detect_search_intent
+from console_chat import detect_search_intent, detect_image_intent
 
 # --------------------------------------------------------------------------
 # 常量
@@ -82,6 +82,8 @@ ROLES = [
     {"id": "analyst", "name": "数据分析", "desc": "成本归因、轨迹统计与异常发现",
      "skills": ["systematic-debugging"], "model": "gpt-4o-mini"},
     {"id": "publisher", "name": "发布执行", "desc": "对外发布类高危动作（需审批）",
+     "skills": [], "model": "gpt-4o-mini"},
+    {"id": "admin", "name": "平台管理员", "desc": "全局治理：紧急熔断、资产登记等最高危动作",
      "skills": [], "model": "gpt-4o-mini"},
 ]
 
@@ -521,10 +523,20 @@ def library_index(project_root: str) -> Dict[str, Any]:
 # --------------------------------------------------------------------------
 # 7) 新建任务（写操作）
 # --------------------------------------------------------------------------
+# v2 Skill 检索执行路径的 payload 白名单（铁律：create_task 与
+# Planner._payload()/decompose()/gather_payload 四处都要透传，否则静默丢弃）
+SKILL_PAYLOAD_KEYS = ("query", "skill_hint", "security_tier", "script", "args",
+                      "artifacts", "skill_k", "session_id", "task_type",
+                      "approval_id", "timeout")
+
+
 def create_task(registry: Any, tracer: Any, title: str, role: str,
                 depends_on: Optional[List[str]] = None,
                 template: str = "", priority: str = "normal",
-                note: str = "", operator: str = "operator") -> Dict[str, Any]:
+                note: str = "", operator: str = "operator",
+                kb_refs: Optional[List[str]] = None,
+                egress_destination: str = "",
+                skill_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """真正登记一个新任务，并记录一条轨迹事件（可审计）。
 
     写操作纪律：只写 tasks 表 + trace 事件；不动其他表。
@@ -551,18 +563,54 @@ def create_task(registry: Any, tracer: Any, title: str, role: str,
     # 搜索意图标记：含"搜索/查一下/新闻/最新…"的任务让 daemon 先跑真实
     # 联网搜索、把结果注入模型上下文，避免模型凭记忆编（见 daemon._execute_llm）。
     web_search = bool(detect_search_intent(title))
+    # 文生图意图：切 op=image，不走 LLM 文本流水线、也不触发联网搜索
+    # （画图不需要 web 上下文；曾因当文本任务硬塞 LLM 触发质量门打回）。
+    is_image = bool(detect_image_intent(title))
+    # ---- 分工路由：岗位 → AI 同事 ----
+    # 角色（岗位）不只是 RBAC 权限视角，现在也决定"谁来干"。查该岗位绑定的
+    # 同事 profile；绑了就写进 payload.profile_id，由 daemon 实际派工。
+    # 不在这里做 configured 校验——若绑定的同事没配密钥，daemon 会诚实回退
+    # 到平台默认同事并在结果写明原因（单一兜底点，避免 create_task 与 daemon
+    # 两处各写一套回退逻辑导致行为不一致）。
+    intended_colleague = ""
+    try:
+        from role_routing import binding_for
+        intended_colleague = binding_for(role)
+    except Exception:  # noqa: BLE001 - 路由层异常不让建任务失败
+        intended_colleague = ""
     payload = {
-        "op": "llm",
+        "op": "image" if is_image else "llm",
         "title": title,
         "instruction": title,
         "role": role,
         "template": template or "",
         "priority": priority,
         "note": note,
-        "web_search": web_search,
+        "web_search": (web_search and not is_image),
         "created_by": operator,
         "created_at": time.time(),
     }
+    # 透明展示用：预期由哪位同事负责（即使绑定同事不可用也如实记录意图）。
+    payload["intended_colleague"] = intended_colleague or None
+    if intended_colleague:
+        payload["profile_id"] = intended_colleague
+    # 出域审批门（A1）：任务显式声明引用 KB 条目 / 外发目标时，daemon 逐条
+    # 过 EgressApproval。只在显式声明时写入，既有 payload 结构不受影响。
+    if kb_refs:
+        payload["kb_refs"] = [str(r) for r in kb_refs if str(r).strip()]
+    if egress_destination:
+        payload["egress_destination"] = str(egress_destination)
+    # v2 P0：显式声明检索意图（skill_payload.query / skill_hint）时把 op 切到
+    # skill，白名单透传全部检索/门禁参数，由 daemon 的 SkillRouter 消费。
+    # 不声明时保持 op=llm（既有行为不变，渐进接入）。
+    # 注意：画图意图优先于 skill 切换（画图请求不该被当技能检索任务）。
+    if not is_image and skill_payload and isinstance(skill_payload, dict):
+        sp = {k: skill_payload[k] for k in SKILL_PAYLOAD_KEYS
+              if k in skill_payload and skill_payload[k] not in (None, "", [], {})}
+        if sp.get("query") or sp.get("skill_hint"):
+            payload["op"] = "skill"
+            payload["query"] = str(sp.get("query") or sp.get("skill_hint"))
+            payload.update(sp)
     try:
         registry.register_task(task_id, payload, depends_on=deps)
     except Exception as e:  # noqa: BLE001

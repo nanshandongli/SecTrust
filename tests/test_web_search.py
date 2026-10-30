@@ -46,11 +46,29 @@ class TestBuildSearchQuery(unittest.TestCase):
         # 清洗后为空 → 原样返回，绝不凭空造词
         self.assertEqual(WS.build_search_query("搜索一下，给出要点"), "搜索一下")
 
+    def test_extract_from_brackets_planner_finalize(self):
+        # planner 的 finalize 工序把用户原话包进「」，前面是动作套话，
+        # 整句当搜索词必应只会命中垃圾——必须抽出「」里的真实查询。
+        instr = ("直接交付「今天重要的国际新闻」的完整成果（单任务直出，无上游输入）："
+                 "目标、要点、结论一次说清，并自查是否满足质量门槛。")
+        q = WS.build_search_query(instr)
+        self.assertIn("今天重要的国际新闻", q)
+        self.assertNotIn("完整成果", q)
+        self.assertNotIn("质量门槛", q)
+
+    def test_strips_retrieval_verb(self):
+        # 「检索」也是引导动词（之前漏了 → "检索今天的…"把"检索"带进查询命中学术检索平台）。
+        q = WS.build_search_query("检索今天的重大国际新闻")
+        self.assertNotIn("检索", q)
+        self.assertIn("重大国际新闻", q)
+        self.assertEqual(WS.build_search_query("检索竞品动态"), "竞品动态")
+
 
 class TestRelevanceFilter(unittest.TestCase):
     def test_terms_extraction(self):
         terms = WS._query_terms("AI新闻")
-        self.assertIn("AI", terms)
+        # 拉丁词归一为小写（过滤时大小写不敏感匹配）
+        self.assertIn("ai", terms)
         # 停用词（新闻/最新）不作匹配判据
         self.assertNotIn("新闻", terms)
         self.assertNotIn("最新", WS._query_terms("最新 人工智能 动态"))
@@ -72,13 +90,33 @@ class TestRelevanceFilter(unittest.TestCase):
 
 class TestNormalizeQuery(unittest.TestCase):
     def test_today_news_normalized(self):
-        # 「今天 + 新闻类词」必须归一为「最新」（代理坏垂直规避）
-        self.assertEqual(WS._normalize_query("今天 AI 新闻"), "最新 AI 新闻")
-        self.assertEqual(WS._normalize_query("今天 行业动态"), "最新 行业动态")
+        # 「今天 + 新闻类词」重排为带空格的自然短语（Bing 友好、命中真实资讯），
+        # 不再归一成"最新X"别扭短语（实测命中差）。
+        self.assertEqual(WS._normalize_query("今天 AI 新闻"), "AI 新闻 今日")
+        self.assertEqual(WS._normalize_query("今天 行业动态"), "行业动态 今日")
 
     def test_plain_query_unchanged(self):
+        # 无 recency 词 或 无新闻类词 → 不重排
         self.assertEqual(WS._normalize_query("人工智能 行业新闻"), "人工智能 行业新闻")
         self.assertEqual(WS._normalize_query("写一份报告"), "写一份报告")
+
+    def test_planner_finalize_to_real_query(self):
+        # 端到端：planner finalize 指令 → 清洗 → 归一 得到 Bing 友好的真实搜索词
+        instr = ("直接交付「今天重要的国际新闻」的完整成果（单任务直出）："
+                 "目标、要点、结论一次说清。")
+        q = WS.build_search_query(instr)
+        self.assertIn("今天重要的国际新闻", q)
+        norm = WS._normalize_query(q)
+        self.assertEqual(norm, "国际新闻 今日")
+
+    def test_degree_modifier_normalized(self):
+        # 「重大/重要」等程度词 + 新闻词 → 归一成「主题 今日」，剥离程度词，避免
+        # "重大"歧义命中重庆大学/重大工程。即使无时间词也要触发。
+        self.assertEqual(WS._normalize_query("重大国际新闻"), "国际新闻 今日")
+        self.assertEqual(WS._normalize_query("今天的重大国际新闻"), "国际新闻 今日")
+        self.assertEqual(WS._normalize_query("重要AI新闻"), "AI新闻 今日")
+        # 非新闻 / 无程度无时间 → 不重排（保持原查询、不改主题）
+        self.assertEqual(WS._normalize_query("人工智能 行业新闻"), "人工智能 行业新闻")
 
 
 class TestExtractBlocks(unittest.TestCase):

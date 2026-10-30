@@ -95,6 +95,7 @@ py-modules = [
     "proposal",
     "runner",
     "runner_daemon",
+    "role_routing",
     "scheduler",
     "summarizer",
     "task_center_web",
@@ -112,6 +113,9 @@ packages = [
     "connectors",
     "execution",
     "games",
+    "governance",
+    "mcp_adapter",
+    "mcp_adapter.servers",
     "models",
     "release_meta",
     "sandbox",
@@ -125,8 +129,9 @@ packages = [
 [tool.setuptools.package-data]
 # 扫描模板的落地脚本（模板执行时按名读取）
 templates = ["_scripts/*.py", "builtin/*.json", "*.json"]
-# Agent Skills 渐进式加载的内置技能库（SKILL.md 等）
-agentskills = ["library/*/*.md", "library/*/*.yaml", "library/*/*.json"]
+# Agent Skills 渐进式加载的内置技能库（SKILL.md / manifest / L3 资源 / 脚本）
+agentskills = ["library/*/*.md", "library/*/*.yaml", "library/*/*.json",
+               "library/*/references/*", "library/*/assets/*", "library/*/scripts/*"]
 # MCP 服务器元数据（MCP Registry 收录必需：工具清单 / 协议版本 / 能力声明）
 release_meta = ["mcpserver.json"]
 

@@ -125,6 +125,16 @@ class PlanService:
         except Exception as e:  # noqa: BLE001
             raise PlanServiceError("拆解失败：%s" % e)
 
+        # 搜索意图打标：与 console_api.create_task 的单任务路径保持一致——
+        # 走 planner 建图路径的搜索类需求（"今天重要国际新闻"等）也要接真实
+        # 联网搜索，否则退化成模型凭记忆编造。console_chat 引 model_profiles
+        # 等重模块，这里懒加载避免模块加载顺序/循环导入问题。
+        try:
+            from console_chat import detect_search_intent
+            search_intent = bool(detect_search_intent(requirement))
+        except Exception:  # noqa: BLE001
+            search_intent = False
+
         # 建图前先自检：依赖缺失/成环在这里就会发现，不要留半张图
         try:
             plan.validate()
@@ -142,7 +152,8 @@ class PlanService:
 
         created: List[str] = []
         try:
-            created = plan.build(self.scheduler, plan_id=pid, trace_id=trace_id)
+            created = plan.build(self.scheduler, plan_id=pid, trace_id=trace_id,
+                                web_search=search_intent)
         except Exception as e:  # noqa: BLE001
             # 建图中途失败：把已建的任务标记为失败，别留"看着能跑实际跑不通"的图
             self._abort(created, e)

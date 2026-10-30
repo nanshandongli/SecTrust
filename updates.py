@@ -30,6 +30,8 @@ import time
 # 单次 git 调用的超时：网络不通时不该把界面卡死
 _GIT_TIMEOUT = float(os.environ.get("SECTRUST_UPDATE_TIMEOUT", "10"))
 
+_IS_WIN = (os.name == "nt")
+
 # state 取值说明
 #   up_to_date   本地 HEAD 与远端 HEAD 一致
 #   remote_newer 远端与本地不一致（远端有更新，或本地有未推送提交）
@@ -39,21 +41,89 @@ STATE_REMOTE_NEWER = "remote_newer"
 STATE_UNKNOWN = "unknown"
 
 
-def _run(args, cwd, timeout=_GIT_TIMEOUT):
-    """跑一条 git 命令。返回 (stdout, error)；error 非 None 即失败。"""
+def _kill_process_tree(p):
+    """超时后杀掉 git 及其孙进程（git-remote-https / credential helper 等）。
+
+    只 kill 主进程不够：git 会把输出句柄传给孙进程，孙进程存活会让
+    「读管道等 EOF」一直阻塞。按 PID 杀整棵树，确保超时能立刻返回。
+    """
+    if _IS_WIN:
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)],
+                           stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=5)
+        except Exception:  # noqa: BLE001 - 杀树失败退化为 kill 主进程
+            pass
+    else:
+        try:
+            import signal
+            # start_new_session=True 保证 p.pid 即进程组 leader，只杀本子树
+            os.killpg(p.pid, signal.SIGKILL)
+        except Exception:  # noqa: BLE001
+            pass
     try:
-        p = subprocess.run(args, cwd=cwd, capture_output=True, text=True,
-                           timeout=timeout)
+        p.kill()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        p.wait(timeout=3)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _run(args, cwd, timeout=_GIT_TIMEOUT):
+    """跑一条 git 命令。返回 (stdout, error)；error 非 None 即失败。
+
+    Windows 陷阱（2026-10-31 夜间修复）：git 会 spawn `git-remote-https` 等
+    孙进程并继承 stdout/stderr 句柄。旧版用
+    `subprocess.run(capture_output=True, timeout=...)`，超时后内部
+    `communicate()` 会再次读管道等 EOF——孙进程不退出就一直卡（实测
+    timeout=5 实际阻塞 21s+），把 /api/updates/check 拖过客户端超时，违背
+    本模块「超时不该把界面卡死」的承诺。
+
+    改用**临时文件重定向输出** + `p.wait(timeout)` + 超时杀进程树：父进程
+    不依赖任何管道 EOF，超时即刻返回 unknown，网络不可达也不拖垮端点。
+    返回值契约不变，仍是 (stdout, error)。
+    """
+    out_path = err_path = None
+    try:
+        fd, out_path = tempfile.mkstemp(prefix="sectrust-git-", suffix=".out")
+        os.close(fd)
+        fd, err_path = tempfile.mkstemp(prefix="sectrust-git-", suffix=".err")
+        os.close(fd)
+        kwargs = {}
+        if _IS_WIN:
+            # 新进程组，配合 taskkill /T 精准杀本子树，不误伤调用方
+            kwargs["creationflags"] = getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        else:
+            kwargs["start_new_session"] = True
+        with open(out_path, "wb") as fo, open(err_path, "wb") as fe:
+            p = subprocess.Popen(args, cwd=cwd, stdout=fo, stderr=fe, **kwargs)
+            try:
+                p.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                _kill_process_tree(p)
+                return None, "git 命令超时（%.0fs，网络慢或远端不可达）" % timeout
+        with open(out_path, "rb") as fo:
+            out = fo.read().decode("utf-8", "replace")
+        with open(err_path, "rb") as fe:
+            errout = fe.read().decode("utf-8", "replace")
+        if p.returncode != 0:
+            detail = (errout or out).strip()
+            return None, (detail[:300] or "git 返回非零（%d）" % p.returncode)
+        return out.strip(), None
     except FileNotFoundError:
         return None, "git 不可用（未安装或不在 PATH 中）"
-    except subprocess.TimeoutExpired:
-        return None, "git 命令超时（%.0fs，网络慢或远端不可达）" % timeout
     except OSError as e:                      # noqa: BLE001
         return None, "git 调用失败：%s" % e
-    if p.returncode != 0:
-        detail = (p.stderr or p.stdout or "").strip()
-        return None, (detail[:300] or "git 返回非零（%d）" % p.returncode)
-    return (p.stdout or "").strip(), None
+    finally:
+        for path in (out_path, err_path):
+            if path:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
 
 
 class UpdateChecker:

@@ -45,12 +45,15 @@ execution/daemon.py —— 常驻执行 daemon（"AI 同事真正干活"的本�
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import re
 import signal
 import threading
 import time
+import urllib.error
+import urllib.request
 
 from orchestration import REGISTERED, DagScheduler
 from sandbox import SandboxManager
@@ -217,22 +220,205 @@ class ExecutionDaemon:
             }, res.error
         if op == "skill":
             name = payload.get("name", "")
+            query = str(payload.get("query") or payload.get("skill_hint") or "")
+            # 兼容路径：精确 name 且无检索意图 → 旧 loader.activate（保留既有行为，
+            # 不破坏已验证的按名激活；模型驱动执行归 AgentRunner，不在此越界）。
+            if name and not query:
+                try:
+                    from agentskills.loader import SkillLibrary, default_library_dir
+                except ImportError:        # pragma: no cover
+                    return False, {}, "技能登记处不可用"
+                roots = [os.environ.get("SECTRUST_SKILLS_DIR") or default_library_dir()]
+                lib = SkillLibrary(roots=roots)
+                try:
+                    spec = lib.activate(name)   # 激活 = 读全文（渐进式披露第 2 段）
+                except KeyError:
+                    return False, {}, "未注册的技能: %s" % name
+                self.workspace.write_state({"last_skill": name, "last_skill_at": time.time()})
+                return True, {"op": "skill", "name": name, "description": spec.description,
+                              "body_bytes": spec.bytes}, None
+            # v2 P0 新路径：query / skill_hint → SkillRouter 检索选技能 →
+            # SkillExecutionGuard 分级门禁执行（把标准运行时真正接进执行链）。
+            if query:
+                return self._execute_skill_query(task_id, payload, query)
+            return False, {}, ("skill op 需要 name（按名激活）或 "
+                               "query/skill_hint（检索选技能）")
+        if op == "image":
+            return self._execute_image(task_id, payload)
+        return False, {}, ("未知 op: %r（支持 shell/skill/noop/llm/scan/write_files/"
+                           "image）" % op)
+
+    # ---------------- Skill 检索执行（v2 P0：标准运行时接通主链路）----------------
+    def _execute_skill_query(self, task_id: str, payload: dict, query: str):
+        """op=skill 且带 query/skill_hint：L1 检索选技能 → 分级门禁执行。
+
+        这是把 `StandardSkillLibrary` + `SkillRouter` + `SkillExecutionGuard`
+        从「未接线的能力孤岛」接进真实执行链的落点。保留 `name` 精确路径
+        （旧 loader.activate）作兼容，不破坏既有调用。
+
+        诚实边界：
+          · white 走 L2 正文激活，模型驱动的下游执行归 AgentRunner，不在此越界；
+          · black 需审批而未决 → 如实返回失败 + 审批单 id，绝不静默执行；
+          · 缺 trace 上下文不硬造孤儿轨迹（trace_written=False 由下游标注）。
+        """
+        try:
+            from agentskills.router import SkillRouter
+            from agentskills.guard_chain import SkillExecutionGuard
+            from agentskills.skill_md import StandardSkillLibrary
+            from agentskills.state import SkillStateStore
+        except ImportError as e:
+            return False, {}, "技能运行时不可用：%s" % e
+
+        trace_id = str(payload.get("trace_id") or "")
+        tracer = None
+        if trace_id:
             try:
-                from agentskills.loader import SkillLibrary, default_library_dir
-            except ImportError:        # pragma: no cover
-                return False, {}, "技能登记处不可用"
-            roots = [os.environ.get("SECTRUST_SKILLS_DIR") or default_library_dir()]
-            lib = SkillLibrary(roots=roots)
+                from trace import TraceStore
+                tracer = TraceStore(db_path=os.path.join(self._profiles_dir(), "trace.db"))
+            except Exception:  # noqa: BLE001 - 轨迹不可用不挡执行
+                tracer = None
+        state = SkillStateStore(trace_store=tracer, trace_id=trace_id)
+        lib = StandardSkillLibrary()
+        # 认知升级：有可用 LLM（已配模型）才注入，否则 router 纯 heuristic 重排
+        llm = self._llm_engine_factory() if callable(self._llm_engine_factory) else None
+        # 夜间演进（从防守到智能）：装配反思引擎 / 分层记忆 / Confidence Loop。
+        # 诚实边界 + 回归安全：
+        #   · 经验库落在 task_registry.db 同目录（生产 data/，测试临时目录自动隔离）；
+        #   · 无 LLM 时反思走规则式，绝不 Mock；经验复用只预填 feedback 不改门禁；
+        #   · Confidence Loop 需显式配 weak/strong 模型 id（平台无可靠模型强弱元数据，
+        #     不猜测）；未配则 configured=False → 退回原单层 LLM 重排，行为不变。
+        try:
+            from agentskills.reflection import build_runtime
+            weak_model = os.environ.get("SECTRUST_CONFIDENCE_WEAK_MODEL", "").strip() or None
+            strong_model = os.environ.get("SECTRUST_CONFIDENCE_STRONG_MODEL", "").strip() or None
+            runtime = build_runtime(
+                reflection_path=os.path.join(self._profiles_dir(), "experience.json"),
+                llm=llm, weak_model=weak_model, strong_model=strong_model)
+        except Exception:  # noqa: BLE001 - 反思运行时不可用不挡执行（诚实降级）
+            runtime = {"reflection": None, "memory": None, "confidence_loop": None}
+        router = SkillRouter(library=lib, state=state, trace_store=tracer,
+                             trace_id=trace_id, llm=llm,
+                             reflection=runtime["reflection"],
+                             confidence_loop=runtime["confidence_loop"])
+        sel = router.select(
+            query, role=str(payload.get("role") or ""),
+            context={"task_type": str(payload.get("task_type") or ""),
+                     "web_search": bool(payload.get("web_search"))},
+            k=int(payload.get("skill_k") or 3),
+            session_id=str(payload.get("session_id") or "default"))
+        result = {"op": "skill", "query": query, "skill_match": sel}
+        # 方向一/三：把经验复用命中与置信升级决策一并回写（透明，不静默）
+        if sel.get("experience_hint"):
+            result["experience_hint"] = sel["experience_hint"]
+        if sel.get("confidence_loop", {}).get("applied"):
+            result["confidence_loop"] = sel["confidence_loop"]
+        if not sel["ok"]:
+            result["error"] = ("L1 未召回可用技能（可能全部被角色白名单 / 安装校验 / "
+                               "熔断过滤）")
+            return False, result, result["error"]
+
+        chosen = sel["chosen"]
+        result["name"] = chosen
+        spec = lib.get(chosen)
+        rel_path = str(payload.get("script") or "")
+        if not rel_path and spec is not None and spec.has_scripts:
+            rel_path = next((f for f in spec.files if f.startswith("scripts/")), "")
+
+        approvals = None
+        try:
+            from approval import ApprovalCenter
+            approvals = ApprovalCenter(db_path=self.reg.db_path)
+        except Exception:  # noqa: BLE001 - 审批中心不可用由 guard fail-closed
+            approvals = None
+        guard = SkillExecutionGuard(library=lib, state=state, trace_store=tracer,
+                                    trace_id=trace_id, approvals=approvals)
+        try:
+            res = guard.execute(
+                chosen, rel_path, args=payload.get("args") or None,
+                approval_id=str(payload.get("approval_id") or ""),
+                actor=str(payload.get("created_by") or "operator"),
+                artifacts=payload.get("artifacts") or None,
+                security_tier=str(payload.get("security_tier") or ""),
+                timeout=float(payload.get("timeout") or 30))
+        finally:
+            if approvals is not None:
+                try:
+                    approvals.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        result["guard"] = res
+        result["execution_mode"] = res.get("execution_mode", "")
+        result["feedback_hint"] = res.get("feedback_hint", "")
+        # 方向二·分层记忆：无论成败，先把这次执行轨迹结构化落情景记忆；
+        # 成功额外提炼程序记忆（工具组合/参数模式），供后续 query 检索推荐。
+        mem_ctx = {"task_type": str(payload.get("task_type") or ""),
+                   "role": str(payload.get("role") or "")}
+        # 工具组合（程序记忆第二维）：从选中技能的 allowed_tools 取，只记名不记值
+        chosen_tools = list(spec.allowed_tools) if spec is not None else []
+        episode = None
+        if runtime["memory"] is not None:
             try:
-                spec = lib.activate(name)   # 激活 = 读全文（渐进式披露第 2 段）
-            except KeyError:
-                return False, {}, "未注册的技能: %s" % name
-            # 激活 = 记录元数据+正文；模型驱动执行归 AgentRunner，不在此越界
-            self.workspace.write_state({"last_skill": name, "last_skill_at": time.time()})
-            return True, {"op": "skill", "name": name, "description": spec.description,
-                          "body_bytes": spec.bytes}, None
-        return False, {}, ("未知 op: %r（支持 shell/skill/noop/llm/scan/write_files）"
-                           % op)
+                episode = runtime["memory"].remember_episode(
+                    chosen, query, bool(res["ok"]),
+                    error_info=res.get("error_info") or None, context=mem_ctx,
+                    tools=chosen_tools)
+                result["memory_episode"] = {"skill": episode["skill"],
+                                            "ok": episode["ok"],
+                                            "tools": episode["tools"],
+                                            "procedures": runtime["memory"].recall_procedures(
+                                                query=query, limit=3) if res["ok"] else []}
+            except Exception:  # noqa: BLE001 - 记忆旁路，失败不挡执行
+                episode = None
+        # 方向一闭环有效性反馈：这次若命中并复用了历史经验，回写「复用后是否成功」，
+        # 让经验库累积有效率统计（而非只存不用）。成功/失败都如实记账，绝不夸大。
+        if runtime["reflection"] is not None and sel.get("experience_match"):
+            try:
+                runtime["reflection"].store.mark_used(
+                    sel["experience_match"].get("experience_id", ""),
+                    success=bool(res["ok"]))
+            except Exception:  # noqa: BLE001 - 记账旁路
+                pass
+        # ③ 结构化错误 + 自我反思提示：把门禁失败收敛成 ErrorInfo，并生成给 AI 的
+        #   反思提示（主 Agent 循环消费，触发「下一步该怎么做」），绝不伪造已纠正。
+        if not res["ok"]:
+            result["error_info"] = res.get("error_info", {})
+            try:
+                from agentskills.error_structs import self_correction_prompt
+                result["self_correction_hint"] = self_correction_prompt(
+                    res.get("error_info"))
+            except Exception:  # noqa: BLE001
+                result["self_correction_hint"] = ""
+            # 方向一·自我反思闭环：失败 → 错误归因 → 修正假设（LLM 或规则式降级）
+            # → 落经验库 → 下次相似 query 命中即预填 feedback（本函数顶部 router 已复用）。
+            if runtime["reflection"] is not None and result["error_info"]:
+                try:
+                    cached_keys = list((state.get_cached_params(chosen)
+                                        if state is not None else {}).keys())
+                    ref = runtime["reflection"].reflect(
+                        query, result["error_info"],
+                        context={"cached_param_keys": cached_keys})
+                    result["reflection"] = {"category": ref["category"],
+                                            "generated_by": ref["generated_by"],
+                                            "experience_id": ref["experience_id"],
+                                            "correction": ref["correction"]}
+                except Exception:  # noqa: BLE001 - 反思旁路，失败不挡执行
+                    pass
+        else:
+            # ② 会话记忆：执行成功后把调用方显式提供的「已获取环境变量」记入状态，
+            #    供后续同技能调用注入上下文，避免 AI 重复询问（敏感键只记名不记值）。
+            if state is not None:
+                try:
+                    state.cache_params(chosen, payload.get("cached_params") or {})
+                except Exception:  # noqa: BLE001 - 缓存是旁路
+                    pass
+        self.workspace.write_state({"last_skill": chosen, "last_skill_at": time.time()})
+        if not res["ok"]:
+            err = "技能门禁未通过（stage=%s）：%s" % (res.get("stage"), res.get("reason"))
+            if res.get("approval_id"):
+                err += ("；审批单 %s 已挂起，请在审批中心批准后带 approval_id 重试"
+                        % res["approval_id"])
+            return False, result, err
+        return True, result, None
 
     # ---------------- LLM 执行（多 AI 流水线真正干活的那一步） ----------------
     def _execute_llm(self, task_id: str, payload: dict):
@@ -256,6 +442,29 @@ class ExecutionDaemon:
                                "（planner 抽不到的槽位不会自动编造）"
                                % "、".join(missing))
 
+        # ---- 规则引擎前置（A5：guard_pipeline 取代散落的 check_input）----
+        # 大小模型组合的**前端**：脱敏（PII 掩码）+ 提示注入/越狱检测。
+        # 高危直接拦，不送进大模型；非高危时把 **脱敏后文本** 喂给大模型
+        # （findings 只有类型/计数，不含原文，绝不把被掩码的明文外泄）。
+        # 与后端 check_output 一起闭环：规则引擎前端脱敏+拦截 → 大模型中段
+        # 语义 → 规则引擎后端 PII 回潮/注入回显拦截。
+        guard_meta = {"input_risk": "low", "desensitize_findings": [],
+                      "output_safe": True, "blocked": False}
+        safe_instruction = instruction
+        try:
+            from governance import content_guard as _cg
+            gp = _cg.guard_pipeline(instruction, level="medium")
+            guard_meta["input_risk"] = gp["input_risk"]
+            guard_meta["desensitize_findings"] = gp["desensitize_findings"]
+            if gp["block"]:
+                guard_meta["blocked"] = True
+                return False, {}, ("内容防护拦截：检测到提示注入/越狱意图"
+                                   "（规则引擎前置校验命中 %s）"
+                                   % "、".join(h["rule"] for h in gp["input_hits"]))
+            safe_instruction = gp["masked"]
+        except Exception:  # noqa: BLE001 - 校验异常不阻断正常任务
+            pass
+
         # ---- 真实联网搜索（搜索意图任务）----
         # 命中 web_search 标记的任务，先跑真实 web 搜索，把结果注入模型上下文，
         # 让模型"基于资料作答、标注来源"，而不是凭记忆编（之前会编出假日期）。
@@ -269,13 +478,17 @@ class ExecutionDaemon:
                 from execution.web_search import web_search, build_search_query
                 # **指令 ≠ 搜索词**：指令里带任务要求（"给出3条要点"），
                 # 整句丢给搜索引擎会命中垃圾结果。清洗出真正的搜索词。
-                query = build_search_query(instruction)
+                # 搜索词也基于**脱敏后文本**：绝不把原文里的 PII 发到搜索引擎。
+                query = build_search_query(safe_instruction)
                 search_meta["query"] = query
                 sres = web_search(query, max_results=5, timeout=15)
                 search_meta["ok"] = bool(sres.get("ok"))
                 search_meta["error"] = sres.get("error")
                 results = sres.get("results") or []
                 search_meta["count"] = len(results)
+                # 持久化真实检索来源（标题/链接/摘要），供前端任务详情透明展示——
+                # 避免用户只看到「联网产出」标签却看不到任何内容（搜索成功但答案不佳时仍能溯源）。
+                search_meta["results"] = results
                 if results:
                     lines = ["【真实联网检索结果（非模型记忆，请基于下列资料作答并标注来源）】"]
                     for i, r in enumerate(results, 1):
@@ -291,53 +504,254 @@ class ExecutionDaemon:
             from console_chat import LlmEngine
         except ImportError as e:      # pragma: no cover - 仓库内恒可导入
             return False, {}, "模型层不可用: %s" % e
+        if self._llm_engine_factory is not None:
+            # 注入路径（测试）：绕过真实模型层，直接给引擎实例
+            engine = self._llm_engine_factory()
+            model_id = None
+            chosen = None
+            intended = ""
+        else:
+            profiles = self._profiles or ModelProfileStore(
+                data_dir=self._profiles_dir())
+            engine = LlmEngine(profiles)
+            # 分工路由：按岗位绑定的同事派工，绑定不可用则诚实回退平台默认同事
+            chosen, intended = self._select_profile(profiles, payload, "llm")
+            if chosen is None:
+                return False, {"intended_colleague": intended or None}, (
+                    "无可用算力模型（未配置模型或缺少 API Key）——到「设置」里"
+                    "为当前岗位绑定一个已配密钥的同事，或确保存在可用的"
+                    "平台默认同事")
+            model_id = chosen.id
+        # 把真实检索结果并入背景上下文；有资料时加"标注来源"指令，
+        # 让模型引用而非凭记忆——这是接真实搜索的核心目的。
+        # 注意：这段在 if/else 之外（函数级），注入引擎路径与真实路径共用，
+        # 否则注入路径会跳过错过的 else 块导致 out 未绑定（踩过坑）。
+        ctx = self._task_context(task_id)
+        final_instruction = safe_instruction
+        if web_block:
+            ctx = web_block + "\n\n" + (ctx or "")
+            final_instruction = (safe_instruction +
+                                 "\n\n（已附真实联网检索结果于 <background>，"
+                                 "请基于资料作答，关键事实处标注来源链接；"
+                                 "若资料不足请说明，不要编造。）")
+        elif payload.get("web_search"):
+            # 搜索意图任务但**没拿到可用资料**：必须显式拦住模型编造。
+            # 否则模型会退回"凭记忆编"（曾编出假日期"2025-07-11"）。
+            final_instruction = (safe_instruction +
+                                 "\n\n（注意：本次未能获取真实联网资料"
+                                 "（网络/代理不可达或检索结果均不相关，已被诚实过滤）。"
+                                 "请勿编造具体日期、事件或数据；"
+                                 "若无可依据的事实，请如实说明无法检索到实时信息。）")
         try:
-            if self._llm_engine_factory is not None:
-                # 注入路径（测试）：绕过真实模型层，直接给引擎实例
-                engine = self._llm_engine_factory()
-                model_id = None
-            else:
-                profiles = self._profiles or ModelProfileStore(
-                    data_dir=self._profiles_dir())
-                engine = LlmEngine(profiles)
-                model_id = self._resolve_profile_id(profiles, payload)
-            # 把真实检索结果并入背景上下文；有资料时加"标注来源"指令，
-            # 让模型引用而非凭记忆——这是接真实搜索的核心目的。
-            ctx = self._task_context(task_id)
-            final_instruction = instruction
-            if web_block:
-                ctx = web_block + "\n\n" + (ctx or "")
-                final_instruction = (instruction +
-                                     "\n\n（已附真实联网检索结果于 <background>，"
-                                     "请基于资料作答，关键事实处标注来源链接；"
-                                     "若资料不足请说明，不要编造。）")
             out = engine.execute(final_instruction, ctx, model=model_id)
         except RuntimeError as e:
             # **必须区分两类 RuntimeError**（踩过坑）：provider 层的 HTTP 错误
             # （429 过载 / 401 鉴权失败）也是 RuntimeError，若一律说成
             # "未配置模型"，排查方向会被带偏——用户会去反复换密钥。
             # 只有 LlmEngine 的哨兵串 no_llm_available 才代表"没配模型"。
+            # 即使失败也如实带回 executed_by，让前端展示"本次尝试了哪位同事"。
+            _fail = {"executed_by": (chosen.name or chosen.id) if chosen else None,
+                     "intended_colleague": intended or None}
             msg = str(e)
             if "no_llm_available" in msg:
-                return False, {}, ("无可用算力模型（未配置模型或缺少 API Key）"
-                                   "——到「设置」里配置模型后重试")
-            return False, {}, "模型调用失败：%s" % msg
+                return False, _fail, ("无可用算力模型（未配置模型或缺少 API Key）"
+                                      "——到「设置」里配置模型后重试")
+            return False, _fail, "模型调用失败：%s" % msg
         except Exception as e:         # noqa: BLE001
-            return False, {}, "模型调用失败: %s" % e
+            _fail = {"executed_by": (chosen.name or chosen.id) if chosen else None,
+                     "intended_colleague": intended or None}
+            return False, _fail, "模型调用失败: %s" % e
         answer = str(out.get("answer") or "")
         if not answer.strip():
             return False, {}, "模型返回空内容"
+        # ---- 规则引擎后置校验（后端合规：多模态内容防护 + 防 PII 回潮）----
+        try:
+            from governance import content_guard as _cg
+            _oc = _cg.check_output(answer)
+            guard_meta["output_safe"] = _oc["safe"]
+            if not _oc["safe"]:
+                # 模型产出含未脱敏 PII 或注入指令回显：阻断外发，转人工复核。
+                _res = {
+                    "op": "llm", "model": out.get("model"),
+                    "output": "（内容防护：产出触发合规拦截——%s，已阻断外发并转人工复核）"
+                              % "、".join(i["type"] for i in _oc["issues"]),
+                    # 既有 issues/safe 保留供 UI，同时并入守卫决策三键
+                    "content_guard": {**_oc, **guard_meta},
+                }
+                if search_meta.get("requested"):
+                    _res["search"] = search_meta
+                return False, _res, "内容防护后置校验拦截"
+        except Exception:  # noqa: BLE001 - 校验异常不阻断正常产出
+            pass
         result = {
             "op": "llm",
             "model": out.get("model"),
             "output": answer,
             "usage": out.get("usage") or {},
+            # 守卫决策透明展示：前端风险/脱敏计数/后端输出安全（不含被掩码原文）
+            "content_guard": guard_meta,
         }
+        # ---- 分工透明化：记录实际由哪位 AI 同事负责 ----
+        # executed_by 给前端展示"这个任务是谁干的"；intended_colleague 是创建时
+        # 按岗位预期的同事（可能已回退）；routing_note 说明是否发生了回退。
+        if chosen is not None:
+            result["executed_by"] = chosen.name or chosen.id
+        result["intended_colleague"] = intended or None
+        if intended and chosen is not None and intended != chosen.id:
+            result["routing_note"] = (
+                "岗位绑定同事「%s」未配置或不可用，已回退到「%s」"
+                % (intended, chosen.name or chosen.id))
         # 搜索元信息回写：UI 可据 search.ok / search.count 透明展示
         # "本次是否真联网、拿到几条真实结果"，不掩盖失败。
         if search_meta.get("requested"):
             result["search"] = search_meta
         return True, result, None
+
+    # ---------------- 文生图算子（image op：把绘图接进执行层）----------------
+    def _execute_image(self, task_id: str, payload: dict):
+        """op=image：调 OpenAI 兼容 /images/generations 端点生成图片。
+
+        通用 OpenAI 兼容框架：不绑定任何特定厂商，端点/base_url/api_key/model
+        全部来自用户在「设置」里配的 profile（kind=image 优先，否则回退 active）。
+        落盘到 data/images/，result 含 images 列表（本地文件 + 可供前端直链的
+        /api/image/ 路径）。
+
+        诚实边界（与 _execute_llm 同一纪律）：
+        - 没配绘图模型 / 端点不支持文生图 → 如实报错，绝不 Mock 一张假图；
+        - 端点是外部 HTTP，失败必须带状态码与响应体摘要，不能只说"检查配置"；
+        - 绘制提示先过 guard_pipeline 脱敏，绝不把 PII 原文发到图像 endpoint。
+        """
+        prompt = str(payload.get("instruction") or payload.get("title") or "").strip()
+        if not prompt:
+            return False, {}, "image op 缺少绘制指令（instruction/title 为空）"
+
+        # ---- 规则引擎前置：脱敏 + 注入/越狱拦截（复用 LLM 主链路同一套）----
+        safe_prompt = prompt
+        try:
+            from governance import content_guard as _cg
+            gp = _cg.guard_pipeline(prompt, level="medium")
+            if gp["block"]:
+                return False, {}, ("内容防护拦截：绘制请求含提示注入/越狱意图"
+                                   "（规则引擎前置校验命中 %s）"
+                                   % "、".join(h["rule"] for h in gp["input_hits"]))
+            safe_prompt = gp["masked"]
+        except Exception:  # noqa: BLE001 - 校验异常不阻断正常绘图
+            pass
+
+        # ---- 解析图像 profile（分工路由：优先岗位绑定的 image 同事，
+        #      否则回退到 get_image()；绑定同事不可用则诚实回退）----
+        try:
+            from model_profiles import ModelProfileStore
+        except ImportError as e:      # pragma: no cover - 仓库内恒可导入
+            return False, {}, "模型层不可用: %s" % e
+        profiles = self._profiles or ModelProfileStore(data_dir=self._profiles_dir())
+        chosen, intended = self._select_profile(profiles, payload, "image")
+        if chosen is None:
+            return False, {"intended_colleague": intended or None}, (
+                "未配置可用于绘图的模型——到「设置」里把相关岗位绑定到一个"
+                "「类型=图像」的同事，或新增一个支持 /images/generations 的模型")
+        img = chosen
+
+        try:
+            out = self._call_image_api(task_id, img, safe_prompt, payload)
+        except Exception as e:         # noqa: BLE001
+            return False, {}, "图像端点调用异常: %s" % e
+        if not out.get("ok"):
+            return False, out, out.get("error") or "图像生成失败"
+
+        # ---- 分工透明化：记录实际由哪位 AI 同事出图 ----
+        out["executed_by"] = img.name or img.id
+        out["intended_colleague"] = intended or None
+        if intended and intended != img.id:
+            out["routing_note"] = (
+                "岗位绑定同事「%s」未配置或不可用，已回退到「%s」"
+                % (intended, img.name or img.id))
+        return True, out, None
+
+    def _call_image_api(self, task_id: str, profile, prompt: str, payload: dict) -> dict:
+        """对单个 profile 调 /images/generations，落盘 b64 图片。
+
+        返回统一结构：{ok, op:"image", model, images:[{file,url,local}], count, prompt}
+        或 {ok:False, op:"image", error}。绝不抛异常到上层（上层只看 ok/error）。
+        """
+        base = (profile.base_url or "https://api.openai.com/v1").rstrip("/")
+        url = base + "/images/generations"
+        size = str(payload.get("image_size") or "1024x1024")
+        try:
+            n = int(payload.get("image_n") or 1)
+        except (TypeError, ValueError):
+            n = 1
+        n = max(1, min(n, 4))   # 单任务最多 4 张，避免超额/滥用
+        body = {
+            "prompt": prompt,
+            "model": profile.model or "",
+            "n": n,
+            "size": size,
+            "response_format": "b64_json",
+        }
+        # 部分兼容网关（如某些图像专用端点）不接受空 model 或 response_format，
+        # 但 OpenAI 官方与主流兼容端点都收；缺省照发，失败由响应体如实暴露。
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(body).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer %s" % profile.api_key,
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:   # noqa: S310
+                data = json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            err_body = ""
+            try:
+                err_body = e.read().decode("utf-8", "replace").strip()
+            except Exception:  # noqa: BLE001
+                err_body = ""
+            if len(err_body) > 400:
+                err_body = err_body[:400] + "…"
+            return {"ok": False, "op": "image",
+                    "error": "图像端点返回 HTTP %s：%s" % (e.code, err_body or e.reason)}
+        except Exception as e:         # noqa: BLE001 - URLError/超时等
+            return {"ok": False, "op": "image", "error": "调用图像端点失败：%s" % e}
+
+        items = data.get("data") or []
+        if not items:
+            return {"ok": False, "op": "image",
+                    "error": "图像端点未返回任何图像（响应 data 为空）"}
+
+        out_dir = os.path.join(self._profiles_dir(), "images")
+        os.makedirs(out_dir, exist_ok=True)
+        saved = []
+        for i, it in enumerate(items):
+            b64 = it.get("b64_json")
+            remote = it.get("url")
+            if b64:
+                fn = "img-%s-%d.png" % (task_id, i + 1)
+                fp = os.path.join(out_dir, fn)
+                try:
+                    with open(fp, "wb") as fh:
+                        fh.write(base64.b64decode(b64))
+                except Exception as e:  # noqa: BLE001
+                    return {"ok": False, "op": "image",
+                            "error": "图像落盘失败：%s" % e}
+                saved.append({"file": fn, "url": "/api/image/" + fn, "local": True})
+            elif remote:
+                # 远端 URL（部分端点返回 url 而非 b64）：直接透传给前端，不下载
+                saved.append({"file": None, "url": remote, "local": False})
+            # 二者皆无：跳过该条（不计入成功，也不算失败）
+
+        if not saved:
+            return {"ok": False, "op": "image",
+                    "error": "图像端点返回的项均无可用图像数据（b64/json 缺失）"}
+
+        return {
+            "ok": True, "op": "image",
+            "model": "%s/%s" % (profile.provider, profile.model or ""),
+            "prompt": prompt,
+            "count": len(saved),
+            "images": saved,
+        }
 
     # ---------------- 密钥/凭证扫描（内部工具链：密钥扫描环节） ----------------
     def _execute_scan(self, task_id: str, payload: dict):
@@ -479,6 +893,43 @@ class ExecutionDaemon:
             return model
         return None
 
+    def _select_profile(self, profiles, payload: dict, op: str):
+        """分工路由：按岗位绑定 + op 类型，选出真正执行的 AI 同事（profile）。
+
+        返回 (chosen_profile_or_None, intended_id)。
+
+        诚实回退纪律（单一兜底点，全平台只有这里决定"到底用谁"）：
+        - **优先** payload["profile_id"]（create_task 已按岗位绑定写入）；
+        - image op 只接受 kind=image 的同事；否则退化到 get_image()；
+        - llm op 的绑定同事不可用时，回退到当前 active（平台默认同事）；
+        - 任何链路都要求 configured（有密钥），否则继续回退；
+        - 全都没有可用同事 → chosen=None，调用方如实报"无可用算力模型"。
+
+        intended 永远回传创建时预期的同事 id（可能已回退），供前端透明说明。
+        """
+        intended = str(payload.get("profile_id") or "").strip()
+        chosen = None
+        if op == "image":
+            # 画图：绑定同事必须本身就是 image 类型，否则退化到图像专用回退
+            if intended:
+                p = profiles.get(intended)
+                if p is not None and p.configured and getattr(p, "kind", "chat") == "image":
+                    chosen = p
+            if chosen is None:
+                img = profiles.get_image()
+                if img is not None and img.configured:
+                    chosen = img
+        else:
+            if intended:
+                p = profiles.get(intended)
+                if p is not None and p.configured:
+                    chosen = p
+            if chosen is None:
+                act = profiles.get_active()
+                if act is not None and act.configured:
+                    chosen = act
+        return chosen, intended
+
     def _profiles_dir(self) -> str:
         """模型配置文件所在目录（与控制台同一份 data/）。"""
         # task_registry.db 通常就在 data/ 下；用它的父目录，保证 daemon 与
@@ -512,7 +963,46 @@ class ExecutionDaemon:
                 bits.append("【上游任务 %s 的产出】\n%s" % (dep, str(out)[:4000]))
         except Exception:              # noqa: BLE001 —— 上下文是旁路，取不到不挡执行
             pass
+        # v2 反馈闭环：最近被熔断/降权/驳回的技能提示回灌上下文，让 AI 在
+        # 后续对话能自我纠正（"上次被 X 门驳回，是否尝试备选技能"）。
+        # **提示不是自动改道**：备选技能仍要过 L1 检索 + 角色白名单 + 门禁，
+        # 不因「上次失败」绕过任何安全检查。
+        try:
+            from agentskills.state import SkillStateStore
+            store = SkillStateStore()
+            hints = []
+            for name, snap in store.snapshot().get("skills", {}).items():
+                if snap.get("status") != "ok":
+                    h = store.hint_for(name)
+                    if h:
+                        hints.append(h)
+            if hints:
+                bits.append("【技能运行时反馈（自我纠正提示，非自动改道）】\n"
+                            + "\n".join(hints[:3]))
+        except Exception:              # noqa: BLE001 - 状态不可用不挡执行
+            pass
         return "\n\n".join(bits)
+
+    # ---------------- 出域审批门（A1：KB 分级 fail-closed）----------------
+    def _check_egress(self, payload: dict) -> str:
+        """返回空串=放行，非空=拒绝原因。
+
+        只在 payload **显式声明** kb_refs / egress_destination 时触发——不破坏
+        既有 web_search 链路（搜索出域由内容防护前置脱敏覆盖；未声明外发目标的
+        任务不额外拦）。任何校验异常一律拒绝（fail-closed，怕泄密）。
+        """
+        refs = payload.get("kb_refs")
+        dest = payload.get("egress_destination")
+        if not refs and not dest:
+            return ""
+        try:
+            from governance import kb_control as _kb
+            res = _kb.check_egress(refs, destination=dest or "*")
+        except Exception as e:  # noqa: BLE001 - fail-closed：异常即拒绝
+            return "出域审批校验异常（fail-closed 拒绝）：%s" % e
+        if not res.get("ok"):
+            return res.get("reason") or "出域审批未通过"
+        return ""
 
     # ---------------- 单任务处理 ----------------
     def process_task(self, task_id: str, payload: dict) -> str:
@@ -548,6 +1038,16 @@ class ExecutionDaemon:
                 self.reg.set_progress(task_id, log=["审批未通过：%s" % why])
                 return "needs_human"
 
+        # ---- 1.5) 出域审批门（A1：KB 分级 fail-closed，审批门之后、执行之前）----
+        # 任务显式声明 kb_refs（引用 KB 条目）或 egress_destination（外发目标）
+        # 时逐条过 EgressApproval.is_allowed；confidential 未批准 → needs_human，
+        # 照抄审批门写法（不级联、保留现场），绝不静默出域。
+        egress_why = self._check_egress(payload)
+        if egress_why:
+            self.reg.update_task_status(task_id, "needs_human")
+            self.reg.set_progress(task_id, log=["出域审批门拦截：%s" % egress_why])
+            return "needs_human"
+
         # ---- 2) 投票汇合：确定性择优，不跑 LLM ----
         if isinstance(payload.get("ballot_gather"), dict):
             return self._run_gather(task_id, payload)
@@ -575,8 +1075,10 @@ class ExecutionDaemon:
         already_completed = False
 
         # ---- 4) 质量门：递归校验/打回 ----
+        # image op 产出的是图片而非 Markdown 文本——跳过文本质量门，
+        # 否则会像早期那样因"无标题行"反复打回、升级 needs_human。
         rules = payload.get("quality")
-        if rules and isinstance(text_out, str):
+        if result.get("op") != "image" and rules and isinstance(text_out, str):
             status = self._quality_review(task_id, payload, text_out, result)
             if status != "done":
                 return status          # rework（registered）/ needs_human / failed
@@ -697,6 +1199,14 @@ class ExecutionDaemon:
         别的机器持有，任务已放回 registered 重排（计入批次上限，防打转）。
         """
         out = []
+        # 应急处置与熔断：熔断开启时本执行器不认领任何新任务（任务留在 registered），
+        # 实现"出事能熔断"。状态落盘，由控制台触发/解除，进程无关。
+        try:
+            from governance import circuit_breaker as _cb
+            if _cb.is_open():
+                return out
+        except Exception:  # noqa: BLE001 - 熔断检查失败按未熔断处理，不拖垮执行
+            pass
         for _ in range(max_tasks):
             task = self.sched.claim_ready(runner_id=self.reg.runner_id)
             if not task:

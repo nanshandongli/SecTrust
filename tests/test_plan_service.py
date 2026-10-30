@@ -173,6 +173,26 @@ class PlanServiceTest(unittest.TestCase):
         self.assertIn("research_report", names)
         self.assertIn("generic", names)
 
+    def test_search_requirement_marks_web_search(self):
+        """搜索类需求走 planner 建图也必须接真实联网搜索（不打标就会编造）。"""
+        v = self.svc.build("搜索一下今天的国际新闻，给出要点")
+        self.assertTrue(v["ok"])
+        llm_tasks = [t for t in v["created"]
+                     if self.reg.get_task(t)["payload"].get("op") == "llm"]
+        self.assertTrue(llm_tasks, "应当有 llm 子任务")
+        for tid in llm_tasks:
+            self.assertTrue(
+                self.reg.get_task(tid)["payload"].get("web_search"),
+                "%s 是搜索需求却没打 web_search 标记" % tid)
+
+    def test_non_search_requirement_not_marked(self):
+        """非搜索需求不打标（避免无谓联网、也避免在审计/产出场景误触发）。"""
+        v = self.svc.build("写一份 2026 年中国新能源汽车行业分析报告")
+        for tid in v["created"]:
+            self.assertFalse(
+                self.reg.get_task(tid)["payload"].get("web_search"),
+                "%s 非搜索需求却被打标" % tid)
+
 
 class PlannerSlotTest(unittest.TestCase):
     """槽位抽取：「写一份X报告」这种最常见句式必须抽得到主题。"""

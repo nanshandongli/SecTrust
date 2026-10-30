@@ -119,6 +119,33 @@ def detect_search_intent(q: str) -> bool:
     return any(k in text for k in SEARCH_INTENT_KW)
 
 
+# 文生图意图关键词（命中即认为用户要"画图"，控制台建任务会切 op=image）。
+# 注意：这些词同时要避免与搜索意图混淆——"搜一张图"这类表述更偏检索，
+# 故这里只收**明确要产出图**的动词/名词（画/生成图/配图/插画/海报…）。
+_IMAGE_INTENT_KW = (
+    "画一张", "画一幅", "画个", "画一", "画图", "绘制", "画张", "帮我画",
+    "生成图片", "生成一张图", "生成图", "画张图", "配图", "插图", "插画",
+    "画海报", "海报", "示意图", "漫画", "头像", "封面图", "生成图像",
+    "文生图", "画个图", "做个图", "出一张图", "出图",
+)
+
+
+def detect_image_intent(q: str) -> bool:
+    """识别"需要文生图（画图）"的意图。
+
+    控制台建的任务是 op=llm，命中画图意图时会被打成 op=image，由 ExecutionDaemon
+    派发到 _execute_image（OpenAI 兼容 /images/generations 端点，见 daemon）。
+
+    诚实边界：没有配置绘图模型时调用方会如实报「未配置可用于绘图的模型」，
+    绝不把画图请求当文本任务硬塞给 LLM（曾因此触发质量门打回、升级 needs_human）。
+    """
+    text = (q or "").lower()
+    # 审计类问题不当画图任务（见 detect_search_intent 同一守卫）
+    if any(k in text for k in _EXECUTION_AUDIT_GUARD):
+        return False
+    return any(k in text for k in _IMAGE_INTENT_KW)
+
+
 def build_context(overview: Dict[str, Any],
                   tasks: List[Dict[str, Any]],
                   approvals: List[Dict[str, Any]],

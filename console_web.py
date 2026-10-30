@@ -25,11 +25,12 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
 from task_registry import TaskRegistry
 from approval import ApprovalCenter
@@ -46,6 +47,14 @@ from plan_service import PlanService, PlanServiceError
 import notify
 from notify import NotifyEngine, parse_command, help_text
 import model_providers
+from governance import rbac as _rbac
+from governance import circuit_breaker as _cb
+from governance import asset_registry as _assets
+from governance import compliance as _compliance
+from governance import interop as _interop
+from governance import content_guard as _cg
+from governance import kb_control as _kb
+from governance import etsi as _etsi
 
 
 # --------------------------------------------------------------------------
@@ -559,6 +568,36 @@ APP_HTML = """<!doctype html>
   .acard .ad{font-size:12.5px;color:var(--sub);line-height:1.55}
   .avatar{width:30px;height:30px;border-radius:9px;flex:0 0 auto;display:flex;
     align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:13px}
+  /* ---- v2 技能执行可观测（W4 仪表盘，浅色主题）---- */
+  .skops-card{background:var(--card);border:1px solid var(--line);border-radius:10px;
+    padding:14px 16px;margin-bottom:14px;box-shadow:var(--shadow)}
+  .skops-card h3{margin:0 0 10px;font-size:14px;color:var(--txt);font-weight:700}
+  .skops-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}
+  .skops-cell{background:var(--bg);border:1px solid var(--line);border-left-width:3px;
+    border-radius:8px;padding:9px 11px}
+  .skops-name{font-size:12.5px;font-weight:600;color:var(--txt);word-break:break-all}
+  .skops-meta{font-size:11px;color:var(--sub);margin-top:4px;line-height:1.5}
+  .skops-row{display:flex;align-items:center;gap:8px;padding:6px 0;font-size:12px;
+    border-bottom:1px solid var(--line)}
+  .skops-tag{width:34px;color:var(--sub);flex:0 0 auto}
+  .skops-nm{width:210px;color:var(--txt);overflow:hidden;text-overflow:ellipsis;
+    white-space:nowrap;flex:0 0 auto}
+  .skops-bar{flex:1;height:9px;background:var(--chip);border-radius:5px;overflow:hidden;min-width:40px}
+  .skops-bar i{display:block;height:100%;background:var(--accent2)}
+  .skops-val{width:62px;text-align:right;color:var(--sub);flex:0 0 auto}
+  .skops-tier{width:42px;font-size:11px;color:var(--sub);flex:0 0 auto}
+  .skops-flt{font-size:11px;color:var(--pend);flex:0 0 auto}
+  .skops-chips{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 10px}
+  .skops-chips .chip{font-size:11px;padding:2px 9px;border-radius:10px;
+    background:var(--chip);color:var(--txt)}
+  .skops-gate{padding:9px 0;border-bottom:1px solid var(--line)}
+  .skops-gate-h{font-size:12px;color:var(--txt);margin-bottom:6px;word-break:break-all}
+  .skops-lane{display:flex;flex-wrap:wrap;gap:6px}
+  .skops-stage{font-size:11px;padding:2px 7px;border:1px solid var(--line);
+    border-radius:5px;color:var(--txt);background:var(--card)}
+  .skops-muted{color:var(--sub);font-size:12px;line-height:1.6}
+  .skops-input{flex:1;border:1px solid var(--line);border-radius:8px;padding:8px 10px;
+    font-size:13px;color:var(--txt);background:var(--card);min-width:200px}
 </style>
 </head>
 <body>
@@ -625,6 +664,8 @@ APP_HTML = """<!doctype html>
     <div class="view" id="view-approvals"></div>
     <div class="view" id="view-security"></div>
     <div class="view" id="view-skills"></div>
+    <div class="view" id="view-skillops"></div>
+    <div class="view" id="view-governance"></div>
     <div class="view" id="view-settings"></div>
   </div>
 </div>
@@ -656,6 +697,13 @@ APP_HTML = """<!doctype html>
       <div class="mrow"><label>计费方式</label><div class="mfield">
         <select id="mmBilling"></select>
         <div class="mnote" id="mmBillingHint"></div>
+      </div></div>
+      <div class="mrow"><label>类型</label><div class="mfield">
+        <select id="mmKind">
+          <option value="chat">对话 / 文本（chat）</option>
+          <option value="image">文生图（image）</option>
+        </select>
+        <div class="mnote">绘图任务会优先选「文生图」类型的模型；未单独配置时回退当前默认模型。</div>
       </div></div>
       <div class="mrow"><label>名称</label><div class="mfield"><input id="mmName" placeholder="例如：我的 DeepSeek"></div></div>
       <div class="mrow"><label>Base URL</label><div class="mfield"><input id="mmBase" placeholder="选择供应商后自动填入，或手动粘贴"><div class="mlink" id="mmDoc"></div></div></div>
@@ -698,13 +746,16 @@ const fmt = t => t ? new Date(t*1000).toLocaleString('zh-CN') : '-';
 const ago = t => t ? Math.max(0, Math.round(Date.now()/1000 - t)) + 's 前' : '-';
 const esc = s => (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function badge(s){const m={'registered':'b-registered','running':'b-running','done':'b-done','completed':'b-completed','failed':'b-failed','blocked':'b-blocked','needs_human':'b-needs_human','pending':'b-pending','approved':'b-approved','rejected':'b-rejected','expired':'b-expired'};return '<span class="badge '+(m[s]||'')+'">'+esc(s)+'</span>';}
-async function jget(u){const r=await fetch(u);return r.json();}
+async function jget(u){const h={};const t=localStorage.getItem('wbSession');if(t)h['X-Session-Token']=t;const r=await fetch(u,{headers:h});return r.json();}
 async function postJSON(u, body){
   const headers={'Content-Type':'application/json'};
   const t=localStorage.getItem('wbSession'); if(t) headers['X-Session-Token']=t;
   const r=await fetch(u,{method:'POST',headers:headers,body:JSON.stringify(body||{})});
   return {status:r.status, data:await r.json()};
 }
+// 原生 fetch POST 的统一鉴权头：除 Content-Type 外自动附带会话令牌，
+// 避免“新建/规划任务”等需登录的接口因漏带 X-Session-Token 而 401。
+function authHeaders(){const h={'Content-Type':'application/json'};const t=localStorage.getItem('wbSession');if(t)h['X-Session-Token']=t;return h;}
 function toast(msg, kind){
   let el=document.getElementById('wbToast');
   if(!el){el=document.createElement('div');el.id='wbToast';
@@ -774,7 +825,7 @@ async function doSearch(q){
     }
     let h='';
     if(T.length){h+='<div class="sgrp">任务 ('+T.length+')</div>'+T.map(t=>
-      '<div class="sitem" onclick="go(&quot;tasks&quot;);closeSearch()">'+badge(t.status)+' <b>'+esc(t.task_id)+'</b><span class="sid">'+esc(JSON.stringify(t.payload||{}).slice(0,60))+'</span></div>').join('');}
+      '<div class="sitem" onclick="go(&quot;tasks&quot;);closeSearch()">'+badge(t.status)+' <b>'+esc(t.task_id)+'</b><span class="sid">'+esc(taskLabel(t))+'</span></div>').join('');}
     if(R.length){h+='<div class="sgrp">审计轨迹 ('+R.length+')</div>'+R.map(t=>
       '<div class="sitem" onclick="go(&quot;trace&quot;);closeSearch()">'+badge(t.status)+' <b>'+esc(t.trace_id)+'</b><span class="sid">'+esc(t.title||'')+'</span></div>').join('');}
     if(A.length){h+='<div class="sgrp">审批 ('+A.length+')</div>'+A.map(a=>
@@ -826,7 +877,9 @@ const NAV_GROUPS=[
  {group:'系统',items:[
    {id:'overview',label:'概览',icon:ICON.grid},
    {id:'security',label:'安全中心',icon:ICON.shield},
+   {id:'governance',label:'合规治理',icon:ICON.approve},
    {id:'skills',label:'技能',icon:ICON.sparkle},
+   {id:'skillops',label:'技能执行',icon:ICON.trace},
    {id:'settings',label:'设置',icon:ICON.gear},
  ]},
 ];
@@ -854,7 +907,8 @@ function route(){
     assistants:loadAssistants,connectors:loadConnectors,schedule:loadSchedule,
     library:loadLibrary,overview:loadOverview,chat:loadChat,tasks:loadTasks,
     trace:loadTraceList,cost:loadCost,approvals:loadApprovals,security:loadSecurity,
-    skills:loadSkills,settings:loadSettings};
+    governance:loadGovernance,
+    skills:loadSkills,settings:loadSettings,skillops:loadSkillOps};
   (loaders[v]||loadWorkspace)();
 }
 window.addEventListener('hashchange',route);
@@ -879,7 +933,7 @@ async function doLogin(){
   const btn=$('loginBtn');btn.disabled=true;btn.textContent='登录中…';
   $('loginErr').textContent='';
   try{
-    const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+    const r=await fetch('/api/login',{method:'POST',headers:authHeaders(),
       body:JSON.stringify({user:$('loginUser').value,role:$('loginRole').value})});
     const d=await r.json();
     if(!r.ok||!d.token){$('loginErr').textContent=d.error||'登录失败';return;}
@@ -906,7 +960,7 @@ function applySession(s){
   if(cu)cu.addEventListener('click',checkUpdate);
 }
 async function doLogout(){
-  try{await fetch('/api/logout',{method:'POST',headers:{'Content-Type':'application/json'},
+  try{await fetch('/api/logout',{method:'POST',headers:authHeaders(),
     body:JSON.stringify({token:SESSION?SESSION.token:''})});}catch(e){}
   SESSION=null;localStorage.removeItem('wbSession');
   $('loginWrap').classList.remove('hidden');
@@ -1033,9 +1087,13 @@ async function loadWorkspace(){
   // 最近任务
   try{
     const ts=await jget('/api/tasks?limit=6');
-    $('wsRecent').innerHTML=ts.length?ts.map(t=>'<div class="litem"><div class="grow"><div class="nm">'+esc((t.payload&&t.payload.title)||t.task_id)+'</div>'+
-      '<div class="mt">'+esc(t.task_id)+' · '+esc((t.payload&&t.payload.role)||'-')+' · '+fmt(t.created_at)+'</div></div>'+
-      badge(t.status)+'</div>').join(''):'<div class="empty">暂无任务</div>';
+    $('wsRecent').innerHTML=ts.length?ts.map(t=>{
+      const rp=(t.payload&&t.payload.result)||{};
+      const eb=rp.executed_by||(t.payload&&t.payload.intended_colleague)||'平台默认同事';
+      return '<div class="litem"><div class="grow"><div class="nm">'+esc(taskLabel(t))+'</div>'+
+      '<div class="mt">'+esc(t.task_id)+' · '+esc((t.payload&&t.payload.role)||'-')+' · 负责 '+esc(eb)+' · '+fmt(t.created_at)+'</div></div>'+
+      badge(t.status)+'</div>';
+    }).join(''):'<div class="empty">暂无任务</div>';
   }catch(e){$('wsRecent').innerHTML='<div class="empty">加载失败</div>';}
 }
 
@@ -1110,7 +1168,7 @@ async function loadNewTask(){
   // 候选依赖任务（仅单条模式需要）
   try{
     const ts=await jget('/api/tasks?limit=40');
-    if($('ntCandidates'))$('ntCandidates').innerHTML=ts.length?ts.map(t=>'<div class="litem"><div class="grow"><div class="nm">'+esc((t.payload&&t.payload.title)||t.task_id)+'</div>'+
+    if($('ntCandidates'))$('ntCandidates').innerHTML=ts.length?ts.map(t=>'<div class="litem"><div class="grow"><div class="nm">'+esc(taskLabel(t))+'</div>'+
       '<div class="mt">'+esc(t.task_id)+' · '+esc((t.payload&&t.payload.role)||'-')+'</div></div><div class="ops"><button class="btn ghost" onclick="addDep("'+esc(t.task_id)+'")">选为依赖</button></div></div>').join('')
       :'<div class="empty">暂无已有任务</div>';
   }catch(e){if($('ntCandidates'))$('ntCandidates').innerHTML='<div class="empty">加载失败</div>';}
@@ -1131,7 +1189,7 @@ async function previewPlan(){
   const out=$('ntPlanOut');
   out.innerHTML='<div class="empty">拆解中…</div>';
   try{
-    const r=await fetch('/api/plan/preview',{method:'POST',headers:{'Content-Type':'application/json'},
+    const r=await fetch('/api/plan/preview',{method:'POST',headers:authHeaders(),
       body:JSON.stringify({requirement:req})});
     const d=await r.json();
     if(!r.ok||!d.ok){$('ntPlanErr').textContent=d.error||'拆解失败';out.innerHTML='';return;}
@@ -1165,7 +1223,7 @@ async function buildPlan(){
   const req=window.__lastPlan||$('ntReq').value.trim();
   const btn=$('ntBuild'); if(btn) btn.disabled=true;
   try{
-    const r=await fetch('/api/plan/build',{method:'POST',headers:{'Content-Type':'application/json'},
+    const r=await fetch('/api/plan/build',{method:'POST',headers:authHeaders(),
       body:JSON.stringify({requirement:req,operator:SESSION?SESSION.user:'operator'})});
     const d=await r.json();
     if(!r.ok||!d.ok){$('ntPlanErr').textContent=d.error||'建图失败';return;}
@@ -1188,7 +1246,7 @@ async function submitNewTask(){
     priority:$('ntPriority').value,note:$('ntNote').value,depends_on:deps,
     operator:SESSION?SESSION.user:'operator'};
   try{
-    const r=await fetch('/api/tasks/new',{method:'POST',headers:{'Content-Type':'application/json'},
+    const r=await fetch('/api/tasks/new',{method:'POST',headers:authHeaders(),
       body:JSON.stringify(body)});
     const d=await r.json();
     if(!r.ok||!d.ok){$('ntErr').textContent=d.error||'创建失败';return;}
@@ -1600,7 +1658,7 @@ function applyPreset(id,name,cron){$('scId').value=id;$('scName').value=name;$('
 async function scAdd(){
   $('scErr').textContent='';$('scOk').textContent='';
   try{
-    const r=await fetch('/api/schedule',{method:'POST',headers:{'Content-Type':'application/json'},
+    const r=await fetch('/api/schedule',{method:'POST',headers:authHeaders(),
       body:JSON.stringify({job_id:$('scId').value.trim(),name:$('scName').value.trim(),cron:$('scCron').value.trim()})});
     const d=await r.json();
     if(!d.ok){$('scErr').textContent=d.error||'添加失败';return;}
@@ -1609,13 +1667,13 @@ async function scAdd(){
   }catch(e){$('scErr').textContent='请求失败：'+e;}
 }
 async function scToggle(jobId){
-  await fetch('/api/schedule/toggle',{method:'POST',headers:{'Content-Type':'application/json'},
+  await fetch('/api/schedule/toggle',{method:'POST',headers:authHeaders(),
     body:JSON.stringify({job_id:jobId})});
   loadSchedule();
 }
 async function scRemove(jobId){
   if(!confirm('删除调度规则 '+jobId+'？'))return;
-  await fetch('/api/schedule/remove',{method:'POST',headers:{'Content-Type':'application/json'},
+  await fetch('/api/schedule/remove',{method:'POST',headers:authHeaders(),
     body:JSON.stringify({job_id:jobId})});
   loadSchedule();
 }
@@ -1738,7 +1796,7 @@ async function loadChat(){
     chatHistory.push({role:'user',content:q.trim()});
     const holder=add('bot','<span class="typing">思考中…</span>','');
     try{
-      const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+      const r=await fetch('/api/chat',{method:'POST',headers:authHeaders(),
         body:JSON.stringify({question:q.trim(),history:chatHistory.slice(-6),
           model:(document.getElementById('chatModel')?document.getElementById('chatModel').value:'')})});
       const d=await r.json();
@@ -1792,7 +1850,7 @@ async function runFirstPrinciples(topic){
   box.innerHTML='<div class="fp-empty">分析中…（多个 AI 视角生成 + 本质判别中）</div>';
   if(btn)btn.disabled=true;
   try{
-    const r=await fetch('/api/first-principles',{method:'POST',headers:{'Content-Type':'application/json'},
+    const r=await fetch('/api/first-principles',{method:'POST',headers:authHeaders(),
       body:JSON.stringify({topic:topic,
         model:(document.getElementById('chatModel')?document.getElementById('chatModel').value:'')})});
     const d=await r.json();
@@ -1969,6 +2027,7 @@ async function openModelModal(pid){
   document.getElementById('mmBase').value='';
   document.getElementById('mmKey').value='';
   document.getElementById('mmModel').value='';
+  document.getElementById('mmKind').value='chat';
   document.getElementById('mmPickName').textContent='选择供应商…';
   document.getElementById('mmNote').textContent='';
   document.getElementById('mmWarn').textContent='';
@@ -1991,6 +2050,8 @@ async function openModelModal(pid){
       // 恢复该 profile 已记录的协议与计费方式
       fillSelect('mmProto',mmCatalog.protocolOptions||[],p.provider||'openai');
       fillBillingSelect(p.billing||'');
+      const kindEl=document.getElementById('mmKind');
+      if(kindEl)kindEl.value=(p.kind||'chat');
       syncProtoHint();syncBillingHint();
       const hit=mmCatalog.providers.find(function(x){return x.base_url===p.base_url;});
       if(hit){mmSel=hit;document.getElementById('mmPickName').textContent=hit.name+' · '+hit.billing_label;
@@ -2019,13 +2080,16 @@ async function saveModel(){
   const provider=(mmSel&&mmSel.protocol)||(protoEl&&protoEl.value)||'openai';
   const billEl=document.getElementById('mmBilling');
   const billing=(billEl&&billEl.value)||(mmSel?mmSel.billing:'');
+  const kindEl=document.getElementById('mmKind');
+  const kind=(kindEl&&kindEl.value)||'chat';
   const body={
     name:document.getElementById('mmName').value.trim()||(mmSel?mmSel.name:'自定义模型'),
     provider:provider,
     base_url:base,
     api_key:(mmEditId&&!keyVal)?'****':keyVal,
     model:document.getElementById('mmModel').value.trim(),
-    billing:billing
+    billing:billing,
+    kind:kind
   };
   if(mmEditId)body.id=mmEditId;
   const r=await postJSON('/api/chat/models',body);
@@ -2038,6 +2102,15 @@ function openCfg(){openModelModal(document.getElementById('chatModel')?document.
 
 // ---------------- 任务中心（复用只读 API） ----------------
 let tasksTab='tasks';
+function taskLabel(t){
+  // 任务列表/搜索里展示的可读身份：
+  //   单任务标题 > 原始需求(planner建图时用户的那句话) > 工序名 > 指令片段 > ID
+  // 对 planner 任务，用户的原话(requirement)比通用工序名(终稿交付…)更能定位。
+  const p=(t&&t.payload)||{};
+  const req=(p.plan&&p.plan.requirement)||'';
+  return p.title || (req?req.slice(0,48):'') || p.name ||
+    (p.instruction?p.instruction.slice(0,48):'') || (t&&t.task_id) || '-';
+}
 async function loadTasks(){
   const el=$('view-tasks');
   if(!el.dataset.init){
@@ -2051,16 +2124,30 @@ async function loadTasks(){
   const body=$('tasksBody');
   if(tasksTab==='tasks'){
     const tasks=await jget('/api/tasks?limit=500');const dag=await jget('/api/dag');
-    body.innerHTML='<div class="panel"><table class="tbl"><thead><tr><th>task_id</th><th>runner</th><th>状态</th><th>依赖/等待</th><th>创建</th><th>结果</th></tr></thead><tbody>'+
+    body.innerHTML='<div class="panel"><table class="tbl"><thead><tr><th>task_id</th><th>任务/指令</th><th>runner</th><th>状态</th><th>依赖/等待</th><th>创建</th><th>结果</th></tr></thead><tbody>'+
       (tasks.length?tasks.map(t=>{const dt=(dag.tasks&&dag.tasks[t.task_id])||{};const dep=(dt.depends_on&&dt.depends_on.length)?'依赖: '+dt.depends_on.join(', '):(dt.dead_upstream&&dt.dead_upstream.length?'上游已死: '+dt.dead_upstream.join(', '):'—');
         const res=(t.payload&&t.payload.result)||null;
         let rtag='<span class="muted">—</span>';
         if(res){
           if(res.op==='write_files')rtag='<span class="tag">📝 落盘 '+((res.written||[]).length)+' 个文件</span>';
           else if(res.op==='scan')rtag='<span class="tag">🔍 扫描 '+((res.findings_count!=null)?res.findings_count:((res.findings||[]).length))+' 处命中</span>';
-          else rtag='<span class="tag">产出</span>';
+          else if(res.op==='image')rtag='<span class="tag">🎨 图像 '+((res.count!=null)?res.count:((res.images||[]).length))+' 张</span>';
+          else { const sd=res.search||{}; const sc=(sd.count!=null)?sd.count:((sd.results&&sd.results.length)||''); rtag = sd.ok ? ('<span class="tag">🌐 联网检索'+(sc!==''?' '+sc+' 条':'')+'</span>') : '<span class="tag">产出</span>'; }
         }
-        return '<tr style="cursor:pointer" onclick="showTaskDetail(&quot;'+esc(t.task_id)+'&quot;)"><td>'+esc(t.task_id)+'</td><td>'+esc(t.runner_id||'-')+'</td><td>'+badge(t.status)+'</td><td style="color:var(--sub);font-size:12px">'+esc(dep)+'</td><td>'+fmt(t.created_at)+'</td><td>'+rtag+'</td></tr>';}).join(''):'<tr><td colspan="6" class="empty">无任务</td></tr>')+'</tbody></table></div>'+
+        // 智能运行时摘要：会话记忆 / 结构化错误 / 自我反思（与详情页同源，列表也能一眼看到）
+        let _extra='';
+        if(res){
+          const _sm=(res.skill_match&&typeof res.skill_match==='object')?res.skill_match:{};
+          const _cpN=Object.keys(_sm.cached_params||{}).length;
+          if(_cpN)_extra+=' <span class="tag" style="background:#16352a;color:#6ee7b7" title="该技能已在本次会话缓存环境变量，AI 不会重复询问">🧠 记忆 '+_cpN+'</span>';
+          const _ei=res.error_info||{};
+          if(_ei.error_code||_ei.human_readable_message)_extra+=' <span class="tag" style="background:#3a1d22;color:#e06c75" title="'+esc(_ei.human_readable_message||'')+'">⛔ '+esc(_ei.error_code||'错误')+'</span>';
+          if(res.self_correction_hint)_extra+=' <span class="tag" style="background:#2a2415;color:#d29922" title="'+esc(res.self_correction_hint||'')+'">💡 反思</span>';
+          if(res.experience_hint)_extra+=' <span class="tag" style="background:#16324a;color:#7cc0ff" title="'+esc(res.experience_hint||'')+'">🔁 经验复用</span>';
+          if(res.reflection)_extra+=' <span class="tag" style="background:#152a24;color:#6ee7b7" title="'+esc((res.reflection&&res.reflection.correction)||'')+'">🧬 反思落库</span>';
+          if(res.confidence_loop&&res.confidence_loop.applied&&res.confidence_loop.upgraded)_extra+=' <span class="tag" style="background:#241a3a;color:#b39cff" title="小模型排序置信不足，已升级更强模型">⬆️ 模型升级</span>';
+        }
+        return '<tr style="cursor:pointer" onclick="showTaskDetail(&quot;'+esc(t.task_id)+'&quot;)"><td>'+esc(t.task_id)+'</td><td>'+esc(taskLabel(t))+'</td><td>'+esc(t.runner_id||'-')+'</td><td>'+badge(t.status)+'</td><td style="color:var(--sub);font-size:12px">'+esc(dep)+'</td><td>'+fmt(t.created_at)+'</td><td>'+rtag+_extra+'</td></tr>';}).join(''):'<tr><td colspan="7" class="empty">无任务</td></tr>')+'</tbody></table></div>'+
       '<div id="taskDetail"></div>';
   } else if(tasksTab==='dag'){
     const dag=await jget('/api/dag');const ready=new Set(dag.ready||[]);
@@ -2088,8 +2175,82 @@ async function showTaskDetail(tid){
   let h='<div class="panel"><h3>'+esc(d.task_id)+' '+badge(d.status)+'</h3>';
   h+='<div class="muted" style="font-size:12px;margin:6px 0 10px">算子：<code>'+esc(d.op||'-')+
      '</code> · 环节：'+esc(d.name||'-')+(d.runner_id?' · 执行者：'+esc(d.runner_id):'')+'</div>';
+  const _rr=(d.result&&typeof d.result==='object')?d.result:{};
+  const _eb=_rr.executed_by||(d.payload&&d.payload.intended_colleague)||'平台默认同事';
+  h+='<div class="muted" style="font-size:12px;margin-bottom:10px">负责同事：<span class="pill">'+esc(_eb)+'</span>'+
+     (d.payload&&d.payload.role?' · 岗位：'+esc(d.payload.role):'')+
+     (_rr.routing_note?'<div style="color:#d29922;margin-top:4px">⚠ '+esc(_rr.routing_note)+'</div>':'')+'</div>';
   if(d.instruction)h+='<div class="muted" style="font-size:12px;margin-bottom:10px">任务要求：'+esc(d.instruction)+'</div>';
   if(d.last_feedback)h+='<div style="color:#d29922;font-size:12px;margin-bottom:10px">上次打回反馈：'+esc(d.last_feedback)+'</div>';
+  // ② 会话记忆：已缓存环境变量提示（避免 AI 重复询问同一信息）
+  const _sm=(_rr.skill_match&&typeof _rr.skill_match==='object')?_rr.skill_match:{};
+  const _cpKeys=Object.keys(_sm.cached_params||{});
+  if(_cpKeys.length){
+    const _cpItems=_cpKeys.map(function(k){
+      const v=_sm.cached_params[k];
+      const val=(v==='<redacted>')?'<span class="muted">（已脱敏）</span>':esc(v);
+      return '<li><code>'+esc(k)+'</code> = '+val+'</li>';
+    }).join('');
+    h+='<div style="margin-bottom:10px;font-size:12.5px"><span class="pill" style="background:#16352a;color:#6ee7b7">会话记忆</span> '
+      +'该技能已在本次会话缓存以下环境变量，AI 不会重复向你询问：'
+      +'<ul style="margin:6px 0 0 18px;padding:0;line-height:1.7">'+_cpItems+'</ul></div>';
+  }
+  // ③ 结构化错误 + 自我反思提示（诚实边界：展示真实失败，不伪装已成功）
+  const _ei=_rr.error_info||{};
+  if(_ei.error_code||_ei.human_readable_message){
+    h+='<div style="margin-bottom:10px"><div style="color:#e06c75;font-size:13px;font-weight:600">⛔ 执行未通过 · 结构化错误</div>'
+      +'<div class="muted" style="font-size:12px;margin-top:4px">错误码：<code>'+esc(_ei.error_code||'-')+'</code>'
+      +(_ei.stage?' · 阶段：<code>'+esc(_ei.stage)+'</code>':'')+'</div>'
+      +'<div style="font-size:12.5px;margin-top:4px">'+esc(_ei.human_readable_message||'')+'</div>'
+      +(_ei.technical_detail?'<details style="margin-top:4px"><summary class="muted" style="font-size:12px;cursor:pointer">技术细节（开发者）</summary>'
+        +'<pre style="white-space:pre-wrap;font-size:11.5px;margin:4px 0 0;color:var(--sub)">'+esc(_ei.technical_detail||'')+'</pre></details>':'')
+      +'</div>';
+  }
+  const _sch=_rr.self_correction_hint||'';
+  if(_sch){
+    h+='<div style="margin-bottom:10px;font-size:12.5px;background:#2a2415;border-left:3px solid #d29922;padding:8px 10px;border-radius:4px">'
+      +'<span style="color:#d29922;font-weight:600">AI 自我反思建议：</span> '+esc(_sch)+'</div>';
+  }
+  // 智能运行时演进（夜间 v1.3）：经验复用 / 自我反思落库 / 分层记忆 / 置信循环
+  // 透明不静默——把「AI 学到的经验 / 记住的轨迹 / 是否升级模型」如实摆出来，
+  // 不伪装成一次普通执行。所有字段都来自 daemon result，缺失则不渲染该行。
+  const _em=_sm.experience_match||null;
+  const _cl=_rr.confidence_loop||{};
+  const _rf=_rr.reflection||null;
+  const _me=_rr.memory_episode||null;
+  if(_em||_rf||_me||_cl.applied){
+    h+='<div style="margin-bottom:10px;border:1px solid #2a3546;border-radius:6px;padding:10px 12px;font-size:12.5px;line-height:1.7">'
+      +'<div style="font-weight:600;color:#7cc0ff;margin-bottom:4px">🧬 智能运行时（自我反思 · 分层记忆 · 置信循环）</div>';
+    if(_em){
+      h+='<div><span class="pill" style="background:#16324a;color:#7cc0ff">经验复用</span> 命中历史修正（'
+        +esc(_em.match_type||'-')+'，相似度 '+esc(String(_em.score!=null?_em.score:'-'))
+        +'）：'+esc(_rr.experience_hint||'')+'</div>';
+    }
+    if(_rf){
+      h+='<div><span class="pill" style="background:#152a24;color:#6ee7b7">自我反思·落库</span> 归因 <code>'
+        +esc(_rf.category||'-')+'</code>，修正假设来源 <code>'+esc(_rf.generated_by||'-')
+        +'</code>'+(_rf.generated_by==='rule'?'（无模型/调不通→规则式降级，未伪造）':'')
+        +'，经验 id <code>'+esc(_rf.experience_id||'-')+'</code>：'+esc(_rf.correction||'')+'</div>';
+    }
+    if(_me){
+      const _procs=(_me.procedures||[]).map(function(p){
+        return esc(p.skill||'-')+'（命中 '+esc(String(p.hits||0))+' 次，工具组合：'
+          +esc((p.tools||[]).join(', ')||'无')+'）';}).join('；');
+      h+='<div><span class="pill" style="background:#2a2415;color:#d29922">分层记忆</span> 情景轨迹已落库（技能 <code>'
+        +esc(_me.skill||'-')+'</code>，'+(_me.ok?'成功':'失败')+'）；本次工具组合：'
+        +esc((_me.tools||[]).join(', ')||'无')
+        +(_procs?'；程序记忆推荐：'+_procs:'（失败不提炼程序记忆）')+'</div>';
+    }
+    if(_cl.applied){
+      h+='<div><span class="pill" style="background:#241a3a;color:#b39cff">置信循环</span> '
+        +(_cl.upgraded
+          ? '小模型排序一致性 '+esc(String(_cl.weak_consistency))+' < 阈值 '+esc(String(_cl.threshold))
+            +'，已升级更强模型 <code>'+esc(_cl.model||'-')+'</code>（最终一致性 '+esc(String(_cl.consistency))+'）'
+          : '小模型排序与启发式一致（一致性 '+esc(String(_cl.consistency))+'），未升级模型（省算力）')
+        +'</div>';
+    }
+    h+='</div>';
+  }
   h+=renderResult(d.result);
   h+='</div>';
   el.innerHTML=h;
@@ -2099,10 +2260,25 @@ function renderResult(res){
   if(!res)return '<div class="empty">该任务尚无结果（可能还没执行，或执行失败未产出）</div>';
   if(res.op==='write_files')return renderWriteFiles(res);
   if(res.op==='scan')return renderScanResult(res);
+  if(res.op==='image')return renderImageResult(res);
+  // 真实检索来源（web_search 任务）：即使模型输出不理想，也透明展示搜到的网页，
+  // 避免用户只看到「联网产出」标签却看不到任何内容（诚实边界：标注「非模型记忆」）。
+  let searchBlock='';
+  const sd=res.search||{};
+  if(sd.results && sd.results.length){
+    searchBlock='<div style="margin-top:12px"><h3>真实检索来源（'+sd.results.length+' 条，非模型记忆）</h3><ul style="margin:0;padding-left:18px;font-size:12.5px;line-height:1.6">'
+      +sd.results.map(function(r){return '<li><a href="'+esc(r.url||'#')+'" target="_blank" rel="noopener">'+esc(r.title||r.url||'')+'</a>'
+        +(r.snippet?'<br><span class="muted" style="font-size:12px">'+esc(r.snippet)+'</span>':'')+'</li>';}).join('')
+      +'</ul></div>';
+  }else if(sd.ok && (sd.count||0)>0 && !sd.results){
+    // 旧版执行器只记 count 不落 results：如实说明，而不是静默空白
+    searchBlock='<div style="margin-top:12px;font-size:12.5px" class="muted">该任务由旧版执行器完成：当时只记录了检索条数（'
+      +sd.count+' 条），未落库具体来源链接。重新发起一次搜索任务即可看到完整来源。</div>';
+  }
   const txt=res.output||res.stdout||'';
-  if(!txt)return '<div class="empty">结果里没有可展示的文本内容</div>';
+  if(!txt && !searchBlock)return '<div class="empty">结果里没有可展示的文本内容</div>';
   return '<div style="margin-top:10px"><h3>产出内容</h3>'+
-    '<pre style="white-space:pre-wrap;font-size:12.5px;margin:0">'+esc(txt)+'</pre></div>';
+    '<pre style="white-space:pre-wrap;font-size:12.5px;margin:0">'+esc(txt)+'</pre></div>'+searchBlock;
 }
 function renderWriteFiles(res){
   const w=res.written||[],b=res.blocked||[],s=res.scan||{};
@@ -2149,6 +2325,27 @@ function renderScanResult(res){
         '<td style="font-size:11px">'+esc(x.secret_masked||'')+'</td></tr>').join('')+'</tbody></table>';
   }else{
     h+='<div class="empty">未发现命中</div>';
+  }
+  h+='</div>';
+  return h;
+}
+function renderImageResult(res){
+  const imgs=(res.images||[]);
+  let h='<div style="margin-top:10px"><h3>图像生成结果 <span class="tag">'+((res.count!=null)?res.count:imgs.length)+' 张</span>'
+    +(res.model?' <span class="tag">'+esc(res.model)+'</span>':'')+'</h3>';
+  if(res.prompt)h+='<div class="muted" style="font-size:12px;margin-bottom:8px">绘制提示：<code>'+esc(res.prompt)+'</code></div>';
+  if(imgs.length){
+    h+='<div style="display:flex;flex-wrap:wrap;gap:12px">'
+      +imgs.map(function(im){
+        const url=im.url||'#';
+        return '<div style="border:1px solid var(--bd);border-radius:8px;overflow:hidden;background:var(--bg);max-width:340px">'
+          +'<a href="'+esc(url)+'" target="_blank" rel="noopener"><img src="'+esc(url)
+          +'" alt="生成图" style="display:block;max-width:340px;max-height:340px;width:auto;height:auto"></a>'
+          +(im.local?'<div class="muted" style="font-size:11px;padding:4px 8px">'+esc(im.file||'')+'</div>':'')
+          +'</div>';
+      }).join('')+'</div>';
+  }else{
+    h+='<div class="empty">本次未生成可展示的图片（可能端点只返回了无法直链的引用）</div>';
   }
   h+='</div>';
   return h;
@@ -2364,6 +2561,89 @@ async function loadSecurity(){
 }
 
 // ---------------- 技能 ----------------
+// ---------------- v2 技能执行可观测（W4 仪表盘） ----------------
+async function loadSkillOps(){
+  const el=$('view-skillops');
+  el.innerHTML='<div style="padding:18px"><div class="skops-card"><h3>技能执行可观测</h3><div id="skopsBody" class="skops-muted">加载中…</div></div></div>';
+  try{
+    const [state,dec,guard]=await Promise.all([
+      jget('/api/governance/skills/state'),
+      jget('/api/governance/skills/decisions'),
+      jget('/api/governance/skills/guard?limit=30')]);
+    let h='';
+    // ① 状态热力
+    h+='<div class="skops-card"><h3>① 状态热力（连续失败熔断 / 历史成功率）</h3><div class="skops-grid">';
+    const skills=state.skills||{}; const names=Object.keys(skills);
+    if(!names.length) h+='<div class="skops-muted">暂无技能状态记录（执行过技能后出现）</div>';
+    for(const n of names){
+      const s=skills[n]||{}; const st=s.status||'ok';
+      const col=st==='ok'?'var(--ok)':(st==='circuit_open'?'var(--warn)':(st==='degraded'?'var(--pend)':'var(--sub)'));
+      h+='<div class="skops-cell" style="border-left-color:'+col+'">'
+        +'<div class="skops-name">'+esc(n)+'</div>'
+        +'<div class="skops-meta">'+esc(st)+' · 成功率 '+Math.round((s.success_rate||0)*100)+'% · 连续失败 '+(s.consecutive_failures||0)+'</div>'
+        +(s.last_stage?'<div class="skops-meta">最后阶段 '+esc(s.last_stage)+'</div>':'')
+        +'</div>';
+    }
+    h+='</div></div>';
+    // ② 打分瀑布
+    h+='<div class="skops-card"><h3>② L1 打分瀑布（为什么选它 / 为什么弃）</h3>';
+    const evs=dec.events||[];
+    if(!evs.length) h+='<div class="skops-muted">暂无 skill_match 事件。可在下方「试跑」输入查询触发一次检索。</div>';
+    else{
+      const d=evs[evs.length-1].detail||{}; const cs=d.candidates||[];
+      h+='<div class="skops-muted" style="margin-bottom:8px">查询：'+esc(d.query||'')+' · 向量：'+esc(d.embedding_status||'')+' · Rerank：'+esc(d.reranker||'')+' · Top1/Top2 分差：'+esc(String(d.top1_top2_gap))+' · 需人工：'+(d.needs_human?'是':'否')+'</div>';
+      for(const c of cs.slice(0,8)){
+        const sc=c.scores||{}; const rr=(sc.rerank!=null?sc.rerank:(sc.rrf||0));
+        const w=Math.max(2,Math.min(100,Math.round(Math.abs(rr)*160)));
+        h+='<div class="skops-row"><span class="skops-tag">#'+esc(String(c.rank||'-'))+(c.chosen?' ✔':'')+'</span>'
+          +'<span class="skops-nm" title="'+esc(c.reason||'')+'">'+esc(c.name)+'</span>'
+          +'<span class="skops-bar"><i style="width:'+w+'%"></i></span>'
+          +'<span class="skops-val">'+Number(rr).toFixed(4)+'</span>'
+          +'<span class="skops-tier">'+esc(c.tier||'')+'</span>'
+          +(c.filtered_by?'<span class="skops-flt">'+esc(c.filtered_by)+'</span>':'')
+          +'</div>';
+      }
+    }
+    h+='</div>';
+    // ③ 门禁泳道
+    h+='<div class="skops-card"><h3>③ 门禁泳道（哪道门 / 哪条规则拦的）</h3>';
+    const by=guard.by_blocked_by||{}; const bk=Object.keys(by);
+    if(bk.length){h+='<div class="skops-chips">';for(const k of bk){h+='<span class="chip">'+esc(k)+' × '+by[k]+'</span>';}h+='</div>';}
+    const items=guard.items||[];
+    if(!items.length) h+='<div class="skops-muted">暂无 guard_decision 事件。</div>';
+    for(const it of items.slice(0,8)){
+      const dd=it.detail||{}; const stages=dd.stages||[];
+      h+='<div class="skops-gate"><div class="skops-gate-h">'+esc(dd.target||'')
+        +' → <b>'+esc(dd.decision||'')+'</b> '
+        +(dd.blocked_by?'<span class="skops-flt">'+esc(dd.blocked_by)+'</span>':'')+'</div><div class="skops-lane">';
+      for(const s of stages){
+        const okv=s.ok===true?'✔':(s.ok===false?'✘':'—');
+        const col=s.ok===true?'var(--ok)':(s.ok===false?'var(--warn)':'var(--sub)');
+        h+='<span class="skops-stage" style="border-color:'+col+'" title="'+esc(s.note||'')+'">'
+          +okv+' '+esc(s.stage)+(s.rule_id?' ['+esc(s.rule_id)+']':'')+(s.parallel?' ∥':'')+'</span>';
+      }
+      h+='</div></div>';
+    }
+    h+='</div>';
+    // ④ 试跑
+    h+='<div class="skops-card"><h3>④ 试跑一次技能检索（op=skill，走 SkillRouter + 分级门禁）</h3>'
+      +'<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><input id="skopsQuery" class="skops-input" placeholder="例如：帮我清理电脑释放磁盘空间">'
+      +'<button class="btn" onclick="runSkillOps()">发起检索任务</button> <span id="skopsMsg" class="skops-muted"></span></div></div>';
+    $('skopsBody').innerHTML=h;
+  }catch(e){
+    $('skopsBody').innerHTML='<div class="skops-muted">加载失败：'+esc(e.message||e)+'</div>';
+  }
+}
+async function runSkillOps(){
+  const q=($('skopsQuery').value||'').trim();
+  if(!q){ $('skopsMsg').textContent='请输入查询'; return; }
+  $('skopsMsg').textContent='提交中…';
+  try{
+    const r=await postJSON('/api/governance/skills/run',{title:q,query:q,role:'auditor',skill_k:3});
+    $('skopsMsg').textContent=r.ok?('已登记 '+r.task_id+'（trace '+r.trace_id+'），等 daemon 执行后刷新查看链路'):('失败：'+esc(r.error||'unknown'));
+  }catch(e){ $('skopsMsg').textContent='请求失败：'+esc(e.message||e); }
+}
+
 async function loadSkills(){
   const el=$('view-skills');
   const s=await jget('/api/skills');
@@ -2376,6 +2656,197 @@ async function loadSkills(){
           '<div class="src">'+(k.source==='skillhub'?'SkillHub · ':'本地 · ')+esc(k.slug)+'</div>'+
           '<div class="ds">'+esc(k.description||'（暂无功能简介）')+'</div></div>';
       }).join(''):'<div class="empty">暂无技能</div>')+'</div>';
+}
+
+// ---------------- 合规治理（governance 包前端展示） ----------------
+async function loadGovernance(){
+  const el=$('view-governance');
+  el.innerHTML='<h2 class="vh">合规治理</h2><p class="vdesc">安全合规治理层（governance 包）的可验证状态：身份可管 · 操作可溯 · 出事能熔断 · 合规自评。</p>'
+    +'<div class="skops-muted" id="govBody">加载中…</div>';
+  try{
+    const [rbac,circuit,assets,compliance,interop,kb,egress,peers,etsi]=
+      await Promise.all([
+        jget('/api/governance/rbac'),
+        jget('/api/governance/circuit'),
+        jget('/api/governance/assets'),
+        jget('/api/governance/compliance'),
+        jget('/api/governance/interop'),
+        jget('/api/governance/kb/labels'),
+        jget('/api/governance/egress'),
+        jget('/api/governance/interop/peers'),
+        jget('/api/governance/etsi')]);
+    let h='<div class="warnbar">诚实边界：本页展示「可验证、经得起测」的治理状态。'
+      +'认证与硬件级 attestation 需第三方机构核验，代码只做到可验证、不自证合规；'
+      +'loopback 联邦发现为本地 fixture，不冒充跨厂商互联。'
+      +'大小模型组合的内容防护（脱敏 / 越狱检测 / 输出 PII 回潮）已在 LLM 主链路闭环生效（governance.content_guard），不在此单列状态。</div>';
+    h+=govCircuitPanel(circuit);
+    h+=govRbacPanel(rbac);
+    h+=govAssetsPanel(assets);
+    h+=govCompliancePanel(compliance);
+    h+=govInteropPanel(interop,peers);
+    h+=govKbPanel(kb,egress);
+    h+=govEtsiPanel(etsi);
+    $('govBody').innerHTML=h;
+  }catch(e){
+    $('govBody').innerHTML='<div class="skops-muted">加载失败：'+esc(e.message||e)+'</div>';
+  }
+}
+function govCircuitPanel(c){
+  if(c.need_auth) return '<div class="skops-card"><h3>① 全局紧急熔断</h3><div class="skops-muted">需登录后查看（governance.read）。</div></div>';
+  const open=c.open;
+  const pill=open?'<span class="pill" style="background:var(--warn);color:#fff">● 已熔断</span>':'<span class="pill live">● 正常</span>';
+  const hist=(c.history||[]).slice(-6).reverse();
+  const histHtml=hist.length?'<div class="skops-muted" style="margin-top:8px">最近事件：<br>'+hist.map(function(x){return esc(x.event)+' · '+esc(String(x.by||''))+' · '+(x.at?fmt(x.at):'')+(x.reason?' · '+esc(x.reason):'');}).join('<br>')+'</div>':'';
+  return '<div class="skops-card"><h3>① 全局紧急熔断（出事能熔断 · governance.emergency，仅 admin）</h3>'
+    +'<div style="margin:6px 0">'+pill+'</div>'
+    +'<div class="grid stats">'+stat(esc(c.reason||'—'),'当前原因')+stat((c.tripped_at?fmt(c.tripped_at):'—'),'触发时间','accent')+'</div>'
+    +'<div class="row" style="margin-top:10px">'
+    +'<input id="govTripReason" class="skops-input" placeholder="熔断原因（如：发现越狱攻击）" style="flex:1;max-width:320px">'
+    +'<button class="btn" style="background:var(--warn)" onclick="govTrip()">触发熔断</button>'
+    +'<button class="btn ghost" onclick="govReset()">解除熔断</button></div>'
+    +histHtml+'</div>';
+}
+async function govTrip(){
+  const reason=($('govTripReason').value||'').trim();
+  const r=await postJSON('/api/governance/circuit/trip',{reason:reason});
+  if(r.status===200&&r.data&&r.data.ok){toast('已触发全局熔断','ok');loadGovernance();}
+  else toast('触发失败：'+((r.data&&r.data.error)||r.status),'err');
+}
+async function govReset(){
+  const r=await postJSON('/api/governance/circuit/reset',{});
+  if(r.status===200&&r.data&&r.data.ok){toast('已解除熔断','ok');loadGovernance();}
+  else toast('解除失败：'+((r.data&&r.data.error)||r.status),'err');
+}
+function govRbacPanel(r){
+  if(r.need_auth) return '<div class="skops-card"><h3>② 角色权限矩阵（RBAC）</h3><div class="skops-muted">需登录后查看。</div></div>';
+  const roles=r.roles||{}; const perms=r.permissions||[];
+  const rows=Object.keys(roles).map(function(role){
+    const ps=roles[role]||[];
+    return '<tr><td><b>'+esc(role)+'</b></td><td><span class="tag">'+ps.length+' 项</span></td><td class="pre" style="font-size:12px">'+ps.map(function(p){return '<span class="chip">'+esc(p)+'</span>';}).join(' ')+'</td></tr>';
+  }).join('');
+  return '<div class="skops-card"><h3>② 角色权限矩阵（RBAC · 身份可管）</h3>'
+    +'<div class="grid stats">'+stat(perms.length,'权限点总数','accent')+stat(Object.keys(roles).length,'角色数')+'</div>'
+    +'<table class="tbl"><thead><tr><th>角色</th><th>权限数</th><th>权限明细</th></tr></thead><tbody>'+rows+'</tbody></table>'
+    +'<div class="skops-muted" style="margin-top:6px">default-deny：未显式授予即不可访问；熔断 / 落盘 / 复位等最高危动作限 admin（governance.emergency）。</div></div>';
+}
+function govAssetsPanel(a){
+  if(a.need_auth) return '<div class="skops-card"><h3>③ 资产盘点</h3><div class="skops-muted">需登录后查看。</div></div>';
+  const s=a.summary||{}; const list=a.assets||[];
+  const byKind=Object.entries(s.by_kind||{}).map(function(e){return '<span class="chip">'+esc(e[0])+' '+e[1]+'</span>';}).join(' ');
+  const byClass=Object.entries(s.by_classification||{}).map(function(e){return '<span class="chip">'+esc(e[0])+' '+e[1]+'</span>';}).join(' ');
+  const items=list.slice(0,12).map(function(x){return '<tr><td>'+esc(x.id||'')+'</td><td>'+esc(x.kind||'')+'</td><td><span class="tag">'+esc(x.classification||'')+'</span></td><td class="pre" style="font-size:12px">'+esc(((x.meta||{}).desc)||x.name||'')+'</td></tr>';}).join('');
+  return '<div class="skops-card"><h3>③ 资产盘点与管理（国标委六项之一）</h3>'
+    +'<div class="grid stats">'+stat(s.total||0,'资产总数','accent')+'</div>'
+    +'<div class="skops-muted" style="margin:6px 0">按类型：'+(byKind||'—')+'<br>按密级：'+(byClass||'—')+'</div>'
+    +'<div class="row" style="margin:8px 0"><button class="btn" onclick="govDiscover()">自动发现并登记资产</button><span id="govDiscMsg" class="skops-muted"></span></div>'
+    +(items?'<table class="tbl"><thead><tr><th>ID</th><th>类型</th><th>密级</th><th>描述</th></tr></thead><tbody>'+items+'</tbody></table>':'<div class="skops-muted">暂无资产（点上方按钮从平台结构自动发现）。</div>')
+    +'</div>';
+}
+async function govDiscover(){
+  const r=await postJSON('/api/governance/assets/discover',{});
+  if(r.status===200&&r.data&&r.data.ok){$('govDiscMsg').textContent='已登记 / 确认 '+r.data.total+' 项资产';loadGovernance();}
+  else $('govDiscMsg').textContent='失败：'+((r.data&&r.data.error)||r.status);
+}
+function govCompliancePanel(c){
+  if(c.need_auth) return '<div class="skops-card"><h3>④ 合规自评矩阵</h3><div class="skops-muted">需登录后查看。</div></div>';
+  const sm=c.summary||{};
+  const smHtml='<div class="grid stats">'+stat(sm.implemented||0,'已实现','ok')+stat(sm.partial||0,'部分',(sm.partial?'accent':''))+stat(sm.designed||0,'设计中')+stat(sm.exempt||0,'豁免')+'</div>';
+  const caps=(c.capabilities||[]).map(function(x){
+    const col=x.status==='implemented'?'var(--ok)':(x.status==='partial'?'var(--pend)':(x.status==='designed'?'var(--sub)':'var(--warn)'));
+    return '<tr><td><b>'+esc(x.name||'')+'</b><br><span class="skops-muted" style="font-size:11px">'+esc(x.standard||'')+'</span></td>'
+      +'<td><span class="pill" style="background:'+col+';color:#fff">'+esc(x.status)+'</span></td>'
+      +'<td class="pre" style="font-size:12px">'+esc(x.evidence||'')+'</td>'
+      +'<td class="pre" style="font-size:12px">'+esc(x.note||'')+'</td></tr>';
+  }).join('');
+  return '<div class="skops-card"><h3>④ 合规自评矩阵（国标委〔2026〕41号六项 · GB/Z 185—2026 · ETSI）</h3>'
+    +smHtml
+    +'<table class="tbl"><thead><tr><th>能力</th><th>状态</th><th>证据</th><th>说明</th></tr></thead><tbody>'+caps+'</tbody></table>'
+    +'<div class="skops-muted" style="margin-top:6px">自评不自证认证：涉及认证 / 硬件 attestation 的能力标 partial / designed，交由第三方机构核验。</div></div>';
+}
+function govInteropPanel(it,peers){
+  if(it.need_auth) return '<div class="skops-card"><h3>⑤ 互联与联邦</h3><div class="skops-muted">需登录后查看。</div></div>';
+  const descs=(it.descriptors||[]).map(function(d){return '<span class="chip">'+esc(d.agent_id||d.display_name||'')+'</span>';}).join(' ');
+  const plist=(peers.peers||[]).map(function(p){return '<span class="chip">'+esc(p.name||p.peer_id||'')+' · '+esc(p.trust_level||'')+'</span>';}).join(' ');
+  return '<div class="skops-card"><h3>⑤ 互联描述符与联邦（GB/Z 185—2026）</h3>'
+    +'<div class="skops-muted" style="margin:6px 0">本平台智能体描述符：'+(descs||'—')+'</div>'
+    +'<div class="skops-muted" style="margin:6px 0">已登记对等平台：'+(plist||'（无）')+'</div>'
+    +'<div class="row" style="margin:8px 0;flex-wrap:wrap;gap:8px">'
+    +'<input id="govPeerName" class="skops-input" placeholder="平台名" style="max-width:140px">'
+    +'<input id="govPeerUrl" class="skops-input" placeholder="base_url" style="max-width:220px">'
+    +'<button class="btn" onclick="govInteropRegister()">登记远程平台</button>'
+    +'<button class="btn ghost" onclick="govInteropDiscover()">联邦发现</button>'
+    +'<span id="govInteropMsg" class="skops-muted"></span></div>'
+    +'<div class="skops-muted" style="margin-top:6px">诚实边界：本地 loopback 发现为 fixture，不冒充跨厂商互联；登记 / 发现 / 委派均经 interop.write 强校验。</div></div>';
+}
+async function govInteropRegister(){
+  const name=($('govPeerName').value||'').trim();
+  const url=($('govPeerUrl').value||'').trim();
+  if(!name||!url){$('govInteropMsg').textContent='请填写平台名与 base_url';return;}
+  const r=await postJSON('/api/governance/interop/register',{name:name,base_url:url,trust_level:'untrusted'});
+  if(r.status===200&&r.data&&r.data.ok){$('govInteropMsg').textContent='已登记 '+name;loadGovernance();}
+  else $('govInteropMsg').textContent='失败：'+((r.data&&r.data.error)||r.status);
+}
+async function govInteropDiscover(){
+  const url=($('govPeerUrl').value||'').trim();
+  const name=($('govPeerName').value||'').trim();
+  if(!url&&!name){$('govInteropMsg').textContent='请填写 base_url 或平台名';return;}
+  const r=await postJSON('/api/governance/interop/discover',{base_url:url,peer_name:name});
+  if(r.status===200&&r.data&&r.data.ok){$('govInteropMsg').textContent='发现成功：'+JSON.stringify(r.data.summary||r.data);loadGovernance();}
+  else $('govInteropMsg').textContent='失败：'+((r.data&&r.data.error)||r.status);
+}
+function govKbPanel(kb,eg){
+  if(kb.need_auth||eg.need_auth) return '<div class="skops-card"><h3>⑥ 知识库分级与数据出域</h3><div class="skops-muted">需登录后查看（governance.read）。</div></div>';
+  const labels=kb.labels||{};
+  const labelRows=Object.keys(labels).length?Object.keys(labels).map(function(k){return '<span class="chip">'+esc(k)+' → '+esc(labels[k].classification||'')+'</span>';}).join(' '):'（暂无标签）';
+  const reqs=eg.requests||{};
+  const reqRows=Object.keys(reqs).length?Object.keys(reqs).map(function(k){return '<span class="chip">'+esc(k)+' · '+esc(reqs[k].classification||'')+' → '+esc(reqs[k].destination||'*')+' · '+esc(reqs[k].status||'')+'</span>';}).join(' '):'（无出域申请）';
+  return '<div class="skops-card"><h3>⑥ 知识库分级与数据出域审批（默认拒绝 · fail-closed）</h3>'
+    +'<div class="skops-muted" style="margin:6px 0">分级标签：'+(labelRows)+'</div>'
+    +'<div class="skops-muted" style="margin:6px 0">出域申请：'+(reqRows)+'</div>'
+    +'<div class="row" style="margin:8px 0;flex-wrap:wrap;gap:8px">'
+    +'<input id="govKbCat" class="skops-input" placeholder="category" style="max-width:120px">'
+    +'<input id="govKbKey" class="skops-input" placeholder="key" style="max-width:120px">'
+    +'<select id="govKbCls" class="skops-input" style="max-width:110px"><option>public</option><option selected>internal</option><option>restricted</option><option>confidential</option></select>'
+    +'<button class="btn" onclick="govKbLabel()">打分级标签</button></div>'
+    +'<div class="row" style="margin:8px 0;flex-wrap:wrap;gap:8px">'
+    +'<input id="govEgRef" class="skops-input" placeholder="item_ref" style="max-width:150px">'
+    +'<select id="govEgCls" class="skops-input" style="max-width:110px"><option>public</option><option selected>internal</option><option>restricted</option><option>confidential</option></select>'
+    +'<input id="govEgDest" class="skops-input" placeholder="destination（默认 *）" style="max-width:160px">'
+    +'<button class="btn" onclick="govEgressRequest()">申请出域</button><span id="govKbMsg" class="skops-muted"></span></div>'
+    +'<div class="skops-muted" style="margin-top:6px">restricted 需 approval.act 审批；confidential 需 governance.emergency；读取不到批准记录一律拒（fail-closed）。</div></div>';
+}
+async function govKbLabel(){
+  const category=($('govKbCat').value||'').trim();
+  const key=($('govKbKey').value||'').trim();
+  const classification=$('govKbCls').value;
+  if(!category||!key){$('govKbMsg').textContent='请填写 category 与 key';return;}
+  const r=await postJSON('/api/governance/kb/label',{category:category,key:key,classification:classification});
+  if(r.status===200&&r.data&&r.data.ok){$('govKbMsg').textContent='已打标签：'+classification;loadGovernance();}
+  else $('govKbMsg').textContent='失败：'+((r.data&&r.data.error)||r.status);
+}
+async function govEgressRequest(){
+  const item_ref=($('govEgRef').value||'').trim();
+  const classification=$('govEgCls').value;
+  const destination=($('govEgDest').value||'').trim()||'*';
+  if(!item_ref){$('govKbMsg').textContent='请填写 item_ref';return;}
+  const r=await postJSON('/api/governance/egress/request',{item_ref:item_ref,classification:classification,destination:destination});
+  if(r.status===200&&r.data&&r.data.ok){$('govKbMsg').textContent='已提交出域申请（restricted 需审批）';loadGovernance();}
+  else $('govKbMsg').textContent='失败：'+((r.data&&r.data.error)||r.status);
+}
+function govEtsiPanel(e){
+  if(e.need_auth) return '<div class="skops-card"><h3>⑦ ETSI TS 104 033 部署就绪</h3><div class="skops-muted">需登录后查看。</div></div>';
+  const hm=(e.hardening_manifest||{});
+  return '<div class="skops-card"><h3>⑦ ETSI TS 104 033 · 部署层安全就绪</h3>'
+    +'<div class="grid stats">'+stat(esc(e.standard||'ETSI TS 104 033'),'标准','accent')+stat(esc(hm.scope||'—'),'范围')+'</div>'
+    +'<div class="skops-muted" style="margin:6px 0">systemd 最小权限模板、ProtectSystem=strict、NoNewPrivileges、MemoryDenyWriteExecute 等加固项已生成（见 hardening_manifest）。</div>'
+    +'<div class="row" style="margin:8px 0"><button class="btn" onclick="govEtsiVerify()">运行日志完整性校验</button><span id="govEtsiMsg" class="skops-muted"></span></div>'
+    +'<div class="skops-muted" style="margin-top:6px">诚实边界：attestation_status 恒为 false——TPM / UEFI / 第三方认证不自证；哈希链仅 tamper-evident（可定位 broken_at），非 proof。</div></div>';
+}
+async function govEtsiVerify(){
+  const r=await postJSON('/api/governance/etsi/verify',{});
+  const li=r.data&&r.data.log_integrity;
+  if(r.status===200&&r.data&&r.data.ok){$('govEtsiMsg').textContent='完整性：'+(li&&li.ok?'通过':'异常 '+(li&&li.broken_at||''));}
+  else $('govEtsiMsg').textContent='失败：'+((r.data&&r.data.error)||r.status);
 }
 
 // ---------------- 设置 ----------------
@@ -2392,9 +2863,11 @@ async function loadSettings(){
       '<div class="mlist" id="modelList">'+
       (profiles.length?profiles.map(function(p){
         const act=p.active;
+        const kindTag=(p.kind==='image')?' <span class="mtag">🎨 文生图</span>':'';
         return '<div class="mrow2"><div class="mi">'+esc(p.name)+
           (act?' <span class="pill live">当前</span>':'')+
           (p.billing_label?' <span class="mtag">'+esc(p.billing_label)+'</span>':'')+
+          kindTag+
           '<div class="mi-sub">'+esc(p.provider)+' · '+esc(p.base_url||'-')+' · 模型 '+
           esc(p.model||'（默认）')+(p.configured?'':' · <span style="color:#b45309">未配置密钥，对话不可用</span>')+'</div></div>'+
           '<div class="mact">'+
@@ -2404,6 +2877,10 @@ async function loadSettings(){
           '</div></div>';
       }).join(''):'<div class="empty">尚未配置任何模型</div>')+'</div>'+
       '<div class="ctip" style="margin-top:10px">'+esc(cat.notice||'')+'</div></div>'+
+    '<div class="panel"><h3>岗位 ↔ AI 同事 <span class="tag" style="margin-left:6px">分工路由</span></h3>'+
+      '<div class="ctip">给每个岗位绑定一个 AI 同事（模型）。绑定后，新建该岗位的任务就由对应同事负责；'+
+      '未绑定、或绑定同事未配密钥时，自动回退到「平台默认同事」（当前激活模型）。修改需管理员权限。</div>'+
+      '<div id="roleRoutingBody"><div class="empty">加载中…</div></div></div>'+
     '<div class="panel"><h3>主题</h3><div class="row"><button class="btn ghost" onclick="document.getElementById(&quot;themeBtn&quot;).click()">切换浅色 / 深色</button><span style="color:var(--sub)">当前：'+esc(document.documentElement.getAttribute('data-theme')||'light')+'</span></div></div>'+
     '<div class="panel"><h3>数据源（只读）</h3><div class="row" style="color:var(--sub)">'+
       '<span>登记处：<code class="k">'+esc(ov.db_registry||'')+'</code></span>'+
@@ -2420,6 +2897,7 @@ async function loadSettings(){
   $('setChat').innerHTML='<div class="row"><span class="pill live">规则引擎</span>'+
     (act?('<span class="pill'+(act.configured?' live':'')+'">LLM：'+esc(act.name)+'（'+esc(act.provider)+'）'+(act.configured?'':' · 未配置密钥')+'</span>')
          :'<span class="pill">LLM 未配置</span>')+'</div>';
+  await loadRoleRouting();
   const add=$('btnAddModel');if(add)add.addEventListener('click',function(){openModelModal('');});
   el.querySelectorAll('#modelList button[data-act]').forEach(function(b){
     b.addEventListener('click',async function(){
@@ -2438,6 +2916,35 @@ async function loadSettings(){
       }
     });
   });
+}
+async function loadRoleRouting(){
+  const el=document.getElementById('roleRoutingBody');if(!el)return;
+  let d;
+  try{ d=await jget('/api/role-routing'); }catch(e){ el.innerHTML='<div class="empty">加载失败</div>'; return; }
+  if(d.need_auth){ el.innerHTML='<div class="empty">需登录后查看</div>'; return; }
+  const roles=d.roles||[], profiles=d.profiles||[], def=d.default_label||'平台默认同事';
+  if(!roles.length){ el.innerHTML='<div class="empty">暂无岗位</div>'; return; }
+  let h='<table class="tbl" style="margin-top:8px"><thead><tr><th>岗位</th><th>负责同事</th><th></th></tr></thead><tbody>';
+  h+=roles.map(function(r){
+    const opts=profiles.map(function(p){
+      const sel=(p.id===r.colleague_id)?' selected':'';
+      const tag=(p.kind==='image')?' 🎨':'';
+      const cfg=p.configured?'':' （未配置密钥）';
+      return '<option value="'+esc(p.id)+'"'+sel+'>'+esc(p.name)+tag+cfg+'</option>';
+    }).join('');
+    return '<tr><td>'+esc(r.name)+'<div class="mi-sub">'+esc(r.desc)+'</div></td>'+
+      '<td><select id="rr-'+esc(r.id)+'" class="sel">'+
+      '<option value=""'+(!r.colleague_id?' selected':'')+'>'+esc(def)+'</option>'+opts+'</select></td>'+
+      '<td><button class="btn sm" data-rid="'+esc(r.id)+'" onclick="saveRoleRouting(this.dataset.rid)">保存</button></td></tr>';
+  }).join('');
+  h+='</tbody></table>';
+  el.innerHTML=h;
+}
+async function saveRoleRouting(roleId){
+  const sel=document.getElementById('rr-'+roleId);if(!sel)return;
+  const r=await postJSON('/api/role-routing',{role_id:roleId,colleague_id:sel.value});
+  if(r.status>=400){alert('保存失败：'+((r.data&&r.data.error)||r.status));return;}
+  loadRoleRouting();
 }
 async function reseed(){
   await jget('/api/seed');location.reload();
@@ -2520,10 +3027,68 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _serve_image(self, name):
+        """直链 data/images/<name>（图像算子 _execute_image 的落盘目录）。
+
+        安全：只接受纯文件名（拒绝任何目录分隔符与 ../ 穿越），且限 .png；
+        与 daemon 的落盘目录一致（均为 data/images/）。
+        """
+        if (not name or "/" in name or "\\" in name
+                or not name.lower().endswith(".png")):
+            self.send_response(400)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write("bad request".encode("utf-8"))
+            return
+        fp = os.path.join("data", "images", name)
+        if not os.path.isfile(fp):
+            self.send_response(404)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write("not found".encode("utf-8"))
+            return
+        try:
+            with open(fp, "rb") as fh:
+                data = fh.read()
+        except OSError as e:
+            self.send_response(500)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(("read error: %s" % e).encode("utf-8"))
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(data)))
+        # 允许前端 <img> 直接加载
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _gov_guard(self, perm):
+        """治理端点统一鉴权（GET/POST 共用）：返回 (sess, err)。
+
+        err 为 (payload_dict, http_status) 或 None。未登录 401、权限不足 403；
+        与 do_POST 的集中式 _PERM_MAP 门形成双保险（避免将来改门时漏掉端点）。
+        """
+        tok = self.headers.get("X-Session-Token", "")
+        sess = self.sessions.verify(tok) if self.sessions else None
+        if not sess:
+            return None, ({"error": "需要登录", "need_auth": True}, 401)
+        ok, err = _rbac.require_permission(sess.get("role"), perm)
+        if not ok:
+            return None, ({"error": err, "need_permission": perm}, 403)
+        return sess, None
+
     def do_GET(self):
         parsed = urlparse(self.path)
-        path = parsed.path
+        # 任务 ID 可能含「/」（如 plan-xxx/finalize），前端 encodeURIComponent 会把它编成 %2F；
+        # 此处必须解码回原样再匹配路由，否则这类任务详情永远 404「任务不存在」。
+        path = unquote(parsed.path)
         qs = parse_qs(parsed.query)
+        # 请求路径兜底：daemon 若意外退出，下次用户请求时自动重生
+        dbp = getattr(Handler, "db_path", None)
+        if dbp:
+            _ensure_daemon_alive(dbp, Handler.project_root)
 
         if path == "/" or path == "/index.html":
             self._html(getattr(Handler, "app_html", None) or APP_HTML)
@@ -2642,6 +3207,93 @@ class Handler(BaseHTTPRequestHandler):
                 inbound["token_hint"] = "登录后才能查看入站令牌（未登录不返回令牌）"
             out["inbound"] = inbound
             return self._json(out)
+        # ============ 安全合规治理层（governance 包） ============
+        if path == "/api/governance/rbac":
+            return self._json(_rbac.describe())
+        if path == "/api/governance/circuit":
+            return self._json(_cb.state())
+        if path == "/api/governance/assets":
+            return self._json({
+                "summary": _assets.summary(),
+                "assets": _assets.list_assets(),
+            })
+        if path == "/api/governance/compliance":
+            return self._json(_compliance.compliance_report(
+                project_root=self.project_root))
+        if path == "/api/governance/interop":
+            try:
+                return self._json({"descriptors": _interop.all_descriptors(
+                    self.project_root)})
+            except Exception as e:  # noqa: BLE001
+                return self._json({"error": str(e)[:300]}, 500)
+        # ---- 阶段 A 新增治理 GET（均走 _gov_guard 读权限门）----
+        if path == "/api/governance/kb/labels":
+            _sess, _deny = self._gov_guard("governance.read")
+            if _deny:
+                return self._json(*_deny)
+            try:
+                return self._json(_kb.KBLabelStore().state())
+            except Exception as e:  # noqa: BLE001
+                return self._json({"error": str(e)[:300]}, 500)
+        if path == "/api/governance/egress":
+            _sess, _deny = self._gov_guard("governance.read")
+            if _deny:
+                return self._json(*_deny)
+            try:
+                return self._json(_kb.EgressApproval().state())
+            except Exception as e:  # noqa: BLE001
+                return self._json({"error": str(e)[:300]}, 500)
+        if path == "/api/governance/interop/peers":
+            _sess, _deny = self._gov_guard("governance.read")
+            if _deny:
+                return self._json(*_deny)
+            try:
+                return self._json(_interop.FederationRegistry().state())
+            except Exception as e:  # noqa: BLE001
+                return self._json({"error": str(e)[:300]}, 500)
+        if path == "/api/governance/etsi":
+            _sess, _deny = self._gov_guard("governance.read")
+            if _deny:
+                return self._json(*_deny)
+            try:
+                # project_root 由 main() 注入；单测直接起 Handler 时可能是 None
+                return self._json(_etsi.describe(
+                    project_root=self.project_root or "."))
+            except Exception as e:  # noqa: BLE001
+                return self._json({"error": str(e)[:300]}, 500)
+        # ---- v2 技能执行可观测（W4：打分瀑布 / 状态热力 / 门禁泳道）----
+        if path in ("/api/governance/skills/decisions",
+                    "/api/governance/skills/state",
+                    "/api/governance/skills/guard",
+                    "/api/governance/skills/summary"):
+            _sess, _deny = self._gov_guard("governance.read")
+            if _deny:
+                return self._json(*_deny)
+            try:
+                return self._json(self._skill_observability(path, qs))
+            except Exception as e:  # noqa: BLE001
+                return self._json({"error": str(e)[:300]}, 500)
+
+        if path == "/api/role-routing":
+            _sess, _deny = self._gov_guard("governance.read")
+            if _deny:
+                return self._json(*_deny)
+            try:
+                from role_routing import load_bindings, colleague_label
+                from model_profiles import ModelProfileStore
+                bindings = load_bindings()
+                _store = ModelProfileStore(data_dir=self.assistant_data_dir or "data")
+                roles = [{"id": r["id"], "name": r["name"], "desc": r["desc"],
+                          "colleague_id": bindings.get(r["id"], "")}
+                         for r in console_api.ROLES]
+                profiles = [{"id": p.id, "name": p.name or p.id,
+                             "kind": getattr(p, "kind", "chat"),
+                             "configured": p.configured}
+                            for p in _store.iter_profiles()]
+                return self._json({"roles": roles, "profiles": profiles,
+                                   "default_label": "平台默认同事"})
+            except Exception as e:  # noqa: BLE001
+                return self._json({"error": str(e)[:300]}, 500)
         if path == "/api/connectors":
             return self._json(console_api.connector_status(
                 self.skills_dir, project_root=self.project_root))
@@ -2676,6 +3328,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "seed only in demo mode"}, 403)
             seed_demo(self.registry.db_path, self.trace.db_path, self.cost.db_path)
             return self._json({"ok": True})
+
+        # ---- 图像算子产出：data/images/ 静态直链（防穿越 + 限扩展名）----
+        if path.startswith("/api/image/"):
+            return self._serve_image(path[len("/api/image/"):])
+
         self._json({"error": "not found", "path": path}, 404)
 
     # ---- 飞书入站中继（诚实边界）----
@@ -2809,6 +3466,58 @@ class Handler(BaseHTTPRequestHandler):
             return d
         except Exception as e:  # noqa: BLE001
             return {"trace_id": tid, "error": str(e)}
+
+    # ---- v2 技能执行可观测数据（W4，只读 TraceStore / SkillStateStore）----
+    def _latest_trace_with(self, kind, limit=60):
+        try:
+            for t in self.trace.list(limit=limit):
+                if any(e.get("kind") == kind
+                       for e in self.trace.events(t["trace_id"])):
+                    return t["trace_id"]
+        except Exception:  # noqa: BLE001
+            pass
+        return ""
+
+    def _skill_observability(self, path, qs):
+        """仪表盘三视图数据：打分瀑布 / 状态热力 / 门禁泳道。只读，不写。"""
+        try:
+            from agentskills.state import SkillStateStore
+            state = SkillStateStore()
+        except Exception as e:  # noqa: BLE001
+            return {"error": "状态存储不可用：%s" % e}
+        if path == "/api/governance/skills/state":
+            return state.snapshot()
+        if path == "/api/governance/skills/decisions":
+            tid = qs.get("trace_id", [""])[0] or self._latest_trace_with("skill_match")
+            if not tid:
+                return {"trace_id": None, "events": [],
+                        "note": "暂无 skill_match 事件（发起一次技能检索任务后出现）"}
+            evs = [e for e in self.trace.events(tid)
+                   if e.get("kind") == "skill_match"]
+            return {"trace_id": tid, "events": evs}
+        if path == "/api/governance/skills/guard":
+            limit = max(1, min(200, int(qs.get("limit", ["30"])[0] or 30)))
+            items = []
+            for t in self.trace.list(limit=60):
+                for e in self.trace.events(t["trace_id"]):
+                    if e.get("kind") == "guard_decision":
+                        items.append(dict(e, trace_id=t["trace_id"]))
+            items.sort(key=lambda x: x.get("ts") or 0, reverse=True)
+            items = items[:limit]
+            by_rule = {}
+            for it in items:
+                k = (it.get("detail") or {}).get("blocked_by") or "-"
+                by_rule[k] = by_rule.get(k, 0) + 1
+            return {"items": items, "by_blocked_by": by_rule, "total": len(items)}
+        if path == "/api/governance/skills/summary":
+            snap = state.snapshot()
+            try:
+                kinds = (self.trace.stats() or {}).get("by_kind", {})
+            except Exception:  # noqa: BLE001
+                kinds = {}
+            return {"skills": snap["skills"], "threshold": snap["threshold"],
+                    "ttl": snap["ttl"], "trace_kinds": kinds}
+        return {"error": "unknown observability path"}
 
     def _cost(self, days=30):
         try:
@@ -3129,12 +3838,54 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        path = parsed.path
+        # 与 do_GET 同理：解码 %2F 等编码字符再匹配路由。
+        path = unquote(parsed.path)
+        # 请求路径兜底：daemon 若意外退出，下次用户请求时自动重生
+        dbp = getattr(Handler, "db_path", None)
+        if dbp:
+            _ensure_daemon_alive(dbp, Handler.project_root)
         try:
             n = int(self.headers.get("Content-Length") or 0)
             payload = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
         except (ValueError, OSError):
             return self._json({"error": "bad request"}, 400)
+
+        # ---- 集中式 RBAC 权限门：高危写操作按角色强校验（身份认证与权限）----
+        # 仅对既有角色已拥有的权限做网关，不会阻断现有会话（如 auditor 默认拥有
+        # task.create / approval.act / compliance.export）。熔断等更高危动作仅在
+        # 新的 /api/governance/* 端点限制为 admin。
+        _PERM_MAP = {
+            "/api/plan/build": "task.create",
+            "/api/plan/preview": "task.create",
+            "/api/tasks/new": "task.create",
+            "/api/approvals/decide": "approval.act",
+            "/api/actions/self-scan": "compliance.export",
+            "/api/actions/cost-snapshot": "compliance.export",
+            "/api/actions/whitepaper": "compliance.export",
+            "/api/actions/closure": "compliance.export",
+            # 阶段 A 新增治理 POST（处理器内还有 _gov_guard 双保险）
+            "/api/governance/kb/label": "kb.label",
+            "/api/governance/egress/request": "egress.request",
+            "/api/governance/egress/decide": "approval.act",
+            # 岗位 ↔ AI 同事绑定（全局配置，限 admin）
+            "/api/role-routing": "routing.write",
+            "/api/governance/interop/register": "interop.write",
+            "/api/governance/interop/discover": "interop.write",
+            "/api/governance/interop/delegate": "interop.write",
+            "/api/governance/etsi/verify": "governance.read",
+            # v2 技能执行可观测
+            "/api/governance/skills/run": "task.create",
+            "/api/governance/skills/state/reset": "governance.emergency",
+        }
+        _need = _PERM_MAP.get(path)
+        if _need:
+            _tok = self.headers.get("X-Session-Token", "")
+            _sess = self.sessions.verify(_tok) if self.sessions else None
+            if not _sess:
+                return self._json({"error": "未登录或会话无效", "need_auth": True}, 401)
+            _ok, _err = _rbac.require_permission(_sess.get("role"), _need)
+            if not _ok:
+                return self._json({"error": _err, "need_permission": _need}, 403)
 
         if path == "/api/updates/settings":
             # 只收 auto_check 布尔开关：不存凭据，也不触发任何写仓库动作
@@ -3241,6 +3992,34 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(out)
 
         # ---- 新建任务（写操作）----
+        # ---- v2 技能检索执行（触发 op=skill 任务，供仪表盘 / API 使用）----
+        if path == "/api/governance/skills/run":
+            tok = self.headers.get("X-Session-Token", "")
+            sess = self.sessions.verify(tok) if self.sessions else None
+            operator = (sess["user"] if sess
+                        else str(payload.get("operator") or "operator"))
+            sp = {k: payload[k] for k in console_api.SKILL_PAYLOAD_KEYS
+                  if k in payload and payload[k] not in (None, "", [], {})}
+            title = str(payload.get("title") or payload.get("query")
+                        or payload.get("skill_hint") or "技能检索任务")
+            res = console_api.create_task(
+                self.registry, self.trace, title,
+                str(payload.get("role") or "auditor"),
+                depends_on=[], template="", priority="normal", note="",
+                operator=operator, skill_payload=sp)
+            return self._json(res, 200 if res.get("ok") else 400)
+
+        if path == "/api/governance/skills/state/reset":
+            skill = str(payload.get("skill") or "")
+            if not skill:
+                return self._json({"error": "skill required"}, 400)
+            try:
+                from agentskills.state import SkillStateStore
+                st = SkillStateStore().reset(skill)
+                return self._json({"ok": True, "skill": skill, "state": st})
+            except Exception as e:  # noqa: BLE001
+                return self._json({"error": str(e)[:300]}, 500)
+
         if path == "/api/tasks/new":
             operator = str(payload.get("operator") or "operator")
             tok = self.headers.get("X-Session-Token", "")
@@ -3415,6 +4194,137 @@ class Handler(BaseHTTPRequestHandler):
             if not ok:
                 return self._json({"error": "审批不存在或已决策"}, 409)
             return self._json({"ok": True, "approval_id": aid, "decision": decision})
+
+        # ============ 安全合规治理层（governance 包）POST ============
+        if path in ("/api/governance/circuit/trip", "/api/governance/circuit/reset"):
+            # 全局紧急熔断：最高危动作，仅 admin（governance.emergency）可操作
+            _t = self.headers.get("X-Session-Token", "")
+            _sess = self.sessions.verify(_t) if self.sessions else None
+            if not _sess:
+                return self._json({"error": "需要登录", "need_auth": True}, 401)
+            _ok, _err = _rbac.require_permission(_sess.get("role"), "governance.emergency")
+            if not _ok:
+                return self._json({"error": _err, "need_permission": "governance.emergency"}, 403)
+            if path.endswith("/trip"):
+                _st = _cb.trip(reason=str(payload.get("reason") or ""),
+                               by=_sess.get("user") or "admin")
+            else:
+                _st = _cb.reset(by=_sess.get("user") or "admin")
+            return self._json({"ok": True, "circuit": _st})
+
+        if path == "/api/governance/assets/discover":
+            _t = self.headers.get("X-Session-Token", "")
+            _sess = self.sessions.verify(_t) if self.sessions else None
+            if not _sess:
+                return self._json({"error": "需要登录", "need_auth": True}, 401)
+            _ok, _err = _rbac.require_permission(_sess.get("role"), "asset.write")
+            if not _ok:
+                return self._json({"error": _err, "need_permission": "asset.write"}, 403)
+            _res = _assets.discover(project_root=self.project_root)
+            return self._json({"ok": True, **_res})
+
+        # ---- 阶段 A 新增治理 POST（集中门 _PERM_MAP + 处理器内 _gov_guard 双保险）----
+        if path == "/api/governance/kb/label":
+            _sess, _deny = self._gov_guard("kb.label")
+            if _deny:
+                return self._json(*_deny)
+            try:
+                rec = _kb.KBLabelStore().set_label(
+                    str(payload.get("category") or ""),
+                    str(payload.get("key") or ""),
+                    str(payload.get("classification") or "internal"),
+                    by=_sess.get("user") or "unknown")
+                return self._json({"ok": True, "label": rec})
+            except (ValueError, OSError, RuntimeError) as e:
+                return self._json({"ok": False, "error": str(e)}, 400)
+
+        if path == "/api/governance/egress/request":
+            _sess, _deny = self._gov_guard("egress.request")
+            if _deny:
+                return self._json(*_deny)
+            try:
+                rec = _kb.EgressApproval().request(
+                    payload.get("item_ref"),
+                    str(payload.get("classification") or "internal"),
+                    str(payload.get("destination") or "*"),
+                    by=_sess.get("user") or "unknown")
+                return self._json({"ok": True, "request": rec})
+            except (ValueError, OSError, RuntimeError) as e:                return self._json({"ok": False, "error": str(e)}, 400)
+
+        if path == "/api/governance/egress/decide":
+            _sess, _deny = self._gov_guard("approval.act")
+            if _deny:
+                return self._json(*_deny)
+            try:
+                res = _kb.EgressApproval().decide(
+                    str(payload.get("req_id") or ""),
+                    bool(payload.get("approve")),
+                    by=_sess.get("user") or "unknown",
+                    role=_sess.get("role"))
+                # 权限不足（如 confidential 需 emergency 级）返回 403，如实不静默
+                return self._json(res, 200 if res.get("ok") else 403)
+            except (OSError, RuntimeError) as e:
+                return self._json({"ok": False, "error": str(e)}, 400)
+
+        # ---- 岗位 ↔ AI 同事绑定（限 admin：routing.write）----
+        if path == "/api/role-routing":
+            _sess, _deny = self._gov_guard("routing.write")
+            if _deny:
+                return self._json(*_deny)
+            try:
+                from role_routing import save_binding
+                role_id = str(payload.get("role_id") or "")
+                colleague_id = str(payload.get("colleague_id") or "")
+                save_binding(role_id, colleague_id)
+                return self._json({"ok": True, "role_id": role_id,
+                                   "colleague_id": colleague_id})
+            except (ValueError, OSError, RuntimeError) as e:
+                return self._json({"ok": False, "error": str(e)}, 400)
+
+        if path in ("/api/governance/interop/register",
+                    "/api/governance/interop/discover",
+                    "/api/governance/interop/delegate"):
+            _sess, _deny = self._gov_guard("interop.write")
+            if _deny:
+                return self._json(*_deny)
+            try:
+                reg = _interop.FederationRegistry()
+                if path.endswith("/register"):
+                    rec = reg.register(
+                        str(payload.get("name") or ""),
+                        str(payload.get("base_url") or ""),
+                        token_ref=str(payload.get("token_ref") or ""),
+                        trust_level=str(payload.get("trust_level") or "untrusted"))
+                    return self._json({"ok": True, "peer": rec})
+                if path.endswith("/discover"):
+                    base = str(payload.get("base_url") or "")
+                    peer_name = str(payload.get("peer_name")
+                                    or payload.get("name") or "")
+                    if not base and peer_name:
+                        base = (reg.get(peer_name) or {}).get("base_url", "")
+                    res = _interop.discover_remote(
+                        base, token=payload.get("token"),
+                        peer_name=peer_name or None, registry=reg)
+                    return self._json(res, 200 if res.get("ok") else 502)
+                # delegate：peer 可为注册名或 {"base_url":..., "name":...}
+                res = _interop.delegate(
+                    payload.get("peer") or {},
+                    str(payload.get("capability") or ""),
+                    params=payload.get("params") or {},
+                    token=payload.get("token"), registry=reg)
+                return self._json(res, 200 if res.get("ok") else 502)
+            except (ValueError, OSError, RuntimeError) as e:
+                return self._json({"ok": False, "error": str(e)}, 400)
+
+        if path == "/api/governance/etsi/verify":
+            _sess, _deny = self._gov_guard("governance.read")
+            if _deny:
+                return self._json(*_deny)
+            try:
+                return self._json({"ok": True,
+                                   "log_integrity": _etsi.verify_chain()})
+            except (OSError, RuntimeError) as e:
+                return self._json({"ok": False, "error": str(e)}, 400)
 
         return self._json({"error": "not found", "path": path}, 404)
 
@@ -3625,6 +4535,26 @@ def _ensure_daemon(db_path, project_root, stale_after=90):
         return False
 
 
+# 请求路径兜底：控制台运行期间若 daemon 意外退出，下次用户请求时自动重生，
+# 避免任务悄悄卡在「已登记」拿不到结果。带锁 + 冷却，防并发竞态与高频刷进程。
+_daemon_ensure_lock = threading.Lock()
+_daemon_ensure_last = 0.0
+_DAEMON_ENSURE_COOLDOWN = 60.0  # 秒：同一进程内最短重生检查间隔
+
+
+def _ensure_daemon_alive(db_path, project_root, stale_after=90):
+    """请求路径调用：若没有存活 daemon 则拉起。冷却 + 锁防重复派发。"""
+    global _daemon_ensure_last
+    now = time.time()
+    with _daemon_ensure_lock:
+        # 冷却期内直接跳过——避免每个请求都建连/枚举 runner，也防并发双拉起
+        if now - _daemon_ensure_last < _DAEMON_ENSURE_COOLDOWN:
+            return False
+        _daemon_ensure_last = now
+    # 锁外执行实际检测/拉起（建连、Popen 较重，不占锁）
+    return _ensure_daemon(db_path, project_root, stale_after=stale_after)
+
+
 def main():
     ap = argparse.ArgumentParser(description="协作审计台 产品前端（仿 WorkBuddy）")
     ap.add_argument("--host", default="127.0.0.1")
@@ -3654,6 +4584,7 @@ def main():
         print("[演示模式] 已生成隔离演示数据：%s / %s / %s" % (reg_db, tr_db, co_db))
 
     Handler.registry = TaskRegistry(db_path=args.db_path, runner_id="console_web")
+    Handler.db_path = args.db_path
     Handler.trace = TraceStore(args.trace_db)
     # 助理远程通道 + 事件推送引擎（**必须先于审批中心创建**——审批中心要注入
     # 事件回调，审批一产生/一决定就能推到飞书等通道）
@@ -3685,7 +4616,17 @@ def main():
         "<script>window.__ROLES__=%s;"
         % json.dumps(console_api.ROLES, ensure_ascii=False), 1)
 
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    class QuietThreadingHTTPServer(ThreadingHTTPServer):
+        """客户端中途断开（关标签页/代理掐线）属正常现象，不刷错误栈、更不能带崩服务。"""
+        daemon_threads = True
+        def handle_error(self, request, client_address):
+            import sys as _sys
+            if _sys.exc_info()[0] in (ConnectionAbortedError, ConnectionResetError,
+                                      BrokenPipeError, TimeoutError):
+                return
+            super().handle_error(request, client_address)
+
+    server = QuietThreadingHTTPServer((args.host, args.port), Handler)
     # 后台守护线程：到期任务真实触发（默认 30s 轮询；<=0 关闭）
     sched_thread = None
     if Handler.scheduler and args.scheduler_interval > 0:

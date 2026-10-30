@@ -209,5 +209,46 @@ class TestBuildWithScheduler(unittest.TestCase):
                          ["p1/analysis"])
 
 
+class TestWebSearchMarking(unittest.TestCase):
+    """planner 建图路径也要透传 web_search 标记（与 create_task 单任务路径一致）。
+
+    否则走 planner 的搜索类需求（"今天重要国际新闻"等）会漏标，退化成模型
+    凭记忆编造——这正是线上一次用户投诉的根因。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="planner_ws_")
+        self.s = DagScheduler(os.path.join(self.tmp, "dag.db"))
+
+    def tearDown(self):
+        self.s.close()
+
+    def test_web_search_true_marks_only_llm_subtasks(self):
+        plan = Planner().decompose("写一份行业分析报告")
+        ids = plan.build(self.s, plan_id="p1", web_search=True)
+        for tid in ids:
+            p = self.s.registry.get_task(tid)["payload"]
+            if p["op"] == "llm":
+                self.assertTrue(p.get("web_search"), "%s 应打标" % tid)
+            else:
+                self.assertFalse(p.get("web_search"), "%s 非 llm 不应打标" % tid)
+
+    def test_web_search_false_leaves_unmarked(self):
+        plan = Planner().decompose("写一份行业分析报告")
+        ids = plan.build(self.s, plan_id="p2", web_search=False)
+        for tid in ids:
+            self.assertFalse(
+                self.s.registry.get_task(tid)["payload"].get("web_search"),
+                "%s 不应被打标" % tid)
+
+    def test_payload_still_has_op(self):
+        # 回归：加 web_search 字段不能把 op 弄丢（白名单透传纪律）
+        plan = Planner().decompose("写一份行业分析报告")
+        ids = plan.build(self.s, plan_id="p3", web_search=True)
+        for tid in ids:
+            p = self.s.registry.get_task(tid)["payload"]
+            self.assertEqual(p["op"], "llm")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

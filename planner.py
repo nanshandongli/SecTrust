@@ -35,6 +35,12 @@ import re
 import sys
 import time
 
+# v2 Skill 检索执行路径的 payload 白名单（与 console_api.SKILL_PAYLOAD_KEYS 一致；
+# 铁律：_payload / decompose / gather_payload 三处都要透传，否则静默丢弃）
+SKILL_PAYLOAD_KEYS = ("query", "skill_hint", "security_tier", "script", "args",
+                      "artifacts", "skill_k", "session_id", "task_type",
+                      "approval_id", "timeout")
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # ---------------------------------------------------------------------------
@@ -543,7 +549,8 @@ class Plan:
 
     # ---- 落库：在 DagScheduler 上建图 ----
     def build(self, scheduler, plan_id: str = None,
-              ballot=None, trace_id: str = None) -> list[str]:
+              ballot=None, trace_id: str = None,
+              web_search: bool = False) -> list[str]:
         """按拓扑序把子任务 add_task 进 scheduler。返回创建的 task_id 列表。
 
         task_id 规则：`{plan_id}/{key}`（plan_id 缺省自动生成）。
@@ -563,6 +570,7 @@ class Plan:
         ballot 参数：开票用的 Ballot 实例（None 时按需临时创建）。
         """
         self.validate()
+        self._web_search = bool(web_search)  # 搜索意图：建图时透传给每个 llm 子任务
         pid = plan_id or f"plan-{int(time.time() * 1000):x}"
         # 拓扑序：按 waves 展开，保证添上游先于下游
         order = [k for wave in self.waves() for k in wave]
@@ -621,6 +629,13 @@ class Plan:
             # 需要人工审批后才算发布——择优与发布审批两条纪律都保留。
             if s.get("approval_action"):
                 gather_payload["approval_action"] = s["approval_action"]
+            # 出域审批门随汇合点继承（与 approval_action 同理）
+            for k in ("kb_refs", "egress_destination"):
+                if s.get(k):
+                    gather_payload[k] = s[k]
+            for k in SKILL_PAYLOAD_KEYS:
+                if s.get(k):
+                    gather_payload[k] = s[k]
             if trace_id:
                 gather_payload["trace_id"] = trace_id
             scheduler.add_task(gid, payload=gather_payload,
@@ -685,6 +700,11 @@ class Plan:
         # 发布审批等：把 stage 声明的审批动作透传给执行层审批门
         if s.get("approval_action"):
             p["approval_action"] = s["approval_action"]
+        # 搜索意图：同一需求的拆解出的 llm 子任务都继承「真实联网搜索」标记，
+        # 否则走 planner 路径的搜索类任务（如"今天重要国际新闻"）会漏标、
+        # 退化成模型凭记忆编造——与 console_api.create_task 的单任务打标保持一致。
+        if getattr(self, "_web_search", False) and p["op"] == "llm":
+            p["web_search"] = True
         # scan op 的扫描目标（已在 decompose 阶段做了 {slot} 填充）
         if s.get("target"):
             p["target"] = s["target"]
@@ -693,6 +713,15 @@ class Plan:
         #   overwrite     —— 允许覆盖已存在文件（迭代开发场景的常态）；
         #   root          —— 落盘根目录，仍受工作区边界约束。
         for k in ("from_upstream", "overwrite", "root", "files"):
+            if s.get(k):
+                p[k] = s[k]
+        # 出域审批门（A1）：显式声明的 KB 引用 / 外发目标必须透传到执行层，
+        # 否则 daemon 看不到、出域门形同虚设（与 _payload 双处白名单纪律一致）。
+        for k in ("kb_refs", "egress_destination"):
+            if s.get(k):
+                p[k] = s[k]
+        # v2：Skill 检索执行路径的字段白名单透传（与 console_api 一致）
+        for k in SKILL_PAYLOAD_KEYS:
             if s.get(k):
                 p[k] = s[k]
         return p
@@ -748,6 +777,10 @@ class Planner:
         if params:
             slots.update({k: v for k, v in params.items()
                           if v not in (None, "", [])})
+        # v2：调用方显式传入的 skill_hint / query（渐进接入：保留模板硬编码
+        # skill 字段作 fallback，只有 op=skill 的 stage 才会消费检索意图）
+        skill_hint = str((params or {}).get("skill_hint")
+                         or (params or {}).get("query") or "")
         fanout = self._detect_fanout(requirement)
         subtasks = []
         for st in tpl["stages"]:
@@ -779,17 +812,46 @@ class Planner:
             for k in ("from_upstream", "overwrite", "root", "files"):
                 if st.get(k):
                     sub[k] = st[k]
+            # 出域审批门（A1）：decompose 不走 _payload，各自白名单构造 subtask，
+            # kb_refs/egress_destination 两处都要透传，否则静默丢弃（踩过坑）。
+            for k in ("kb_refs", "egress_destination"):
+                if st.get(k):
+                    sub[k] = st[k]
+            if skill_hint:
+                sub["skill_hint"] = skill_hint
+            for k in SKILL_PAYLOAD_KEYS:
+                if st.get(k):
+                    sub[k] = st[k]
             subtasks.append(sub)
 
         # ---- 成本路由：先分档，再按档裁剪 ----
         auto_tier, reasons, score = self._estimate_complexity(
             requirement, tpl, slots, fanout, match)
         eff_tier = tier if tier in COMPLEXITY_TIERS else auto_tier
-        subtasks = self._apply_tier(subtasks, eff_tier, slots, requirement)
-        if eff_tier == "simple":
-            # 只有单任务档禁投票：medium 是线性链但叶子仍是唯一交付物，
-            # 并行出多方案完全成立（3 分支 + 汇合点，成本翻倍但可择优）
+
+        # ---- 文生图意图：跳过模板分档，直接单任务 op=image ----
+        # 画图请求不需要拆解成多工序 DAG，也不该被塞进 LLM 文本流水线
+        # （曾因此触发质量门反复打回、升级 needs_human）。原话即绘制提示，
+        # 指令保持原样，不套 _apply_tier 的"单任务直出"重写模板。
+        if self._is_image_request(requirement):
+            subtasks = [{
+                "key": "image",
+                "name": "图像生成",
+                "instruction": requirement.strip(),
+                "skill": "",
+                "model": "",
+                "op": "image",
+                "depends_on": [],
+                "quality": {},
+            }]
+            eff_tier = "simple"
             fanout = 0
+        else:
+            subtasks = self._apply_tier(subtasks, eff_tier, slots, requirement)
+            if eff_tier == "simple":
+                # 只有单任务档禁投票：medium 是线性链但叶子仍是唯一交付物，
+                # 并行出多方案完全成立（3 分支 + 汇合点，成本翻倍但可择优）
+                fanout = 0
 
         if fanout:
             # fanout 只注入到最后交付阶段（无人依赖它的叶子），
@@ -964,6 +1026,20 @@ class Planner:
             if w.lower() in low:
                 return self._FANOUT_N
         return 0
+
+    # 文生图意图关键词（与 console_chat.detect_image_intent 同源，但 planner
+    # 单独持有一份以避免跨模块耦合——两者语义一致，改此需同步改彼）。
+    _IMAGE_INTENT_KW = (
+        "画一张", "画一幅", "画个", "画一", "画图", "绘制", "画张", "帮我画",
+        "生成图片", "生成一张图", "生成图", "画张图", "配图", "插图", "插画",
+        "画海报", "海报", "示意图", "漫画", "头像", "封面图", "生成图像",
+        "文生图", "画个图", "做个图", "出一张图", "出图",
+    )
+
+    def _is_image_request(self, text: str) -> bool:
+        """识别"需要文生图"的意图——命中即让 decompose 产出 op=image 叶子。"""
+        low = (text or "").lower()
+        return any(w in low for w in self._IMAGE_INTENT_KW)
 
 
 # ---------------------------------------------------------------------------
