@@ -487,6 +487,22 @@ class LlmEngine:
         # 一个 review 卡住、后续任务全部排队等待）。
         return self._invoke(profile, messages, timeout=90)
 
+    def speak(self, system_prompt: str, user_prompt: str,
+              model: Optional[str] = None, timeout: int = 90) -> Dict[str, Any]:
+        """以指定同事（profile id）的算力，按给定 system/user 发言。
+
+        与 complete() 的区别：complete() 的 system prompt 是「只能依据 facts 回答」
+        的审计问答，不适合让同事在圆桌里自由表达专业观点；speak() 把 prompt
+        完全交给调用方构造（讨论室会注入岗位视角 + 前序发言），模型只负责表达。
+        model 为空用 active；profile 未配置直接抛 no_llm_available 走诚实降级。
+        """
+        profile = self.profiles.get(model) if model else self.profiles.get_active()
+        if profile is None or not profile.configured:
+            raise RuntimeError("no_llm_available")
+        messages = [ChatMessage(role="system", content=system_prompt),
+                    ChatMessage(role="user", content=user_prompt)]
+        return self._invoke(profile, messages, timeout=timeout)
+
     def _invoke(self, profile, messages, timeout=60) -> Dict[str, Any]:
         provider = _build_provider(profile)
         opts: Dict[str, Any] = {}

@@ -44,6 +44,7 @@ import console_actions
 from model_profiles import ModelProfileStore
 from assistant_channels import AssistantSettings
 from plan_service import PlanService, PlanServiceError
+from discussion import DiscussionService, DiscussionError
 import notify
 from notify import NotifyEngine, parse_command, help_text
 import model_providers
@@ -667,6 +668,7 @@ APP_HTML = """<!doctype html>
     <div class="view" id="view-skillops"></div>
     <div class="view" id="view-governance"></div>
     <div class="view" id="view-settings"></div>
+    <div class="view" id="view-roundtable"></div>
   </div>
 </div>
 
@@ -860,6 +862,7 @@ const NAV_GROUPS=[
    {id:'workspace',label:'工作台',icon:ICON.home},
    {id:'newtask',label:'新建任务',icon:ICON.plus},
    {id:'chat',label:'助理对话',icon:ICON.chat},
+   {id:'roundtable',label:'同事圆桌',icon:ICON.people},
  ]},
  {group:'审计',items:[
    {id:'roster',label:'审计名单',icon:ICON.people},
@@ -908,7 +911,8 @@ function route(){
     library:loadLibrary,overview:loadOverview,chat:loadChat,tasks:loadTasks,
     trace:loadTraceList,cost:loadCost,approvals:loadApprovals,security:loadSecurity,
     governance:loadGovernance,
-    skills:loadSkills,settings:loadSettings,skillops:loadSkillOps};
+    skills:loadSkills,settings:loadSettings,skillops:loadSkillOps,
+    roundtable:loadRoundtable};
   (loaders[v]||loadWorkspace)();
 }
 window.addEventListener('hashchange',route);
@@ -967,6 +971,147 @@ async function doLogout(){
   $('userBtn').style.display='none';
   $('newTaskBtn').style.display='none';
   $('navfoot').textContent='v0.9 · 本地可审计';
+}
+
+// ================= 同事圆桌（任务讨论室） =================
+let RT_STATE={colleagues:null,rooms:[],room:null,openRoom:null};
+function ensureRoundtableStyle(){
+  if(document.getElementById('rt-style'))return;
+  const s=document.createElement('style');s.id='rt-style';
+  s.textContent=
+    '.rt-wrap{display:flex;gap:16px}.rt-col{flex:1;min-width:0}.rt-left{flex:0 0 360px}'+
+    '.rt-new{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px;box-shadow:var(--shadow)}'+
+    '.rt-coll{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 10px}'+
+    '.rt-chip{display:inline-flex;align-items:center;gap:5px;font-size:12px;background:var(--chip);border:1px solid var(--line);border-radius:8px;padding:4px 8px;cursor:pointer}'+
+    '.rt-list .rt-room{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:8px;cursor:pointer;box-shadow:var(--shadow)}'+
+    '.rt-list .rt-room:hover{border-color:var(--accent)}'+
+    '.rt-bubbles{display:flex;flex-direction:column;gap:10px;margin:12px 0}'+
+    '.rt-bubble{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:10px;padding:10px 12px;box-shadow:var(--shadow)}'+
+    '.rt-bubble.absent{border-left-color:var(--warn);opacity:.85}'+
+    '.rt-spk{font-weight:500;margin-bottom:4px;color:var(--txt)}'+
+    '.rt-body{white-space:pre-wrap;line-height:1.6;font-size:13px;color:var(--txt)}'+
+    '.rt-synth{background:var(--card);border:1px solid var(--ok);border-radius:12px;padding:12px 14px;margin:12px 0;box-shadow:var(--shadow)}'+
+    '.rt-synth.absent{border-color:var(--warn)}'+
+    '.rt-rec{margin-top:8px;padding-top:8px;border-top:1px dashed var(--ok);color:var(--txt)}'+
+    '.rt-actions{display:flex;gap:10px;margin-top:10px}'+
+    '.inp{width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:8px;margin-bottom:8px;font-size:13px}'+
+    '.btn{background:var(--chip);color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:8px 14px;cursor:pointer;font-size:13px}'+
+    '.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}'+
+    '.btn:disabled{opacity:.5;cursor:not-allowed}';
+  document.head.appendChild(s);
+}
+async function loadRoundtable(){
+  ensureRoundtableStyle();
+  const v=$('view-roundtable');
+  if(!RT_STATE.colleagues){
+    try{RT_STATE.colleagues=await jget('/api/discussion/colleagues');}catch(e){RT_STATE.colleagues={roles:[],experts:[]};}
+  }
+  let rooms=[];
+  try{const d=await jget('/api/discussion/list');rooms=d.rooms||[];}catch(e){rooms=[];}
+  RT_STATE.rooms=rooms;
+  const c=RT_STATE.colleagues||{roles:[],experts:[]};
+  const collOpts=[...c.roles,...c.experts].map(x=>
+    '<label class="rt-chip"><input type="checkbox" value="'+x.id+'" checked> '+esc(x.name)+
+    ' <span class="muted">'+esc(x.kind)+'</span></label>').join('');
+  v.innerHTML=
+    '<div class="rt-wrap"><div class="rt-col rt-left">'+
+      '<h3>讨论室</h3>'+
+      '<div class="rt-new">'+
+        '<input id="rtTitle" class="inp" placeholder="讨论室标题（可选）">'+
+        '<textarea id="rtObjective" class="inp" rows="3" placeholder="共同任务目标：想一起把什么做好？"></textarea>'+
+        '<div style="font-size:12px;color:var(--sub);margin-bottom:4px">参与同事（默认三角色已勾选）</div>'+
+        '<div class="rt-coll">'+collOpts+'</div>'+
+        '<button id="rtCreate" class="btn primary">创建讨论室</button>'+
+        '<div id="rtNewMsg" class="muted" style="margin-top:6px"></div>'+
+      '</div>'+
+      '<div class="rt-list" id="rtList">'+
+        (rooms.length?rooms.map(r=>'<div class="rt-room" data-room="'+r.room_id+'"><b>'+esc(r.title||r.objective)+'</b>'+
+          '<div class="muted">'+esc((r.objective||'').slice(0,60))+' · '+(r.status||'')+
+          (r.task_link?' · 已落任务':'')+'</div></div>').join(''):'<div class="muted">还没有讨论室</div>')+
+      '</div></div>'+
+      '<div class="rt-col rt-right" id="rtRoom"><div class="muted">从左侧选择一个讨论室，或新建一个开始圆桌讨论。</div></div></div>';
+  v.querySelectorAll('.rt-room').forEach(el=>el.addEventListener('click',()=>openRoundtable(el.dataset.room)));
+  const bc=$('rtCreate');if(bc)bc.addEventListener('click',createRoundtable);
+}
+async function createRoundtable(){
+  const obj=$('rtObjective').value.trim();
+  if(!obj){$('rtNewMsg').textContent='请填写共同任务目标';return;}
+  const parts=[...document.querySelectorAll('.rt-coll input:checked')].map(i=>i.value);
+  if(!parts.length){$('rtNewMsg').textContent='至少选择一位参与同事';return;}
+  $('rtNewMsg').textContent='创建中…';
+  try{
+    const d=await postJSON('/api/discussion/create',{title:$('rtTitle').value.trim(),objective:obj,participants:parts});
+    if(!d.ok){$('rtNewMsg').textContent=d.error||'创建失败';return;}
+    $('rtNewMsg').textContent='已创建，进入讨论…';
+    await loadRoundtable();openRoundtable(d.room.room_id);
+  }catch(e){$('rtNewMsg').textContent='创建失败：'+e;}
+}
+async function openRoundtable(roomId){
+  RT_STATE.openRoom=roomId;
+  const v=$('rtRoom');let d;
+  try{d=await jget('/api/discussion/detail?room='+encodeURIComponent(roomId));}
+  catch(e){v.innerHTML='<div class="bad">加载失败：'+esc(e.message||String(e))+'</div>';return;}
+  RT_STATE.room=d;renderRoom(d);
+}
+function renderRoom(d){
+  const v=$('rtRoom');const room=d.room,turns=d.turns||[],synth=d.synthesis;
+  const parts=(room.participants||[]).map(p=>esc(p.name)+(p.is_expert?'（专家）':'')).join('、');
+  const bubbles=turns.map(t=>{
+    const meta=t.available?('第'+t.round+'轮 · '+esc(t.role_label)+(t.model?' · '+esc(t.model):'')):'第'+t.round+'轮 · 缺席';
+    return '<div class="rt-bubble'+(t.available?'':' absent')+'"><div class="rt-spk">'+esc(t.speaker_name)+
+      ' <span class="muted">'+meta+'</span></div><div class="rt-body">'+esc(t.content||'')+'</div></div>';
+  }).join('');
+  let synthHtml='';
+  if(synth){
+    synthHtml='<div class="rt-synth'+(synth.available?'':' absent')+'"><h4 style="margin:0 0 6px">综合共识'+
+      (synth.available?'':'（算力不可用，未生成）')+'</h4><div class="rt-body">'+esc(synth.content||'')+'</div>'+
+      (synth.recommended_approach?'<div class="rt-rec"><b>建议落地方案：</b>'+esc(synth.recommended_approach)+'</div>':'')+'</div>';
+  }
+  v.innerHTML=
+    '<div><h3>'+esc(room.title||room.objective)+'</h3>'+
+      '<div class="muted">目标：'+esc(room.objective)+'</div>'+
+      '<div class="muted">参与：'+parts+'</div></div>'+
+    '<div class="rt-bubbles">'+(bubbles||'<div class="muted">还没有发言，点「下一轮」开始。</div>')+'</div>'+
+    synthHtml+
+    '<div class="rt-actions">'+
+      '<button class="btn" id="rtNext">下一轮</button>'+
+      '<button class="btn" id="rtSynth">综合共识</button>'+
+      '<button class="btn primary" id="rtToTask"'+(synth&&synth.available?'':' disabled')+'>落到任务</button>'+
+    '</div><div id="rtMsg" class="muted" style="margin-top:6px"></div>';
+  const bn=$('rtNext');if(bn)bn.addEventListener('click',runRound);
+  const bs=$('rtSynth');if(bs)bs.addEventListener('click',doSynthesize);
+  const bt=$('rtToTask');if(bt)bt.addEventListener('click',doToTask);
+}
+async function runRound(){
+  const roomId=RT_STATE.openRoom;if(!roomId)return;
+  $('rtMsg').textContent='讨论中…（多位同事依次发言，请稍候）';
+  try{
+    const d=await postJSON('/api/discussion/round',{room:roomId,rounds:1});
+    if(!d.ok){$('rtMsg').textContent=d.error||'发言失败';return;}
+    const room=await jget('/api/discussion/detail?room='+encodeURIComponent(roomId));
+    RT_STATE.room=room;renderRoom(room);$('rtMsg').textContent='第 '+d.round+' 轮完成，共 '+d.turns.length+' 条发言。';
+  }catch(e){$('rtMsg').textContent='发言失败：'+e;}
+}
+async function doSynthesize(){
+  const roomId=RT_STATE.openRoom;if(!roomId)return;
+  $('rtMsg').textContent='综合中…';
+  try{
+    const d=await postJSON('/api/discussion/synthesize',{room:roomId});
+    if(!d.ok){$('rtMsg').textContent=d.error||'综合失败';return;}
+    const room=await jget('/api/discussion/detail?room='+encodeURIComponent(roomId));
+    RT_STATE.room=room;renderRoom(room);
+    $('rtMsg').textContent=d.available?('综合完成（主持人：'+d.moderator+'）'):'综合环节算力不可用，发言已保留。';
+  }catch(e){$('rtMsg').textContent='综合失败：'+e;}
+}
+async function doToTask(){
+  const roomId=RT_STATE.openRoom;if(!roomId)return;
+  $('rtMsg').textContent='正在把共识落到任务…';
+  try{
+    const d=await postJSON('/api/discussion/to_task',{room:roomId});
+    if(!d.ok){$('rtMsg').textContent=d.error||'落任务失败';return;}
+    $('rtMsg').textContent='已生成计划：'+(d.plan_id||'')+'，去「任务中心」查看执行。';
+    if(d.plan_id)go('tasks');
+  }catch(e){$('rtMsg').textContent='落任务失败：'+e;}
 }
 
 // ---------------- 检查更新（入口在左下方 nav-foot） ----------------
@@ -3168,6 +3313,19 @@ class Handler(BaseHTTPRequestHandler):
         # ---- 拆解模板清单（前端展示"这类需求会被拆成什么样"）----
         if path == "/api/plan/templates":
             return self._json({"templates": self._plan_service().templates()})
+        # ---- 同事圆桌（任务讨论室）----
+        if path == "/api/discussion/list":
+            return self._json({"rooms": self._discussion_service()._store.list_rooms()})
+        if path == "/api/discussion/colleagues":
+            return self._json(self._discussion_service().catalog())
+        if path == "/api/discussion/detail":
+            rid = (qs.get("room") or [None])[0]
+            if not rid:
+                return self._json({"error": "room 参数必填"}, 400)
+            try:
+                return self._json(self._discussion_service().room_view(rid))
+            except DiscussionError as e:
+                return self._json({"error": str(e)}, 404)
         # ---- 工作台新增 ----
         if path == "/api/roles":
             return self._json({"roles": console_api.ROLES})
@@ -3800,6 +3958,15 @@ class Handler(BaseHTTPRequestHandler):
                 llm=LlmEngine(self.model_profiles))
         return Handler._chat
 
+    def _discussion_service(self):
+        """同事圆桌服务（懒加载单例）——与控制台共用同一份算力模型配置。"""
+        if getattr(Handler, "_discussion", None) is None:
+            from console_chat import LlmEngine
+            Handler._discussion = DiscussionService(
+                profiles=self.model_profiles,
+                llm=LlmEngine(self.model_profiles))
+        return Handler._discussion
+
     def _updater(self):
         """「检查更新」检查器（懒加载单例）：本地 git 仓库 vs 远端，只读。"""
         if getattr(Handler, "_update_checker", None) is None:
@@ -3888,6 +4055,11 @@ class Handler(BaseHTTPRequestHandler):
             # v2 技能执行可观测
             "/api/governance/skills/run": "task.create",
             "/api/governance/skills/state/reset": "governance.emergency",
+            # 同事圆桌（任务讨论室）：建室/发言轮/综合/落任务 均属任务协作，限 task.create
+            "/api/discussion/create": "task.create",
+            "/api/discussion/round": "task.create",
+            "/api/discussion/synthesize": "task.create",
+            "/api/discussion/to_task": "task.create",
         }
         _need = _PERM_MAP.get(path)
         if _need:
@@ -4006,6 +4178,53 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001
                 return self._json({"ok": False, "error": "拆解失败：%s" % e}, 500)
             return self._json(out)
+
+        # ---- 同事圆桌（任务讨论室）----
+        if path == "/api/discussion/create":
+            try:
+                room = self._discussion_service().create_room(
+                    title=str(payload.get("title") or ""),
+                    objective=str(payload.get("objective") or ""),
+                    specs=list(payload.get("participants") or []))
+                return self._json({"ok": True, "room": room})
+            except DiscussionError as e:
+                return self._json({"ok": False, "error": str(e)}, 400)
+            except Exception as e:  # noqa: BLE001
+                return self._json({"ok": False, "error": "建室失败：%s" % e}, 500)
+        if path == "/api/discussion/round":
+            rid = str(payload.get("room") or "")
+            rounds = int(payload.get("rounds") or 1)
+            try:
+                res = self._discussion_service().run_round(rid, rounds=rounds)
+                return self._json({"ok": True, **res})
+            except DiscussionError as e:
+                return self._json({"ok": False, "error": str(e)}, 400)
+            except Exception as e:  # noqa: BLE001
+                return self._json({"ok": False, "error": "发言轮失败：%s" % e}, 500)
+        if path == "/api/discussion/synthesize":
+            rid = str(payload.get("room") or "")
+            mod = payload.get("moderator") or None
+            try:
+                res = self._discussion_service().synthesize(rid, moderator_spec=mod)
+                return self._json({"ok": True, **res})
+            except DiscussionError as e:
+                return self._json({"ok": False, "error": str(e)}, 400)
+            except Exception as e:  # noqa: BLE001
+                return self._json({"ok": False, "error": "综合失败：%s" % e}, 500)
+        if path == "/api/discussion/to_task":
+            rid = str(payload.get("room") or "")
+            operator = str(payload.get("operator") or "operator")
+            tok = self.headers.get("X-Session-Token", "")
+            sess = self.sessions.verify(tok) if self.sessions else None
+            if sess:
+                operator = sess["user"]
+            try:
+                res = self._discussion_service().to_task(rid, operator=operator)
+                return self._json({"ok": True, **res})
+            except DiscussionError as e:
+                return self._json({"ok": False, "error": str(e)}, 400)
+            except Exception as e:  # noqa: BLE001
+                return self._json({"ok": False, "error": "落任务失败：%s" % e}, 500)
 
         # ---- 显式「运行 / 开始执行」入口 ----
         # 平台本来会在建图后由 daemon 自动认领执行；但用户反馈「没有运行开始
