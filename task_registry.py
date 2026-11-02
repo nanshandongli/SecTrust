@@ -249,6 +249,29 @@ class TaskRegistry:
 
         self._retry_write(op)
 
+    def reset_stuck_running(self, cutoff_ts: float) -> int:
+        """回收因执行器进程意外退出而遗留的 running 僵尸任务。
+
+        返回被重置为 registered 的任务数。执行器是单进程单线程：正常处理中
+        任务会频繁落终态；一旦进程被回收（会话重置/Kill），它持有的 running
+        任务永远不会再被认领——这正是"任务卡 running"的根因。把运行时间远超
+        单次任务上限（updated_at 早于 cutoff_ts）的 running 任务重置回
+        registered，交由后续 claim_ready 重新认领重试。
+
+        注意：本方法只动"陈旧"的 running 任务，刚认领、正在处理的任务
+        updated_at 很新，不会被误回收。
+        """
+
+        def op(conn):
+            cur = conn.execute(
+                "UPDATE tasks SET status='registered', updated_at=? "
+                "WHERE status='running' AND updated_at < ?",
+                (time.time(), cutoff_ts),
+            )
+            return cur.rowcount
+
+        return self._retry_write(op) or 0
+
     def set_payload(self, task_id, payload: dict):
         """整写任务 payload（如执行层把 shell 任务自动升级为 high_risk 后
         回写 approval_action，让审计/UI 看到"高危待审批"）。幂等、任务不存在则跳过。"""

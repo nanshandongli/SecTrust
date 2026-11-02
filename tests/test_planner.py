@@ -141,12 +141,24 @@ class TestPlan(unittest.TestCase):
             Planner().decompose("   ")
 
     def test_needs_input_marked_in_payload(self):
-        # 主题**抽不到**时，instruction 里必须留 "<待补:topic>" 占位，
-        # 交人补——绝不自动编一个值填进去（planner 的核心纪律）。
-        # 用「行业分析报告」：命中 research_report 模板，但没有任何
-        # 可抽取主题的句式（不能写"写一份X"，那个现在能抽到了）。
+        # 修复「计划永不产出」缺陷后：抽不到主题句式的自由文本直接用原话作 topic，
+        # 不再留 <待补:topic> 占位（否则 daemon 按诚实边界拒发模型、计划永不出结果）。
+        # 用「行业分析报告」：命中 research_report 模板，没有可抽取主题的句式，
+        # 但整句即主题，fallback 用原话——既不留占位符、也不编造主题。
         plan = Planner().decompose("行业分析报告")
-        self.assertTrue(any("<待补:topic>" in s["instruction"]
+        self.assertFalse(any("<待补:topic>" in s["instruction"]
+                            for s in plan.subtasks))
+        # 核心纪律仍在：topic 取自用户原话（去空白），不是凭空编的值
+        self.assertTrue(all("行业分析报告" in s["instruction"]
+                            for s in plan.subtasks))
+
+    def test_unextractable_slot_not_fabricated(self):
+        # 真正抽不到、且不能拿原话顶替的槽位（如渠道）仍须标 <待补>，
+        # 交人补——绝不自动编一个渠道填进去（planner 的核心纪律）。
+        plan = Planner().decompose("做一场新品营销活动")
+        self.assertFalse(any("<待补:topic>" in s["instruction"]
+                            for s in plan.subtasks))
+        self.assertTrue(any("<待补:channels>" in s["instruction"]
                             for s in plan.subtasks))
 
     def test_topic_from_write_pattern(self):

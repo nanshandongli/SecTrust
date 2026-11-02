@@ -1214,10 +1214,21 @@ async function previewPlan(){
       h+='<div class="mt" style="color:var(--warn);margin-top:8px">注意：有参数抽不出来（'+esc(d.needs_input.join('、'))+'），建图后这些工序会如实失败并提示缺参，不会让模型乱猜。</div>';
     }
     h+='<div style="margin-top:12px"><button class="btn" id="ntBuild">按此建图并创建任务</button>'+
+       '<button class="btn ghost" id="ntRun" style="margin-left:8px">▶ 运行 / 开始执行</button>'+
        '<div class="form-ok" id="ntBuildOk"></div></div></div>';
     out.innerHTML=h;
     $('ntBuild').addEventListener('click',buildPlan);
+    $('ntRun').addEventListener('click',runPlan);
   }catch(e){$('ntPlanErr').textContent='请求失败：'+e;out.innerHTML='';}
+}
+async function runPlan(){
+  const btn=$('ntRun'); if(btn) btn.disabled=true;
+  try{
+    const r=await fetch('/api/plan/run',{method:'POST',headers:authHeaders(),body:'{}'});
+    const d=await r.json();
+    $('ntBuildOk').textContent=(d.ok?(d.daemon_alive?'执行器已在线，计划会自动认领执行':'已拉起执行器，稍候刷新任务中心'):('运行失败：'+(d.error||'')));
+  }catch(e){$('ntBuildOk').textContent='运行请求失败：'+e;}
+  finally{if(btn) btn.disabled=false;}
 }
 async function buildPlan(){
   const req=window.__lastPlan||$('ntReq').value.trim();
@@ -1800,14 +1811,14 @@ async function loadChat(){
         body:JSON.stringify({question:q.trim(),history:chatHistory.slice(-6),
           model:(document.getElementById('chatModel')?document.getElementById('chatModel').value:'')})});
       const d=await r.json();
-      holder.querySelector('.mtext').innerHTML=String(d.answer||d.error||'无响应').replace(/\\n/g,'<br>');
+      holder.querySelector('.mtext').innerHTML=esc(String(d.answer||d.error||'无响应')).replace(/\\n/g,'<br>');
       const meta=[];
       if(d.engine==='rule') meta.push('引擎：<b>规则引擎</b>（确定性，零幻觉）');
       else if(d.engine==='llm') meta.push('引擎：<b>LLM</b> '+(d.model||''));
       else if(d.engine==='hint') meta.push('引擎：<b>意图提示</b>（已识别为执行任务 → 新建任务）');
       else meta.push('引擎：<b>不可用</b>');
-      if(d.basis&&d.basis.length) meta.push('依据：'+d.basis.join('、'));
-      if(d.next_steps&&d.next_steps.length) meta.push('下一步：'+d.next_steps.join('；'));
+      if(d.basis&&d.basis.length) meta.push('依据：'+d.basis.map(esc).join('、'));
+      if(d.next_steps&&d.next_steps.length) meta.push('下一步：'+d.next_steps.map(esc).join('；'));
       holder.innerHTML='<div class="mtext">'+holder.querySelector('.mtext').innerHTML+'</div>'+
         '<div class="mmeta">'+meta.join(' · ')+'</div>';
       chatHistory.push({role:'assistant',content:String(d.answer||'')});
@@ -3857,6 +3868,7 @@ class Handler(BaseHTTPRequestHandler):
         _PERM_MAP = {
             "/api/plan/build": "task.create",
             "/api/plan/preview": "task.create",
+            "/api/plan/run": "task.create",
             "/api/tasks/new": "task.create",
             "/api/approvals/decide": "approval.act",
             "/api/actions/self-scan": "compliance.export",
@@ -3891,6 +3903,10 @@ class Handler(BaseHTTPRequestHandler):
             # 只收 auto_check 布尔开关：不存凭据，也不触发任何写仓库动作
             return self._json(self._updater().save_settings(payload))
         if path == "/api/chat":
+            tok = self.headers.get("X-Session-Token", "")
+            sess = self.sessions.verify(tok) if self.sessions else None
+            if not sess:
+                return self._json({"error": "需要登录后才能使用对话"}, 401)
             question = str(payload.get("question") or "")
             history = payload.get("history") or []
             if not isinstance(history, list):
@@ -3990,6 +4006,31 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001
                 return self._json({"ok": False, "error": "拆解失败：%s" % e}, 500)
             return self._json(out)
+
+        # ---- 显式「运行 / 开始执行」入口 ----
+        # 平台本来会在建图后由 daemon 自动认领执行；但用户反馈「没有运行开始
+        # 执行这个按键」——这里补一个显式按钮对应的后端：确保执行 daemon 存活
+        # （没有就拉起），并回报 daemon 心跳状态，让用户有可见的「开始执行」控制。
+        if path == "/api/plan/run":
+            dbp = getattr(Handler, "db_path", None)
+            started = False
+            if dbp:
+                started = _ensure_daemon_alive(dbp, Handler.project_root)
+            # 回报 daemon 是否在线（读 runners 表，非 stale 即视为存活）
+            alive = False
+            try:
+                _probe = TaskRegistry(db_path=dbp, runner_id="plan_run_probe")
+                _rs = _probe.list_runners(stale_after=90)
+                alive = any(r.get("status") != "stale"
+                            and r.get("runner_id") != "console_web"
+                            for r in _rs)
+                _probe.close()
+            except Exception:  # noqa: BLE001
+                alive = False
+            return self._json({"ok": True, "daemon_alive": alive,
+                               "daemon_started": started,
+                               "message": ("执行器已在线，计划会由 daemon 自动认领执行"
+                                           if alive else "已尝试拉起执行器，请稍候刷新任务中心")})
 
         # ---- 新建任务（写操作）----
         # ---- v2 技能检索执行（触发 op=skill 任务，供仪表盘 / API 使用）----

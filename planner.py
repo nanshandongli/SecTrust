@@ -111,6 +111,17 @@ def extract_slots(text: str) -> dict:
                 slots["topic"] = m.group(1).strip()
                 break
 
+    # 自由文本兜底：**正则抽不到主题时，用「去空白的原话」作 topic**。
+    # 不编造主题——直接用用户给的原话（仅把空白折叠成单空格，保持可读性）。
+    # 这是「计划永不产出」真缺陷的修复点：此前自由文本（小说片段 / 独白 /
+    # 口语需求）抽不出 topic → understand 指令残留 <待补:topic> → daemon 按
+    # 诚实边界拒发模型 → understand failed → 下游 understand→draft→review→
+    # finalize 级联 blocked，计划在 AI 同事平台永远看不到结果。
+    if "topic" not in slots:
+        fb = re.sub(r"\s+", " ", text).strip()
+        if fb:
+            slots["topic"] = fb
+
     # 预算
     m = _BUDGET_RE.search(text)
     if m:

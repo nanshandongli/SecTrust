@@ -161,11 +161,17 @@ class PlanServiceTest(unittest.TestCase):
             self.svc.build("")
 
     def test_needs_input_reported_not_fabricated(self):
-        """抽不到主题时必须标"待补"，绝不自动编一个值。"""
+        """自由文本抽不到主题句式时，topic 直接取原话（不标待补、也不编造）；
+        真正抽不到且无原话可顶替的槽位（如渠道）仍须标"待补"。"""
         v = self.svc.preview("行业分析报告")
-        self.assertIn("topic", v["needs_input"])
-        self.assertTrue(any("<待补:topic>" in s["instruction"]
+        self.assertNotIn("topic", v["needs_input"])
+        self.assertTrue(v["ok"])
+        # 印证 instruction 里没有 <待补:topic> 占位（否则 daemon 会拒发模型）
+        self.assertFalse(any("<待补:topic>" in s["instruction"]
                             for s in v["subtasks"]))
+        # 反例：渠道这类无法用原话顶替的槽位仍被正确标出（不编造）
+        v2 = self.svc.preview("做一场新品营销活动")
+        self.assertIn("channels", v2["needs_input"])
 
     def test_templates_listed(self):
         tpls = self.svc.templates()

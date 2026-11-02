@@ -481,8 +481,11 @@ class LlmEngine:
             sys_prompt += "\n\n<background>\n" + context + "\n</background>"
         messages = [ChatMessage(role="system", content=sys_prompt),
                     ChatMessage(role="user", content=instruction)]
-        # 干活要给足篇幅（审计问答 1024 tokens 不够写一节内容）
-        return self._invoke(profile, messages, timeout=180)
+        # 干活要给足篇幅（审计问答 1024 tokens 不够写一节内容）。
+        # 超时 90s：模型真卡住时尽快失败并让任务走重试/needs_human，
+        # 而不是让单条调用把整条 daemon 串行链堵死（曾因 180s 超时导致
+        # 一个 review 卡住、后续任务全部排队等待）。
+        return self._invoke(profile, messages, timeout=90)
 
     def _invoke(self, profile, messages, timeout=60) -> Dict[str, Any]:
         provider = _build_provider(profile)

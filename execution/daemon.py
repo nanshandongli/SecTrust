@@ -100,6 +100,9 @@ class ExecutionDaemon:
         cluster=None,
         profiles=None,
         llm_engine_factory=None,
+        llm_max_retries: int = None,
+        reaper_enabled: bool = True,
+        stuck_limit_s: float = None,
     ):
         self.reg = TaskRegistry(db_path=db_path)
         self.sched = DagScheduler(db_path=db_path, registry=self.reg)
@@ -126,6 +129,20 @@ class ExecutionDaemon:
         self._current_claim = None    # (task_id, token)：处理中的跨机任务锁
         self._stop = threading.Event()
         self._processed = []          # 本 daemon 处理过的 (task_id, status)
+        # 模型调用重试上限（应对 provider 偶发 read timeout / 429 过载）：
+        # 默认 1（不重试，fail-fast）；设 SECTRUST_LLM_MAX_RETRIES 可增。
+        # 注意 daemon 是单线程，重试会阻塞整条链，故默认克制。
+        if llm_max_retries is None:
+            self.llm_max_retries = max(1, int(os.environ.get("SECTRUST_LLM_MAX_RETRIES", "1")))
+        else:
+            self.llm_max_retries = max(1, int(llm_max_retries))
+        # 僵尸任务回收：执行器进程意外退出会遗留 running 任务永不认领，本开关
+        # 让常驻循环定期把陈旧 running 任务重置回 registered 重新认领。
+        self.reaper_enabled = reaper_enabled
+        if stuck_limit_s is None:
+            self.stuck_limit_s = float(os.environ.get("SECTRUST_STUCK_TASK_LIMIT", "300"))
+        else:
+            self.stuck_limit_s = float(stuck_limit_s)
 
     # ---------------- 审批门：返回 (allowed, reason) ----------------
     def _check_approval(self, task_id: str, action: str) -> tuple:
@@ -542,25 +559,36 @@ class ExecutionDaemon:
                                  "（网络/代理不可达或检索结果均不相关，已被诚实过滤）。"
                                  "请勿编造具体日期、事件或数据；"
                                  "若无可依据的事实，请如实说明无法检索到实时信息。）")
-        try:
-            out = engine.execute(final_instruction, ctx, model=model_id)
-        except RuntimeError as e:
+        out = None
+        last_exc = None
+        for _attempt in range(1, self.llm_max_retries + 1):
+            try:
+                out = engine.execute(final_instruction, ctx, model=model_id)
+                last_exc = None
+                break
+            except Exception as e:  # noqa: BLE001 - 统一兜底，重试后才落失败
+                last_exc = e
+                if _attempt < self.llm_max_retries:
+                    # 短暂退避后重试：应对 provider 偶发 read timeout / 429 过载
+                    time.sleep(min(2 * _attempt, 10))
+                    continue
+        # 模型调用失败（含重试仍失败）：如实带回 executed_by，
+        # 让前端展示"本次尝试了哪位同事"。
+        if last_exc is not None:
             # **必须区分两类 RuntimeError**（踩过坑）：provider 层的 HTTP 错误
             # （429 过载 / 401 鉴权失败）也是 RuntimeError，若一律说成
             # "未配置模型"，排查方向会被带偏——用户会去反复换密钥。
             # 只有 LlmEngine 的哨兵串 no_llm_available 才代表"没配模型"。
-            # 即使失败也如实带回 executed_by，让前端展示"本次尝试了哪位同事"。
             _fail = {"executed_by": (chosen.name or chosen.id) if chosen else None,
-                     "intended_colleague": intended or None}
-            msg = str(e)
+                     "intended_colleague": intended or None,
+                     "retry_attempts": self.llm_max_retries}
+            msg = str(last_exc)
             if "no_llm_available" in msg:
                 return False, _fail, ("无可用算力模型（未配置模型或缺少 API Key）"
                                       "——到「设置」里配置模型后重试")
-            return False, _fail, "模型调用失败：%s" % msg
-        except Exception as e:         # noqa: BLE001
-            _fail = {"executed_by": (chosen.name or chosen.id) if chosen else None,
-                     "intended_colleague": intended or None}
-            return False, _fail, "模型调用失败: %s" % e
+            suffix = ("（已重试 %d 次仍失败）" % self.llm_max_retries
+                      if self.llm_max_retries > 1 else "")
+            return False, _fail, "模型调用失败：%s%s" % (msg, suffix)
         answer = str(out.get("answer") or "")
         if not answer.strip():
             return False, {}, "模型返回空内容"
@@ -630,10 +658,13 @@ class ExecutionDaemon:
         try:
             from governance import content_guard as _cg
             gp = _cg.guard_pipeline(prompt, level="medium")
-            if gp["block"]:
+            inj_hits = gp.get("input_hits") or []
+            # image 场景零容忍任何注入/越狱意图（prompt 即内容，无语义兜底）：
+            # 仅 high 级才 block 会漏掉"忽略以上系统指令"等 medium 注入。
+            if gp["block"] or inj_hits:
                 return False, {}, ("内容防护拦截：绘制请求含提示注入/越狱意图"
                                    "（规则引擎前置校验命中 %s）"
-                                   % "、".join(h["rule"] for h in gp["input_hits"]))
+                                   % "、".join(h["rule"] for h in inj_hits))
             safe_prompt = gp["masked"]
         except Exception:  # noqa: BLE001 - 校验异常不阻断正常绘图
             pass
@@ -1235,6 +1266,29 @@ class ExecutionDaemon:
             self._notify_terminal(task_id, status, payload)
         return out
 
+    def _reap_stuck_tasks(self):
+        """回收因执行器进程意外退出而遗留的 running 僵尸任务。
+
+        执行器是单进程单线程：正常处理中任务会频繁落终态；一旦进程被回收
+        （会话重置/Kill），它持有的 running 任务永远不会再被认领——这正是
+        "104 个任务卡 running" 的根因。本方法把"运行时间远超单次任务上限"
+        （updated_at 早于 now - stuck_limit_s）的 running 任务重置回 registered，
+        交由后续 claim_ready 重新认领重试。
+
+        正在本进程内处理（_current_claim 非空）的任务不会被回收——此时
+        updated_at 尚新，本就不应动；双重保险。
+        """
+        if self._current_claim is not None:
+            return  # 自己正处理一个任务，绝不动它
+        try:
+            cutoff = time.time() - self.stuck_limit_s
+            n = self.reg.reset_stuck_running(cutoff)
+            if n:
+                print("[exec:%s] 回收僵尸 running 任务：%d 个重置为 registered"
+                      % (self.reg.runner_id, n))
+        except Exception as e:  # noqa: BLE001 - 回收失败不拖垮主循环
+            print("[exec:%s] 回收僵尸任务失败: %s" % (self.reg.runner_id, e))
+
     def _notify_terminal(self, task_id: str, status: str, payload: dict):
         """把任务终态推送到已订阅的远程通道。**异常一律吞掉**（旁路纪律）。"""
         try:
@@ -1255,6 +1309,11 @@ class ExecutionDaemon:
             while not self._stop.is_set():
                 if deadline and time.time() >= deadline:
                     break
+                try:
+                    if self.reaper_enabled:
+                        self._reap_stuck_tasks()
+                except Exception:  # noqa: BLE001 - 回收失败不拖垮主循环
+                    pass
                 try:
                     self.run_once(max_tasks=4)
                 except Exception as e:      # 单批异常不拖垮常驻进程

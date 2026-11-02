@@ -104,6 +104,10 @@ py-modules = [
     "trace",
     "updates",
     "voice",
+    "ensure_console",
+    "launch_platform",
+    "repair_and_rebuild",
+    "watchdog_loop",
 ]
 # 子包（含 __init__.py 的全部目录）
 packages = [
